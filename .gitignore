@@ -1,0 +1,5 @@
+node_modules/
+target/
+desktop/dist/
+desktop/src-tauri/target/
+*.log
