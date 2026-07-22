@@ -1,12 +1,28 @@
-# tic-tac-toe — justfile
-# Design phase: recipes are placeholders until M1 scaffolds the app.
+# tic-tac-toe — justfile (Stage 0: imported Buzz desktop tree, see FORK.md)
 
 default:
     @just --list
 
-# Full validation (fmt, lint, build, test, doc) — wired at M1
-check:
-    @echo "design phase — no code yet; see docs/design/tic-tac-toe-v1.md"
+# Install JS workspace deps (pnpm 11.4.0 via corepack)
+install:
+    corepack pnpm install --no-frozen-lockfile
+
+# Typecheck + unit tests + lint check for the desktop app
+desktop-check:
+    cd desktop && corepack pnpm typecheck
+    cd desktop && corepack pnpm test
+    cd desktop && corepack pnpm lint
+
+# Playwright smoke suite in mock mode (no relay, no daemon)
+desktop-smoke:
+    cd desktop && corepack pnpm build:e2e && corepack pnpm exec playwright test --project=smoke
+
+# Check the four imported Rust crates against the pruned workspace
+crates-check:
+    cargo check -p buzz-core -p buzz-persona -p buzz-sdk -p buzz-agent
+
+# Full validation
+check: desktop-check crates-check
 
 # Render the design doc tree
 docs:

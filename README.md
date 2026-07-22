@@ -49,8 +49,15 @@ end-to-end.
 
 ## Status
 
-Design phase. The load-bearing dependency is
-[x0x ADR-0023 (durable local history)](https://github.com/saorsa-labs/x0x/pull/266).
+**Stage 0 complete** — Block's Buzz desktop app (Tauri 2 + React) is imported
+at upstream anchor `7e34bee6` with the four crates it depends on; typecheck,
+unit suite, and the mock-mode Playwright smoke suite run in this repo's CI
+(see `FORK.md` for the import/exclusion inventory and license boundary).
+Next: Stage 1 — embedded x0xd + bridge v2 ("Buzz UX, x0x mesh"), per
+[`docs/design/buzz-fork-plan.md`](docs/design/buzz-fork-plan.md).
+
+The substrate dependency — x0x ADR-0023 durable local history — is
+**merged and testnet-proven** (x0x PR #268).
 
 ## License
 
