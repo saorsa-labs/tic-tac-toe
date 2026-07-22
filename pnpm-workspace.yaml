@@ -15,5 +15,7 @@ overrides:
   # Removable once every @radix-ui dep converges on one version naturally.
   "@radix-ui/react-dismissable-layer": 1.1.15
 patchedDependencies:
-  isomorphic-git: patches/isomorphic-git.patch
+  # isomorphic-git patch dropped: its consumer is an excluded workspace
+  # package (pnpm ERR_PNPM_UNUSED_PATCH with desktop-only workspace).
+  # The patch file is retained in patches/ for upstream parity.
   virtua@0.49.3: patches/virtua@0.49.3.patch
