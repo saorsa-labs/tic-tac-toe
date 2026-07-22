@@ -72,16 +72,17 @@ Rules that keep this honest:
    auto-discovery), else spawn `x0xd --name ttt` with a bundled binary.
    Self-update stays the daemon's job.
 
-### Stack recommendation
+### Stack decision (revised 2026-07-22)
 
-**Tauri 2 + Dioxus**, matching communitas. Rationale: Rust end-to-end, the
-org already carries the toolchain and CI patterns, and communitas supplies
-hard-won lessons (WS reconnect handling is a known defect there — build the
-reconnect/backfill state machine first, on top of ADR-0023's
-backfill-then-live marker, and it becomes trivial rather than buggy).
-Decision point for David: reuse communitas UI components vs clean start;
-this doc assumes clean start with pattern-borrowing, since tic-tac-toe's UI
-is chat-shaped, not collaboration-canvas-shaped.
+**Tauri 2 + React 19/TypeScript — a deep copy of Buzz's desktop app**
+(David's call: their UX is the design target; Apache-2.0 permits the fork
+with attribution). This supersedes the earlier Dioxus recommendation:
+Buzz's UX *is* its React tree, so working from it means adopting its stack.
+Rust remains where our expertise concentrates — the Tauri shell, x0xd, the
+bridge, and the ACP agent runtime. Full staged plan, seam analysis, and
+risks: [`buzz-fork-plan.md`](buzz-fork-plan.md). The communitas WS-reconnect
+lesson still applies: the reconnect/backfill state machine is rebuilt
+deliberately in Stage 3 on ADR-0023's backfill-then-live marker.
 
 ## 4. The history dependency (why ADR-0023 ships first)
 
@@ -156,11 +157,17 @@ into templates without bespoke adapters.
 
 ## 8. Milestones
 
-- **M0 — substrate:** ADR-0023 accepted + history store lands in x0xd
-  (endpoints + CLI + restart-survival test green).
-- **M1 — skeleton:** Tauri/Dioxus shell, spawn-or-attach, onboarding, DM
-  view with backfill-then-live. Acceptance tests 1–3 pass.
-- **M2 — groups:** channels + private TreeKEM groups + roster + presence.
-  Acceptance tests 4–6 pass.
-- **M3 — agent member:** headless agent joins and converses; demo recorded.
-- **M4 (v2 opens) — symphony/ACP attach + first company template.**
+Milestones map onto the staged fork plan (`buzz-fork-plan.md`):
+
+- **M0 — substrate:** ADR-0023 store lands in x0xd (endpoints + CLI +
+  restart-survival test green). Parallel: fork Stage 0 (hygiene, Playwright
+  mock suite green in our repo).
+- **M1 — "Buzz UX, x0x mesh" (fork Stage 1):** embedded x0xd + bridge v2;
+  unmodified Buzz UI, `buzz-conformance` + relay-mode Playwright green,
+  zero relay servers. Acceptance tests 1 and 6 pass.
+- **M2 — identity flip (Stage 2):** x0x AgentId is the displayed identity;
+  npub gone from UI. Acceptance test 3 passes end-to-end.
+- **M3 — native data layer (Stage 3):** per-feature migration to x0xd
+  REST/WS + history backfill; bridge removed from the app. Acceptance
+  tests 2, 4, 5 pass; full Studio functional pass.
+- **M4 (v2 opens) — symphony/ACP + first company template (Stage 4).**
