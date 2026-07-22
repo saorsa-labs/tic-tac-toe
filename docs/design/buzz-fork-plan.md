@@ -8,33 +8,41 @@
 ## 1. What Buzz desktop actually is (fork-relevant facts)
 
 - **Stack: Tauri 2 + React 19/TypeScript** (Vite, Tailwind, TanStack Router +
-  React Query), ~1,200 TS/TSX files. **Not Dioxus** — adopting Buzz's UX
-  means adopting this stack. That is the stack decision, stated plainly.
+  React Query), 1,092 TS/TSX files under `desktop/src`. **Not Dioxus** —
+  adopting Buzz's UX means adopting this stack. That is the stack decision,
+  stated plainly. (The desktop crate is excluded from Buzz's root cargo
+  workspace, which eases subtree extraction.)
 - **Split protocol stack:** raw WS socket + TLS in Rust
   (`src-tauri/src/native_websocket.rs`, a Tauri plugin), the Nostr protocol
-  state machine in TS (`src/shared/api/relayClientSession.ts`, ~1,050 lines,
-  plus ~30 `relay*` modules), event signing in Rust (`sign_event` /
-  `create_auth_event` commands), private keys in the **OS keychain**
-  (`secret_store.rs`, keyring crate).
+  state machine in TS (`src/shared/api/relayClientSession.ts`, 1,082 lines,
+  plus ~20 `relay*` modules), event signing in Rust, private keys in the
+  **OS keychain** (`secret_store.rs`, keyring crate). Signing is NOT
+  confined to the `sign_event`/`create_auth_event` commands — 12+ Rust
+  sites sign (teams, personas, agents, media auth, NIP-98 headers, git
+  workflow, pairing) — but **all draw from one key source**
+  (`AppState.keys` / `state.signing_keys()` backed by `secret_store.rs`),
+  which is the actual flip point for Stage 2.
 - **A service layer exists and is disciplined:** UI features consume typed
-  domain objects (`types.ts`, ~1,000 lines) through the `relayClient`
-  singleton choke point; only 5 files import `nostr-tools` directly. But the
-  **event-kind vocabulary (~100 `KIND_*` constants) and tag-threading
-  semantics permeate hooks and lib code**, and thread metadata is computed
-  server-side at relay ingest.
+  domain objects (`types.ts`, 1,012 lines) through the `relayClient`
+  singleton choke point; only 4 production files import `nostr-tools`
+  directly. But the **event-kind vocabulary (59 exported `KIND_*`
+  constants) and tag-threading semantics permeate hooks and lib code**, and
+  thread metadata is computed server-side at relay ingest.
 - **Local persistence already matches our ADR-0023 choice:** rusqlite
   (bundled), WAL, in `src-tauri/src/archive/` — Buzz caches saved/observer
   events locally in SQLite.
 - **Agent orchestration is first-class and reusable:**
-  `src-tauri/src/managed_agents/` (46 files; 2,140-line runtime) spawns
-  ACP agents (`claude-code-acp`, `codex-acp`, goose) as stdio subprocesses;
-  personas/teams/observer frames are published as relay events; rich UI in
-  `src/features/agents/ui/` + `workflows`/`projects` routes.
-- **Two e2e modes ship with it:** Playwright `smoke`/`integration` (~80
+  `src-tauri/src/managed_agents/` (61 files; 2,140-line runtime) spawns
+  ACP agents (`claude-agent-acp` primary / `claude-code-acp`, `codex-acp`,
+  goose, `buzz-agent`) as stdio subprocesses; personas/teams/observer
+  frames are signed in the command layer and published as relay events;
+  rich UI in `src/features/agents/ui/` + `workflows`/`projects` routes.
+- **Two e2e modes ship with it:** Playwright `smoke`/`integration` (110
   specs) against either a **mock IPC bridge** (`src/testing/e2eBridge.ts` —
-  stubs every Tauri command; proves the whole UI runs with no live relay)
-  or a **real seeded relay**. The mock bridge is a working template for a
-  native-x0xd adapter later.
+  stubs every Tauri command and *throws on unknown ones*, so coverage is
+  exact; proves the whole UI runs with no live relay) or a **real seeded
+  relay**. The mock bridge is a working template for a native-x0xd adapter
+  later.
 
 ## 2. Fork strategy — staged, with the end state fixed
 
@@ -52,43 +60,63 @@ between our own UI and our own daemon — never on the network.
 
 ### Stage 0 — fork hygiene
 Fork `block/buzz` → `saorsa-labs/tic-tac-toe` app tree (keep `desktop/`
-lineage for upstream cherry-picks; preserve Apache-2.0 LICENSE + NOTICE with
-attribution; our additions dual-licensed per org policy). Strip server-side
-crates we will not run (`buzz-relay`, `buzz-push-gateway`, relay-mesh, admin)
-from the build, keep `desktop/` + the crates it path-depends on
-(`buzz-core`, `buzz-persona`, `buzz-sdk`, `buzz-agent`) until each is
-replaced or vendored.
+lineage for upstream cherry-picks). License hygiene per Apache-2.0 §4:
+preserve the upstream LICENSE (Copyright 2026 Block, Inc.); **create our
+own NOTICE** attributing Block, Inc. (upstream ships none); **mark modified
+files** as changed; our additions dual-licensed per org policy. Strip
+server-side crates we will not run (`buzz-relay`, `buzz-push-gateway`,
+relay-mesh, admin) from the build, keep `desktop/` + the crates it
+path-depends on (`buzz-core`, `buzz-persona`, `buzz-sdk`, `buzz-agent`)
+until each is replaced or vendored.
 
 ### Stage 1 — "Buzz UX, x0x mesh" (ships the five-minute demo)
 Embed in the Tauri shell: `x0xd` (spawn-or-attach, `--name ttt`) + **bridge
-v2** on loopback; set `BUZZ_RELAY_URL=ws://127.0.0.1:3300`. Bridge v2 grows
-beyond the spike to Buzz's actual relay dialect:
+v2** on loopback; relay URL is env-driven (`BUZZ_RELAY_URL` →
+`ws://127.0.0.1:3300`). Bridge v2's scope is the desktop's **actual**
+relay surface, enumerated from source (2026-07-22 review):
 
-1. The **relay HTTP API** used by `src-tauri/relay.rs` (reqwest):
-   `POST /events`, membership/admission endpoints (`relay_admission.rs`).
-2. **Custom-kind passthrough** (~100 kinds incl. 40002/40003 edits,
-   39005/39006 threads, 43001–43006 jobs, 44100/44101 membership) — the
-   bridge stores/fans-out by class rules, it does not need per-kind logic
-   except:
-3. **`thread_metadata` computed at ingest** (root/reply depth, counts) —
-   Buzz's read model assumes the relay computes this; the bridge must
-   reproduce it or every threaded view breaks (riskiest single item, has
-   its own conformance milestone).
-4. Multi-client fan-out on loopback (today's bridge caps are fine; the
-   NIP-11 test, connection cap, and relay-tag fixes from the 2026-07-22
-   review land here).
+| # | Surface | Desktop driver | Milestone |
+|---|---|---|---|
+| 1 | Nostr WS dialect (REQ/EVENT/EOSE/CLOSE + NIP-29 semantics) | `relayClientSession.ts` | **M1a** |
+| 2 | NIP-42 AUTH over WS | `relayClientSession.ts:846` | **M1a** |
+| 3 | `POST /events` (4 call sites + snapshot imports) | `relay.rs` | **M1a** |
+| 4 | **`POST /query` with Buzz filter extensions** (`top_level`, `include_summaries`, `include_aux`, keyset cursor) — the main channel-timeline read path | `commands/channel_window.rs` | **M1a** |
+| 5 | NIP-50 search routed through `/query` | `search_messages` command | **M1a** |
+| 6 | `thread_metadata` computed at ingest (see below) | thread views, badges | **M1a** |
+| 7 | `GET /info` membership gate | `commands/relay_members.rs` | **M1a** |
+| 8 | Live thread-summary emits (recomputed post-commit, fan-out kind) | badges | **M1a** |
+| 9 | Blossom media (`PUT /upload`, `GET /media/*`, `buzz-media://` proxy) | `commands/media*.rs`, `media_proxy.rs` | **M1b** |
+| 10 | Invite/join-policy API (`/api/invites*`, `/api/join-policy*`, NIP-98-signed) | `shared/api/invites.ts` | **M1b** |
+| 11 | Huddle voice (`WS /huddle/{ch}/audio`) | `huddle/relay_api.rs` | **M1b or cut** |
+| 12 | NIP-11 info doc + pairing discovery | `commands/pairing.rs` | cut (mobile pairing out of scope) |
+| 13 | Git smart-HTTP hosting | `project_git*.rs` | cut for v1 (routes hidden) |
 
-`buzz-conformance` + the Playwright `relay`-mode suite become the
-acceptance gate: **unmodified Buzz UI, all suites green, zero relay
-servers.**
+Notes: `relay_admission.rs` is the client-side HTTP-429 rate-limit gate,
+not an admission API — the bridge just needs sane 429 behavior. Kind
+passthrough covers Buzz's 59 exported `KIND_*` constants; per-kind logic
+exists only for rows 4/6/8. `thread_metadata` semantics are contained but
+strict (marked NIP-10 tags only, parent-must-exist-at-ingest,
+server-verified ancestry, depth cap 100, transactional counters,
+`(community_id, event_created_at, event_id)` partition keys) — fixtures
+mined from `buzz-test-client/tests/e2e_nostr_interop.rs`. Today's bridge
+review fixes (NIP-11 test, connection cap, relay-tag) land in M1a.
+
+**M1a acceptance:** mock Playwright suite + relay-mode
+messaging/thread/search suites green against bridge v2, zero relay servers
+— this IS the five-minute demo. **M1b acceptance:** media + invites suites
+green (huddle: explicit ship/cut decision). BuilderLab hosted-community
+onboarding (`builderlab.rs`, hardcoded Block service) is **cut in Stage 0**
+— local-relay onboarding (`AddCommunityDialog`) is the supported path.
 
 ### Stage 2 — identity flip (PQC becomes real)
-Replace `secret_store.rs`-held nsec as the *primary* identity: x0xd owns
-identity (ML-DSA-65, existing key files); the Tauri `sign_event` command is
-re-pointed at a bridge-local Schnorr key **derived per-install and marked
-as a compatibility artifact** — UI identity displays x0x AgentId +
-four-word address, not npub. From here on, Nostr keys authenticate nothing
-except the loopback dialect.
+Swap the **key source**, not a command: all 12+ Rust signing sites draw
+from `AppState.keys` / `state.signing_keys()` backed by `secret_store.rs`
+— one type behind one accessor. Replace it with a bridge-local
+compatibility key (derived per-install, marked as an artifact of the
+loopback dialect) while x0xd owns the real identity (ML-DSA-65). UI
+displays x0x AgentId + four-word address, never npub (CI grep enforces
+from here on). From this stage, Nostr keys authenticate nothing except the
+loopback dialect.
 
 ### Stage 3 — data-layer replacement, feature by feature
 Using the mock-bridge pattern (`e2eBridge.ts`) as the adapter template,
@@ -139,8 +167,9 @@ being "Buzz on x0x" and becomes the company-in-a-box product.
 
 | Risk | Mitigation |
 |---|---|
-| `thread_metadata` fidelity (riskiest coupling) | Own conformance milestone in Stage 1; moved server-side into the x0x history store in Stage 3 so it is solved once, natively |
-| Upstream velocity (Buzz is a week old and moving) | Keep `desktop/` tree cherry-pickable through Stage 2; accept divergence at Stage 3 by design — by then the UX shell is ours |
+| `thread_metadata` + extended `/query` dialect fidelity (the same risk, write side + read side — riskiest coupling) | One conformance milestone in M1a with fixtures mined from Buzz's interop tests; moved server-side into the x0x history store in Stage 3 so it is solved once, natively |
+| BuilderLab hosted-community dependency (hardcoded Block service) | Cut at Stage 0; local-relay onboarding is the supported path |
+| Upstream velocity (Buzz is a week old and moving) | Keep `desktop/` tree cherry-pickable through Stage 2 (desktop is outside Buzz's root workspace, easing subtree extraction); accept divergence at Stage 3 by design — by then the UX shell is ours |
 | Two Nostr identities linger past Stage 2 | Stage gate: after Stage 2, npub never appears in UI; CI grep enforces |
 | Stack: team is Rust-first, app is React/TS | Accepted cost of "work from their UX" (David's call); Rust stays in the Tauri shell where our expertise concentrates (daemon, bridge, ACP runtime) |
 | managed_agents runtime is deeply Nostr-evented | Stage 4 maps events → x0x surfaces before extending; do not build templates on the Nostr shapes |

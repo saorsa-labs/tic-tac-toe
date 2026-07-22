@@ -162,9 +162,13 @@ Milestones map onto the staged fork plan (`buzz-fork-plan.md`):
 - **M0 — substrate:** ADR-0023 store lands in x0xd (endpoints + CLI +
   restart-survival test green). Parallel: fork Stage 0 (hygiene, Playwright
   mock suite green in our repo).
-- **M1 — "Buzz UX, x0x mesh" (fork Stage 1):** embedded x0xd + bridge v2;
-  unmodified Buzz UI, `buzz-conformance` + relay-mode Playwright green,
-  zero relay servers. Acceptance tests 1 and 6 pass.
+- **M1a — "Buzz UX, x0x mesh" messaging core (fork Stage 1):** embedded
+  x0xd + bridge v2 (WS dialect, AUTH, `/events`, extended `/query` +
+  search, `thread_metadata`, `/info`); unmodified Buzz UI, mock +
+  relay-mode messaging/thread/search Playwright suites green, zero relay
+  servers. Acceptance tests 1 and 6 pass — this is the five-minute demo.
+- **M1b — media + invites (huddle: ship-or-cut decision):** Blossom
+  surface + invite/join-policy API; remaining relay-mode suites green.
 - **M2 — identity flip (Stage 2):** x0x AgentId is the displayed identity;
   npub gone from UI. Acceptance test 3 passes end-to-end.
 - **M3 — native data layer (Stage 3):** per-feature migration to x0xd
