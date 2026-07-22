@@ -87,7 +87,7 @@ relay surface, enumerated from source (2026-07-22 review):
 | 8 | Live thread-summary emits (recomputed post-commit, fan-out kind) | badges | **M1a** |
 | 9 | Blossom media (`PUT /upload`, `GET /media/*`, `buzz-media://` proxy) | `commands/media*.rs`, `media_proxy.rs` | **M1b** |
 | 10 | Invite/join-policy API (`/api/invites*`, `/api/join-policy*`, NIP-98-signed) | `shared/api/invites.ts` | **M1b** |
-| 11 | Huddle voice (`WS /huddle/{ch}/audio`) | `huddle/relay_api.rs` | **M1b or cut** |
+| 11 | Huddle voice (`WS /huddle/{ch}/audio`) | `huddle/relay_api.rs` | **cut for v1** — voice returns P2P via saorsa-webrtc (see `voice-over-x0x.md`) |
 | 12 | NIP-11 info doc + pairing discovery | `commands/pairing.rs` | cut (mobile pairing out of scope) |
 | 13 | Git smart-HTTP hosting | `project_git*.rs` | cut for v1 (routes hidden) |
 
