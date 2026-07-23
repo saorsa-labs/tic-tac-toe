@@ -1,0 +1,5 @@
+{
+  "name": "tic-tac-toe-workspace",
+  "private": true,
+  "packageManager": "pnpm@11.4.0"
+}

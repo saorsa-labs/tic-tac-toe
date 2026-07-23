@@ -1,0 +1,12 @@
+tic-tac-toe
+Copyright 2026 Saorsa Labs Ltd.
+
+This product includes software developed by Block, Inc.
+(https://github.com/block/buzz), imported at commit
+7e34bee62cacaa9d8a96c14d5892a471b59a1983 and licensed under the
+Apache License, Version 2.0 (see LICENSE-APACHE).
+Buzz is Copyright 2026 Block, Inc.
+
+Modifications to the imported code are documented in FORK.md.
+Original tic-tac-toe code is dual-licensed AGPL-3.0 / commercial by
+Saorsa Labs Ltd.
