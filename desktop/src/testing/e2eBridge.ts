@@ -81,6 +81,12 @@ type MockManagedAgentSeed = {
   respondToAllowlist?: string[];
 };
 
+type MockManagedAgentRuntimeSeed = {
+  pubkey: string;
+  relayUrl: string;
+  lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
+};
+
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
@@ -183,6 +189,9 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    /** Per agent+relay runtime rows for the pair-scoped lifecycle commands
+     *  (`list/start/stop/restart_managed_agent_runtime`). */
+    managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
     personas?: MockPersonaSeed[];
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
@@ -194,6 +203,8 @@ type E2eConfig = {
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
+    /** Reject successive mock `get_channels` calls, then resume. */
+    channelsReadErrors?: (string | null)[];
     /** Reject successive mock `create_channel` calls, then resume. */
     createChannelErrors?: string[];
     /** Reject successive mock `ensure_starter_channels` calls, then resume. */
@@ -241,6 +252,8 @@ type E2eConfig = {
     openerError?: string;
     /** Delay binding signatures so specs can exercise request supersession. */
     nostrBindSignDelayMs?: number;
+    /** Reject successive mock WebSocket connect attempts, then resume. */
+    websocketConnectErrors?: string[];
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -384,9 +397,29 @@ type E2eConfig = {
      * spec can interleave edits and exercise the mid-save race handling.
      */
     globalConfigSaveDelayMs?: number;
+    /**
+     * Override the `discover_agent_models` mock response. When set, returns
+     * this catalog instead of the default per-harness model list.
+     */
+    discoverAgentModels?: {
+      models: Array<{
+        id: string;
+        name: string | null;
+        description?: string | null;
+      }>;
+      supportsSwitching: boolean;
+      agentDefaultModel?: string | null;
+      selectedModel?: string | null;
+    };
+    /**
+     * When set, `discover_agent_models` throws with this message instead of
+     * returning a catalog.
+     */
+    discoverAgentModelsError?: string;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
+  autoConnectDefaultRelay?: boolean;
   identity?: TestIdentity;
 };
 
@@ -764,6 +797,24 @@ type MockManagedAgent = RawManagedAgent & {
   log_lines: string[];
 };
 
+// Mirrors the Rust `ManagedAgentRuntimeStatus` camelCase wire shape for the
+// pair-scoped lifecycle commands.
+type MockManagedAgentRuntimeRow = {
+  pubkey: string;
+  relayUrl: string;
+  localSetup: boolean;
+  lifecycle:
+    | "starting"
+    | "listening"
+    | "waking"
+    | "ready"
+    | "failed"
+    | "stopped";
+  pid: number | null;
+  error: string | null;
+  logPath: string | null;
+};
+
 type WsHandler = (message: unknown) => void;
 const GLOBAL_MOCK_SUBSCRIPTION = "*";
 
@@ -990,6 +1041,7 @@ declare global {
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
+    __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -1967,6 +2019,17 @@ function resetMockRelayAgents(config?: E2eConfig) {
 
 function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgents = [];
+  mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
+    (seed) => ({
+      pubkey: seed.pubkey,
+      relayUrl: seed.relayUrl,
+      localSetup: true,
+      lifecycle: seed.lifecycle ?? "ready",
+      pid: seed.lifecycle === "stopped" ? null : 43000,
+      error: null,
+      logPath: null,
+    }),
+  );
 
   for (const seed of config?.mock?.managedAgents ?? []) {
     mockManagedAgents.push(buildSeededManagedAgent(seed));
@@ -2663,6 +2726,7 @@ let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
+let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -3266,9 +3330,10 @@ function sendWsText(handler: WsHandler, payload: unknown[]) {
   });
 }
 
-function sendWsClose(handler: WsHandler) {
+function sendWsClose(handler: WsHandler, code?: number, reason?: string) {
   handler({
     type: "Close",
+    data: code === undefined ? undefined : { code, reason: reason ?? "" },
   });
 }
 
@@ -5071,7 +5136,9 @@ async function handleGetChannels(config: E2eConfig | undefined) {
     );
   }
 
-  const channelsReadError = config?.mock?.channelsReadError;
+  const channelsReadError =
+    config?.mock?.channelsReadErrors?.shift() ??
+    config?.mock?.channelsReadError;
   if (channelsReadError) {
     throw new Error(channelsReadError);
   }
@@ -7519,6 +7586,11 @@ async function handleCreateManagedAgent(
   };
 
   mockManagedAgents.unshift(managedAgent);
+  if (args.input.spawnAfterCreate && managedAgent.backend.type === "local") {
+    // The real create command spawns a pair runtime on the agent's effective
+    // relay (`start_local_agent_with_preflight`), so mirror that row here.
+    upsertMockManagedAgentRuntime(pubkey, managedAgent.relay_url, "ready");
+  }
   applyMockDisplayName(pubkey, name);
   mockAgentPubkeys.add(pubkey);
   mockProfiles.set(pubkey, {
@@ -7550,6 +7622,55 @@ function getMockManagedAgent(pubkey: string): MockManagedAgent {
   }
 
   return agent;
+}
+
+function upsertMockManagedAgentRuntime(
+  pubkey: string,
+  relayUrl: string,
+  lifecycle: MockManagedAgentRuntimeRow["lifecycle"],
+): MockManagedAgentRuntimeRow {
+  let row = mockManagedAgentRuntimes.find(
+    (candidate) =>
+      candidate.pubkey === pubkey && candidate.relayUrl === relayUrl,
+  );
+  if (!row) {
+    row = {
+      pubkey,
+      relayUrl,
+      localSetup: true,
+      lifecycle,
+      pid: null,
+      error: null,
+      logPath: null,
+    };
+    mockManagedAgentRuntimes.push(row);
+  }
+  row.lifecycle = lifecycle;
+  row.pid =
+    lifecycle === "stopped"
+      ? null
+      : (row.pid ?? 43000 + mockManagedAgentRuntimes.length);
+  row.error = null;
+  return row;
+}
+
+// Pair-scoped lifecycle, mirroring `runtime_commands.rs`: the command touches
+// exactly one agent+relay runtime and rejects non-local agents.
+function handleManagedAgentRuntimeAction(
+  action: "start" | "stop" | "restart",
+  args: { pubkey: string; relayUrl: string },
+): MockManagedAgentRuntimeRow {
+  const agent = getMockManagedAgent(args.pubkey);
+  if (agent.backend.type !== "local") {
+    throw new Error("managed runtime pairs require a local agent");
+  }
+  return {
+    ...upsertMockManagedAgentRuntime(
+      args.pubkey,
+      args.relayUrl,
+      action === "stop" ? "stopped" : "ready",
+    ),
+  };
 }
 
 function isRelayMeshManagedAgent(agent: MockManagedAgent): boolean {
@@ -7593,6 +7714,9 @@ async function handleStartManagedAgent(
   } else {
     agent.status = "running";
     agent.pid = agent.pid ?? 42000 + mockManagedAgents.indexOf(agent);
+    // The real command spawns a pair runtime keyed by the agent's effective
+    // relay (`start_managed_agent_process`), so mirror that row here.
+    upsertMockManagedAgentRuntime(agent.pubkey, agent.relay_url, "ready");
   }
   agent.updated_at = now;
   agent.last_started_at = now;
@@ -7616,6 +7740,15 @@ async function handleStopManagedAgent(args: {
   agent.pid = null;
   agent.updated_at = now;
   agent.last_stopped_at = now;
+  // Legacy agent-wide stop deliberately drains EVERY pair runtime for the
+  // agent (`runtime/stop.rs`) — mirror that so specs can prove the sidebar
+  // no longer routes through it.
+  for (const row of mockManagedAgentRuntimes) {
+    if (row.pubkey === args.pubkey) {
+      row.lifecycle = "stopped";
+      row.pid = null;
+    }
+  }
   setMockPresenceStatus(agent.pubkey, "offline");
   agent.log_lines.push(`stopped mock harness at ${now}`);
   syncMockRelayAgentsFromManagedAgents();
@@ -8374,6 +8507,11 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
 }
 
 async function connectMockSocket(args: { onMessage: unknown }) {
+  const connectError = getConfig()?.mock?.websocketConnectErrors?.shift();
+  if (connectError) {
+    throw new Error(connectError);
+  }
+
   if (mockWebsocketSendMutexWedged) {
     return new Promise<number>(() => {});
   }
@@ -8954,6 +9092,14 @@ export function maybeInstallE2eTauriMocks() {
     for (const socketId of socketIds) disconnectMockSocket(socketId);
     return socketIds.length;
   };
+  window.__BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__ = () => {
+    const sockets = [...mockSockets.values()];
+    mockSockets.clear();
+    for (const socket of sockets) {
+      sendWsClose(socket.handler, 1012, "relay restarting");
+    }
+    return sockets.length;
+  };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.
   window.__BUZZ_E2E_SET_MESH__ = (mesh) => {
@@ -9138,6 +9284,11 @@ export function maybeInstallE2eTauriMocks() {
           sig: "e2e-signed-nostr-binding",
         });
       }
+      case "sign_out":
+        // Production wipes local state and restarts the app. In the browser
+        // harness there is nothing to wipe; resolving is enough — specs
+        // assert invocation via __BUZZ_E2E_COMMANDS__ and the pending UI.
+        return;
       case "get_nsec": {
         const nsecSequence = activeConfig?.mock?.nsecErrors;
         if (nsecSequence && nsecSequence.length > 0) {
@@ -9195,6 +9346,13 @@ export function maybeInstallE2eTauriMocks() {
       case "update_profile":
         return handleUpdateProfile(
           payload as Parameters<typeof handleUpdateProfile>[0],
+          activeConfig,
+        );
+      case "update_profile_at_relay":
+        return handleUpdateProfile(
+          {
+            avatarUrl: (payload as { avatarUrl: string }).avatarUrl,
+          },
           activeConfig,
         );
       case "get_user_profile":
@@ -9663,6 +9821,8 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "auto_connect_default_relay_enabled":
+        return activeConfig?.autoConnectDefaultRelay ?? false;
       case "get_legacy_workspace_storage":
         return {
           workspaces: null,
@@ -9975,6 +10135,26 @@ export function maybeInstallE2eTauriMocks() {
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],
         );
+      case "list_managed_agent_runtimes":
+        return mockManagedAgentRuntimes.map((row) => ({ ...row }));
+      case "start_managed_agent_runtime":
+        return handleManagedAgentRuntimeAction(
+          "start",
+          payload as { pubkey: string; relayUrl: string },
+        );
+      case "stop_managed_agent_runtime":
+        return handleManagedAgentRuntimeAction(
+          "stop",
+          payload as { pubkey: string; relayUrl: string },
+        );
+      case "restart_managed_agent_runtime":
+        return handleManagedAgentRuntimeAction(
+          "restart",
+          payload as { pubkey: string; relayUrl: string },
+        );
+      case "reconcile_managed_agent_runtimes":
+        // Post-create bootstrap reconcile: no new pairs in the mock world.
+        return [];
       case "set_agent_managed_profiles":
         return undefined;
       case "set_managed_agent_auto_restart":
@@ -10005,6 +10185,25 @@ export function maybeInstallE2eTauriMocks() {
           supportsSwitching: false,
         };
       case "discover_agent_models": {
+        const discoverError = activeConfig?.mock?.discoverAgentModelsError;
+        if (discoverError) {
+          throw new Error(discoverError);
+        }
+        const discoverOverride = activeConfig?.mock?.discoverAgentModels;
+        if (discoverOverride) {
+          return {
+            agentName: "mock-agent",
+            agentVersion: "0.0.0",
+            models: discoverOverride.models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              description: model.description ?? null,
+            })),
+            agentDefaultModel: discoverOverride.agentDefaultModel ?? null,
+            selectedModel: discoverOverride.selectedModel ?? null,
+            supportsSwitching: discoverOverride.supportsSwitching,
+          };
+        }
         const input = (
           payload as {
             input?: { agentCommand?: string; provider?: string };
