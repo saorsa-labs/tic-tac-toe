@@ -50,7 +50,8 @@ end-to-end.
 ## Status
 
 **Stage 0 complete** — Block's Buzz desktop app (Tauri 2 + React) is imported
-at upstream anchor `7e34bee6` with the four crates it depends on; typecheck,
+at upstream anchor `710ed9ff` (Buzz Desktop 0.4.24) with the five crates it
+depends on; typecheck,
 unit suite, and the mock-mode Playwright smoke suite run in this repo's CI
 (see `FORK.md` for the import/exclusion inventory and license boundary).
 Next: Stage 1 — embedded x0xd + bridge v2 ("Buzz UX, x0x mesh"), per
