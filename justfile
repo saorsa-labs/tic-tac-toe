@@ -17,9 +17,9 @@ desktop-check:
 desktop-smoke:
     cd desktop && corepack pnpm build:e2e && corepack pnpm exec playwright test --project=smoke
 
-# Check the four imported Rust crates against the pruned workspace
+# Check the five imported Rust crates against the pruned workspace
 crates-check:
-    cargo check -p buzz-core -p buzz-persona -p buzz-sdk -p buzz-agent
+    cargo check -p buzz-core -p buzz-persona -p buzz-sdk -p buzz-agent -p buzz-media
 
 # Full validation
 check: desktop-check crates-check
