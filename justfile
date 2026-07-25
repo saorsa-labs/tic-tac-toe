@@ -21,6 +21,10 @@ desktop-smoke:
 crates-check:
     cargo check -p buzz-core -p buzz-persona -p buzz-sdk -p buzz-agent -p buzz-media
 
+# M1a relay-mode acceptance gate: isolated x0xd + x0x-nostr-bridge + integration specs
+bridge-gate:
+    scripts/bridge-gate.sh
+
 # Full validation
 check: desktop-check crates-check
 
