@@ -451,14 +451,23 @@ public **key-confirmation tag** instead:
 1. derive a distinct confirmation key from the fresh 32-byte GSS secret with
    BLAKE3 derive-key context `x0x gss confirmation key v1`;
 2. MAC a canonical, length-prefixed context containing the stable group ID,
-   new secret epoch, previous state hash, and new roster root with BLAKE3 keyed
-   mode; and
+   new secret epoch, new revision, previous state hash, and new roster root
+   with BLAKE3 keyed mode; and
 3. place the resulting 32-byte tag in the versioned GSS binding above.
 
 This follows the same construction pattern as MLS—not its wire format—where a
 confirmation key derived from the new epoch secret MACs the confirmed
 transcript and receivers verify that tag before accepting the new group state
 ([RFC 9420 §8.2 and §12.4.2](https://datatracker.ietf.org/doc/html/rfc9420#section-12.4.2)).
+There is no hash circularity: the confirmation MAC covers the **previous**
+state hash, while the current state hash then covers the resulting
+`security_binding`. All five MAC context values are already shipped state
+artifacts; `compute_state_hash` binds revision, previous state hash, roster
+root, and the binding in that order
+(`x0x@e301371:src/groups/state_commit.rs:219-239`). Revision must be explicit:
+without it, two siblings that deliberately share a rotated secret and roster
+but differ in revision would derive the same confirmation tag.
+
 The tag does not disclose a uniformly random 256-bit GSS secret under the
 existing secret-generation assumption
 (`x0x@e301371:src/groups/mod.rs:418-436`), but it is an offline verifier for a
@@ -474,7 +483,22 @@ A receiver currently accepts a higher-epoch share from an active admin, opens
 it, installs the secret, and overwrites `security_binding` with the epoch-only
 string even if the state commit has not arrived
 (`x0x@e301371:src/server/routes/named_groups.rs:5803-5835,5854-5890`). That
-cannot verify the join between planes.
+cannot verify the join between planes. The current authorization check narrows
+the threat: it requires `actor == sender_hex` and the actor to be an active
+Admin, so this is not an arbitrary-peer injection path; it is a malicious or
+forking authorized-admin case, exactly the sibling frontier under review
+(`x0x@e301371:src/server/routes/named_groups.rs:5820-5826`).
+
+The install is also demonstrably unsigned rather than merely early:
+`SecureShareDelivered` writes the new secret, epoch, and epoch-only
+`security_binding`, then calls `store_named_group_info`
+(`x0x@e301371:src/server/routes/named_groups.rs:5883-5887`).
+`store_named_group_info_locked` performs only the withdrawn-record guard and
+replaces the map slot; it does not recompute the state hash or verify a
+signature
+(`x0x@e301371:src/server/routes/named_groups.rs:2040-2060`). After share-first
+adoption, the projection's binding says epoch `N+1` while its retained
+`state_hash` still covers the previous binding.
 
 The receiver instead needs a pending-state join keyed by
 `(group_id, epoch, key-confirmation-tag)`: if the state commit arrives first,
@@ -498,6 +522,43 @@ remain on GSS
 (`x0x@e301371:src/server/routes/named_groups.rs:6516-6533`). Route both ban and
 remove through the same rotate, key-confirm, seal-to-remaining-members, and
 two-phase receive path before treating GSS as a safe migration source.
+
+The immediate remove-rotation remedy and this authenticated frontier are
+coupled, not contradictory. In the shipped epoch-only design,
+`SecureShareDelivered` requires no change merely to make commit-first and
+share-first **converge**: the current guard accepts a missing equal-epoch key or
+a higher-epoch share
+(`x0x@e301371:src/server/routes/named_groups.rs:5827-5835`). The defect remedy
+still needs rotation plus resealing after `remove_member`, a
+backward-compatible `secret_epoch` on `MemberRemoved`, and the existing
+`MemberBanned` GSS receive branch, with receivers deployed before senders
+rotate. `MemberRemoved` currently lacks that field and receive arm, while
+`MemberBanned` carries both explicitly to update the binding before state-hash
+finalization
+(`x0x@e301371:src/server/routes/named_groups.rs:629-642,667-686,4973-4979,5247-5254`).
+Lane A changes the same share-adoption behavior for **authentication** by
+holding a share pending instead of installing it unsigned. The two changes
+must therefore be designed and tested together rather than treating “no
+`SecureShareDelivered` change” as a final protocol conclusion.
+
+There is a second ordering hazard in the existing `MemberBanned` GSS branch.
+Today `if old_epoch < secret_epoch { next.shared_secret = None; }` preserves a
+share that arrived first while clearing an obsolete key when the signed commit
+arrives first
+(`x0x@e301371:src/server/routes/named_groups.rs:5247-5253`). Once the two-phase
+gate ships, share-first no longer advances installed state, so that arrival
+order no longer justifies the conditional. It is **not**, however, established
+as vestigial. `rotate_shared_secret` advances the sending admin's local epoch
+and installs the new secret before publish
+(`x0x@e301371:src/groups/mod.rs:418-436`;
+`x0x@e301371:src/server/routes/named_groups.rs:10305-10324`).
+If metadata gossip or direct delivery loops the sender's own event back through
+apply, `old_epoch == secret_epoch` and the conditional prevents that origin
+from discarding the key it just minted. This research did not trace transport
+self-delivery, so the safe rule is stronger: retain the conditional through
+the transition and do not simplify it unless sender self-delivery has been
+settled as impossible. The pending-join implementation still needs both
+arrival-order tests.
 
 The two-admin test must assert the final roster **and** TreeKEM interoperability:
 all surviving replicas accept the same serialized operation order, can
