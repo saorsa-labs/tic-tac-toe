@@ -321,6 +321,30 @@ strictly enforced single-committer policy), then prove a two-admin,
 same-parent mutation race converges on every replica. Custody carries the
 winning signed chain; it does not choose the winner.
 
+The concrete removal path confirms that the race is reachable, not merely
+theoretical. `DELETE /groups/:id/members/:agent_id` permits any admin on the
+local node, takes a per-`AppState` membership mutex, clones that node's current
+group head, mutates it, signs the next commit with that admin's key, persists
+it, and then publishes it
+(`x0x@e301371:src/server/routes/named_groups.rs:8425-8451,9177-9226,9263-9331`;
+the daemon-local mutex is defined at
+`x0x@e301371:src/server/state.rs:700-719`). A second admin's daemon has a
+different `AppState` and mutex, so both can author different removal children
+of the same parent and both HTTP calls can return success before either event
+reaches the other node. Ban has the same shape
+(`x0x@e301371:src/server/routes/named_groups.rs:10267-10293,10416-10555`).
+
+Incoming membership events are serialized only inside each receiving daemon
+(`x0x@e301371:src/server/routes/named_groups.rs:4575-4591`), and
+`prev_state_hash` validation then rejects whichever sibling arrives second.
+That is compare-and-swap at one replica, but it is not yet a network fork
+choice: different replicas can accept opposite first arrivals. It also means
+“the sibling is rejected, therefore no update is lost” is too strong at the
+product boundary: both initiating HTTP requests may already have returned
+success. Until a loser is deterministically selected and its operation is
+rebased/retried or surfaced as rejected, the user can observe a successful
+administrative action that does not survive convergence.
+
 Custody alone does **not** provide history from before a user joined, recovery
 after every delivery copy expired, a fresh-device archive after another device
 already acknowledged/deleted the drop, or economical complete history for a
