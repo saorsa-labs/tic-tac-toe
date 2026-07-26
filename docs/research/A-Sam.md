@@ -187,6 +187,42 @@ decrypts, and projects it locally. The required new ADR should consequently be
 framed as **asynchronous delivery/custody**, with reconciliation as one step,
 not as general peer-to-peer history serving.
 
+### Post-publication crux with Lane B: resolve the overloaded term
+
+After Lane B challenged this conclusion, the disagreement reduces to two
+different meanings of “cross-node backfill”:
+
+1. If it means **any later cross-node transfer of an authorized event that the
+   returning node missed**, Lane B is right: the UX floor requires it. Custody
+   fetch is one form of cross-node catch-up, and a local-only design cannot
+   substitute for it.
+2. If it means **querying another participant's ADR-0023 local plaintext
+   history**, that stronger mechanism is not required for ordinary offline
+   delivery and would cross the wrong privacy boundary. The recommended
+   custodian transfers only opaque, recipient-addressed drops; validation,
+   decryption, and projection happen on the returning recipient node.
+
+Ciphertext custody meets Buzz's unread/thread/catch-up floor only for a
+precisely bounded case: the user was authorized when the event was sent; every
+durable projection input (messages, replies, edits, deletions, reactions,
+membership changes, and other non-ephemeral state) was deposited; at least one
+selected custodian persisted it; and the recipient returned before expiry.
+Under those conditions the local projection can converge without a remote
+plaintext-history API.
+
+Custody alone does **not** provide history from before a user joined, recovery
+after every delivery copy expired, a fresh-device archive after another device
+already acknowledged/deleted the drop, or economical complete history for a
+large public channel. Those require the separate participant-replicated public
+log/archive policy and same-user recovery ADR described below. Therefore the
+project must not present the bounded mailbox as unqualified Buzz parity.
+
+The consensus ADR shape should be named broadly enough to avoid a word game:
+**cross-node catch-up via participant-selected ciphertext custody**. It must
+state explicitly that some cross-node recovery is required, while preserving
+ADR-0023's prohibition on serving decrypted local history for ordinary
+delivery.
+
 ## 4. Why x0x cannot catch up a shut-down node today
 
 ### 4.1 Local durability is implemented and valuable
