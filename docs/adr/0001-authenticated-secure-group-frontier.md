@@ -215,6 +215,15 @@ unsigned invites must be reissued after the enforcement cutoff or joined
 through a flow in which an authority-signed state anchor establishes the
 frontier before any claimed base fields are installed.
 
+The adjacent group-card import is the enforcement model. `GroupCard` has
+canonical length-prefixed signable bytes plus ML-DSA sign and verify methods
+(`x0x@e301371:src/groups/directory.rs:31-85,88-165,169-195`), and
+`import_group_card` rejects a failed signature at the entry point, before it
+takes the membership lock or looks up local state
+(`x0x@e301371:src/server/routes/named_groups.rs:11560-11572,11580-11593`).
+Invite join must acquire the same fail-closed property: an unverified remote
+artifact cannot reach frontier adoption, locking, or alias fan-out.
+
 ### E. Close stable-ID collision and destructive fan-out independently
 
 Invite handling must test both `group_id` and `stable_group_id` for
@@ -234,10 +243,24 @@ not a class-closing repair.
 Repair the destructive boundary at `named_groups.rs:9023-9025`: before
 overwriting an existing record, require an authority-backed same-group
 predicate between that record and the tombstone. Absent keys may still receive
-the tombstone. A simple equality check on `mls_group_id` is a candidate, not
-yet the decision: it must first pass migration tests proving that legitimate
-aliases at all three callers (`:5114`, `:9619`, `:11605`) never require
-overwriting a record with a different MLS ID. If that premise fails, use a
+the tombstone.
+
+Source probes now support simple equality of `mls_group_id` as the write-site
+discriminator at two of the three callers:
+
+- `group_deleted` clones the resolved record at `:5085` and passes the applied
+  result at `:5114`;
+- `withdrawn_card_import` clones the keyed local record at `:11589`, and the
+  sole intervening mutation at `:268-309` does not write `mls_group_id` before
+  the tombstone call at `:11605`.
+
+The local-withdraw caller likewise passes `terminal_info` cloned from the
+record addressed by `id` (`:9571-9603,9619`), but the legitimate alias shapes
+that its fan-out is expected to replace have not been enumerated. That is the
+remaining proof obligation: demonstrate that local withdrawal never
+intentionally overwrites an alias record with a different MLS ID. Until that
+test exists, `mls_group_id` equality remains a strongly supported candidate
+rather than a final wire/storage invariant. If the premise fails, use a
 stronger authority-backed identity relation rather than weakening the guard.
 
 The invite signature, symmetric join guard, and destructive write guard are

@@ -562,11 +562,25 @@ behavior. The class-closing boundary is the destructive write at `:9023-9025`:
 it must refuse to overwrite an existing record unless an authority-backed
 same-group discriminator proves the tombstone and target are the same group.
 Equality of `mls_group_id` is a plausible one-site candidate, but it remains
-unverified against the legitimate alias shapes of all three tombstone callers
-at `:5114`, `:9619`, and `:11605`. The ADR must require those migration tests
-rather than bless the predicate from this read alone. Independently, the join
-guard must test and serialize both invite IDs, and the invite frontier must be
-authenticated; each closes a different scope.
+only partly verified. `group_deleted` clones the resolved record at `:5085`;
+`withdrawn_card_import` clones the keyed record at `:11589`, and its sole
+pre-tombstone mutation (`:268-309`) never writes `mls_group_id` before
+`:11605`. The local-withdraw caller also passes `terminal_info` cloned from the
+record addressed by `id` (`:9571-9603,9619`), but its legitimate alias shapes
+have not been enumerated. That residual must prove local withdrawal never
+intentionally overwrites a different-MLS-ID alias before the predicate becomes
+a final invariant. Independently, the join guard must test and serialize both
+invite IDs, and the invite frontier must be authenticated; each closes a
+different scope.
+
+The group-card path supplies the positive enforcement counter-example.
+`GroupCard` has canonical, length-prefixed ML-DSA signable bytes and verification
+(`x0x@e301371:src/groups/directory.rs:31-85,88-195`), and card import rejects a
+failed signature before taking its membership lock or reading local state
+(`x0x@e301371:src/server/routes/named_groups.rs:11560-11593`). Although the
+accepted card may rewrite genesis from its signed group ID at `:291-302`, an
+unverified remote artifact cannot reach the tombstone fan-out. Invite join
+needs that same entry-gate property.
 
 The receiver instead needs a pending-state join keyed by
 `(group_id, epoch, key-confirmation-tag)`: if the state commit arrives first,
