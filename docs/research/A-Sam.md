@@ -500,6 +500,74 @@ signature
 adoption, the projection's binding says epoch `N+1` while its retained
 `state_hash` still covers the previous binding.
 
+Invite bootstrap is a second unsigned writer of the same join field. The
+`SignedInvite` link is base64url-encoded JSON; its `signature` field is
+explicitly future-facing and unvalidated, even though the prospective
+`signable_bytes` include `base_security_binding`
+(`x0x@e301371:src/groups/invite.rs:1-8,32-38,79-97,176-220,308-317`).
+The mint path itself calls the link unsigned
+(`x0x@e301371:src/server/routes/identity.rs:357-390`). On join,
+`invite_join_group_info` copies the claimed secret epoch and binding into
+`GroupInfo`, then separately copies the claimed revision, roster, state hash,
+and previous hash from the same artifact; it neither recomputes that projection
+nor verifies a signature
+(`x0x@e301371:src/server/routes/named_groups.rs:7653-7677`).
+The one-time invite secret authenticates bearer admission **to the inviter**;
+it does not authenticate the inviter's base state **to the joiner**.
+
+The fail-closed migration must therefore cover invite bootstrap as well as
+`SecureShareDelivered`. Before installing an invite's base binding, recompute
+the complete advertised projection and require it to equal
+`base_state_hash`, then authenticate that anchor. The clean choices are an
+ML-DSA-signed, unambiguously encoded invite whose signer key derives the stated
+inviter and whose base roster authorizes that inviter, or an embedded
+authority-signed state-commit anchor with the same projection. A self-consistent
+hash alone is insufficient because every input arrived in the same unsigned
+artifact. Unknown or legacy binding schemes must not seed the strengthened
+plane after the compatibility transition.
+
+The unsigned invite has a separate stable-ID/tombstone consequence. The join
+guard tests both the invite's MLS ID and claimed stable ID for withdrawn
+records, but its already-joined predicate tests only the MLS ID
+(`x0x@e301371:src/server/routes/named_groups.rs:7728-7770`). A crafted first-use
+link can therefore create a stub under `K'` whose attacker-chosen stable ID is
+an existing group's `K`; the link also supplies the stub roster
+(`x0x@e301371:src/server/routes/named_groups.rs:7671-7673`). Accepting the link
+subscribes the victim to the metadata topic derived from `K'`
+(`x0x@e301371:src/groups/mod.rs:321-324`;
+`x0x@e301371:src/server/routes/named_groups.rs:7852`).
+
+A signed terminal `GroupDeleted` on that topic is then checked correctly—but
+against the stub's attacker-authored roster. The terminal apply context takes
+`members_v2` from that selected record and authorizes an Admin-or-higher signer
+from it
+(`x0x@e301371:src/server/routes/named_groups.rs:1990-2010,5063-5115`;
+`x0x@e301371:src/groups/state_commit.rs:719-742`). On acceptance,
+`retain_withdrawn_group_tombstone` derives stable ID `K` from the stub, clears
+its key, and writes the resulting tombstone over every collected alias with a
+bare `HashMap::insert`
+(`x0x@e301371:src/server/routes/named_groups.rs:9008-9025`). The real record at
+`K` can therefore be replaced by the withdrawn, keyless stub. This is not a
+remote-unauthenticated path: the victim must first accept a crafted invite
+link. No exploit was executed in this research; the chain was established from
+source at `e301371`.
+
+The alias mechanics are over-determined but should not be repaired in the
+shared collector. `K` enters the output alias set at
+`named_groups.rs:8663-8664`, `:8666-8671`, and `:9022`; the first and third
+share the same caller-derived stable-ID source, while the map scan is the
+second independent source. The collector has nine production consumers, so
+pruning it would change unrelated TreeKEM, journal, cache, and migration
+behavior. The class-closing boundary is the destructive write at `:9023-9025`:
+it must refuse to overwrite an existing record unless an authority-backed
+same-group discriminator proves the tombstone and target are the same group.
+Equality of `mls_group_id` is a plausible one-site candidate, but it remains
+unverified against the legitimate alias shapes of all three tombstone callers
+at `:5114`, `:9619`, and `:11605`. The ADR must require those migration tests
+rather than bless the predicate from this read alone. Independently, the join
+guard must test and serialize both invite IDs, and the invite frontier must be
+authenticated; each closes a different scope.
+
 The receiver instead needs a pending-state join keyed by
 `(group_id, epoch, key-confirmation-tag)`: if the state commit arrives first,
 retain its signed expected binding with `shared_secret=None`; if the sealed
@@ -547,18 +615,19 @@ share that arrived first while clearing an obsolete key when the signed commit
 arrives first
 (`x0x@e301371:src/server/routes/named_groups.rs:5247-5253`). Once the two-phase
 gate ships, share-first no longer advances installed state, so that arrival
-order no longer justifies the conditional. It is **not**, however, established
-as vestigial. `rotate_shared_secret` advances the sending admin's local epoch
-and installs the new secret before publish
-(`x0x@e301371:src/groups/mod.rs:418-436`;
-`x0x@e301371:src/server/routes/named_groups.rs:10305-10324`).
-If metadata gossip or direct delivery loops the sender's own event back through
-apply, `old_epoch == secret_epoch` and the conditional prevents that origin
-from discarding the key it just minted. This research did not trace transport
-self-delivery, so the safe rule is stronger: retain the conditional through
-the transition and do not simplify it unless sender self-delivery has been
-settled as impossible. The pending-join implementation still needs both
-arrival-order tests.
+order no longer justifies the conditional. Sender self-delivery does not supply
+a replacement justification: `seal_commit` advances the sender's revision and
+state hash before the record is stored and the event is published, so a
+looped-back event fails the `commit.revision <= current_revision` gate before
+the GSS closure can run
+(`x0x@e301371:src/groups/mod.rs:524-548`;
+`x0x@e301371:src/server/routes/named_groups.rs:10324-10338,10397-10407`;
+`x0x@e301371:src/groups/state_commit.rs:690-711`). The transport may or may not
+loop back; it cannot make the conditional reachable on the origin. Retain the
+conditional until the pending-join gate is live—removing it earlier still
+discards a valid share under today's reorderable behavior. Any later cleanup
+must be backed by both arrival-order tests rather than inferred from the design
+alone.
 
 The two-admin test must assert the final roster **and** TreeKEM interoperability:
 all surviving replicas accept the same serialized operation order, can
