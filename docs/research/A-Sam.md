@@ -246,6 +246,18 @@ includes product feedback plus query-time/never-emitted compatibility kinds
 classified below. A scalar count becomes defensible only after the per-kind
 action table is generated from all ingest, producer, and read dispatchers.
 
+Lane B's later `≤103 = 120 - 6 relay-only - 11 never-stored` figure is not a
+defensible replacement. It mixes the current 130-kind Nostr vocabulary with a
+native end state in which some of those kinds disappear, and it subtracts the
+two relay-only values (`13534`, `30622`) that **are** persisted at the Buzz
+anchor merely because their native producers will differ. If the calculation
+is scoped only to the current anchor and only to the exclusions established so
+far, the corresponding coarse stored-event upper bound is `120 - 11 - 4 =
+105`: the four are the relay-only values that are query-time, fan-out-only, or
+never emitted. Even 105 is not an exact custody set, because custody policy is
+not equivalent to relay storage policy. Do not put a scalar deposit count in an
+ADR until the generated action table exists.
+
 The 33 replaceable classes add a separate merge invariant. A late custody drop
 must not overwrite a newer local value: ordinary replaceable state is keyed by
 `(pubkey, kind)` and parameterized state by `(pubkey, kind, d-tag)`, with
@@ -286,6 +298,28 @@ commits and the second to user-owned private state.** The other four are
 absent, ephemeral/on-demand, or query metadata and should disappear as event
 kinds. Custody cannot manufacture any projection, but it also must not preserve
 compatibility artifacts whose native replacement is local computation.
+
+Lane B is nevertheless right that a latest-by-`created_at` merge rule does not
+solve concurrent membership mutations. x0x has a legitimate native author and
+a stronger primitive than that merge rule: ML-DSA authority-signed commits
+carry a monotonic revision, previous-state hash, and roster root, and receivers
+validate the signature, current authority, revision, and parent hash
+(`x0x@e301371:src/groups/state_commit.rs:1-35,350-451,690-720`). But x0x's own
+accepted ADR is explicit that this chain serializes **per replica**, not across
+concurrent sibling commits: two admins can sign different children of the same
+parent and different replicas can accept different winners; deterministic
+fork choice remains future work
+(`x0x@e301371:docs/adr/0016-role-based-group-authority-flat-admin.md:109-124,210-215`).
+
+The accurate ruling is therefore neither “no principal may author membership
+after Stage 2” nor “membership convergence is already solved.” Stage 2 retains
+a loopback compatibility signer, and Stage 3 has x0x group-state authorities,
+but native retirement of kind `13534` must be gated on sibling-commit
+convergence. The authorization/fork-strategy decision must specify deterministic
+committer and rebase/retry behavior plus a real fork-resolution rule (or a
+strictly enforced single-committer policy), then prove a two-admin,
+same-parent mutation race converges on every replica. Custody carries the
+winning signed chain; it does not choose the winner.
 
 Custody alone does **not** provide history from before a user joined, recovery
 after every delivery copy expired, a fresh-device archive after another device
@@ -677,6 +711,12 @@ It should decide, at minimum:
     projections only until the native consumer for that feature lands. Native
     acceptance must prove the same UX from x0x-authorized state or deterministic
     local projection before deleting the corresponding Nostr path.
+17. **Membership hand-off:** custody does not resolve competing group-state
+    siblings. Retiring kind `13534` requires the fork-strategy/authorization
+    decision to close x0x ADR-0016's recorded equal-revision fork question and
+    an end-to-end test in which two authorized admins mutate the same parent
+    concurrently, every replica converges, and the losing proposal is visibly
+    rebased/retried or rejected rather than silently lost.
 
 A follow-up reconciliation ADR should compare:
 
