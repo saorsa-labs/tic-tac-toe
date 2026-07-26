@@ -223,13 +223,18 @@ takes the membership lock or looks up local state
 (`x0x@e301371:src/server/routes/named_groups.rs:11560-11572,11580-11593`).
 This is specifically the model for unauthenticated ingress. The separate
 `GroupCardPublished` metadata arm tolerates an empty card signature at `:5741`,
-but only after the transport-verification gate at `:4501-4533`, an active
-Admin-or-higher sender check at `:5732-5737`, and a stable-ID match at
-`:5738-5740`; its sink is the group-card cache at `:5744-5749`, not
-`named_groups`. That conditional signature pattern must not be copied into
-invite admission, which has none of those authority preconditions. Invite join
-must reject both absent and invalid authentication unconditionally, before a
-remote artifact can reach frontier adoption, locking, or alias fan-out.
+but only where authorization is instead derived from the transport-provided
+sender identity: `sender_hex` must name an active Admin-or-higher member of the
+existing record at `:5732-5737`, the card stable ID must match at `:5738-5740`,
+and the sink is the group-card cache at `:5744-5749`, not `named_groups`. The
+`verified` flag also gates this arm at `:4525-4533`, but the source defines it
+as a best-effort identity-discovery-cache annotation at `:4501-4514` and
+explicitly says it is not the membership-authorization control. Do not count
+that racy annotation as an additional authentication precondition. The
+conditional signature pattern must not be copied into invite admission, which
+has no equivalent sender authority. Invite join must reject both absent and
+invalid authentication unconditionally, before a remote artifact can reach
+frontier adoption, locking, or alias fan-out.
 
 ### E. Close stable-ID collision and destructive fan-out independently
 

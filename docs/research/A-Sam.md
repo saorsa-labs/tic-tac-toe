@@ -583,13 +583,18 @@ unverified remote artifact cannot reach the tombstone fan-out. Invite join
 needs that same entry-gate property specifically because it is unauthenticated
 ingress. This is not a claim that every card path requires its own signature:
 the separate `GroupCardPublished` metadata arm permits an empty card signature
-at `:5741`, but only after the transport-verification gate at `:4501-4533`, an
-active Admin-or-higher sender check at `:5732-5737`, and a stable-ID match at
-`:5738-5740`; it writes only to `group_card_cache` at `:5744-5749`. Those
-authority preconditions can substitute for a card signature there. Invite
-admission has no equivalent preconditions and therefore must reject absent as
-well as invalid authentication unconditionally; copying the optional-signature
-shape from `:5741` would preserve the defect.
+at `:5741`, but only where authorization instead derives from the
+transport-provided sender identity: `sender_hex` must name an active
+Admin-or-higher member of the existing record at `:5732-5737`, the card stable
+ID must match at `:5738-5740`, and the sink is only `group_card_cache` at
+`:5744-5749`. The `verified` flag also gates this arm at `:4525-4533`, but its
+own comment at `:4501-4514` defines it as a best-effort,
+identity-discovery-cache annotation and explicitly distinguishes it from
+membership authorization. It must not be counted as an additional
+authentication control. Invite admission has no equivalent sender authority
+and therefore must reject absent as well as invalid authentication
+unconditionally; copying the optional-signature shape from `:5741` would
+preserve the defect.
 
 The receiver instead needs a pending-state join keyed by
 `(group_id, epoch, key-confirmation-tag)`: if the state commit arrives first,
