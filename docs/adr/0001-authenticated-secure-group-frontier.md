@@ -221,8 +221,15 @@ canonical length-prefixed signable bytes plus ML-DSA sign and verify methods
 `import_group_card` rejects a failed signature at the entry point, before it
 takes the membership lock or looks up local state
 (`x0x@e301371:src/server/routes/named_groups.rs:11560-11572,11580-11593`).
-Invite join must acquire the same fail-closed property: an unverified remote
-artifact cannot reach frontier adoption, locking, or alias fan-out.
+This is specifically the model for unauthenticated ingress. The separate
+`GroupCardPublished` metadata arm tolerates an empty card signature at `:5741`,
+but only after the transport-verification gate at `:4501-4533`, an active
+Admin-or-higher sender check at `:5732-5737`, and a stable-ID match at
+`:5738-5740`; its sink is the group-card cache at `:5744-5749`, not
+`named_groups`. That conditional signature pattern must not be copied into
+invite admission, which has none of those authority preconditions. Invite join
+must reject both absent and invalid authentication unconditionally, before a
+remote artifact can reach frontier adoption, locking, or alias fan-out.
 
 ### E. Close stable-ID collision and destructive fan-out independently
 

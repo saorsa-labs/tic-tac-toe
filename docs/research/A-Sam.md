@@ -580,7 +580,16 @@ failed signature before taking its membership lock or reading local state
 (`x0x@e301371:src/server/routes/named_groups.rs:11560-11593`). Although the
 accepted card may rewrite genesis from its signed group ID at `:291-302`, an
 unverified remote artifact cannot reach the tombstone fan-out. Invite join
-needs that same entry-gate property.
+needs that same entry-gate property specifically because it is unauthenticated
+ingress. This is not a claim that every card path requires its own signature:
+the separate `GroupCardPublished` metadata arm permits an empty card signature
+at `:5741`, but only after the transport-verification gate at `:4501-4533`, an
+active Admin-or-higher sender check at `:5732-5737`, and a stable-ID match at
+`:5738-5740`; it writes only to `group_card_cache` at `:5744-5749`. Those
+authority preconditions can substitute for a card signature there. Invite
+admission has no equivalent preconditions and therefore must reject absent as
+well as invalid authentication unconditionally; copying the optional-signature
+shape from `:5741` would preserve the defect.
 
 The receiver instead needs a pending-state join keyed by
 `(group_id, epoch, key-confirmation-tag)`: if the state commit arrives first,
