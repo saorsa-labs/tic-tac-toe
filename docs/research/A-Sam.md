@@ -231,12 +231,20 @@ therefore **130 / 59 / 20**, not 134 / 59 / 20. The 120 figure is an upper
 bound on non-ephemeral protocol vocabulary, **not yet the exact custody deposit
 set**. Concrete counterexamples at the imported Buzz anchor are moderation
 commands 9040–9044, which are non-ephemeral but never stored or fanned out as
-ordinary events, and relay-admin commands 9030–9033, which mutate membership
-without being stored
-(`buzz@710ed9ff:crates/buzz-relay/src/handlers/ingest.rs:1572-1587,1807-1816`).
+ordinary events; relay-admin commands 9030–9033, which mutate membership without
+being stored; NIP-56 report kind 1984, which persists only in the private
+moderation queue; and product-feedback kind 42000, which is sidecarred into a
+private deployment table
+(`buzz@710ed9ff:crates/buzz-relay/src/handlers/ingest.rs:1538-1587,1807-1816`).
 The ADR therefore needs a generated per-kind action table: custody the event,
 custody the authorized resulting state/audit artifact, retain it in a private
 sidecar only, or exclude it.
+
+Consequently, `120 - 10 = 110` is also **not** an exact deposit count. That
+subtraction removes moderation, relay-admin, and report inputs but still
+includes product feedback plus query-time/never-emitted compatibility kinds
+classified below. A scalar count becomes defensible only after the per-kind
+action table is generated from all ingest, producer, and read dispatchers.
 
 The 33 replaceable classes add a separate merge invariant. A late custody drop
 must not overwrite a newer local value: ordinary replaceable state is keyed by
@@ -248,6 +256,36 @@ path must preserve that behavior rather than applying arrival order. Kind
 `30078` makes this user-visible because its d-tags multiplex read state,
 sections, mutes, stars, and sort
 (`tic-tac-toe@517812b:desktop/src/shared/constants/kinds.ts:42-48`).
+
+#### Production is separate from delivery: retire the six relay-only kinds
+
+The six values matched by `is_relay_only_kind` are not six equivalent durable
+events and should not be carried wholesale into the native protocol
+(`tic-tac-toe@517812b:crates/buzz-core/src/kind.rs:680-691`):
+
+| Buzz kind | Actual Buzz behavior at `710ed9ff` | Required native replacement | Custody consequence |
+|---|---|---|---|
+| `13534` membership list | Persisted replaceable snapshot signed after the relay serializes the membership read/build/write cycle (`buzz@710ed9ff:crates/buzz-relay/src/handlers/side_effects.rs:2816-2874`) | Authorized group-state actors sign ML-DSA state commits whose roster root and retained roster projection are independently verifiable (`x0x@e301371:src/groups/state_commit.rs:1-35,68-175`); native clients read `/groups/:id/members` and `/groups/:id/state*` (`x0x@e301371:src/server/mod.rs:1223-1269`) | Custody signed state commits needed by the recipient, not a relay-authored Nostr snapshot |
+| `40901` channel summary | An anchor-wide search under `crates/buzz-relay/src` found no producer; the desktop independently says the relay does not emit it and derives member count plus last-message time itself (`tic-tac-toe@517812b:desktop/src-tauri/src/commands/channels.rs:204-278`) | Local materialized view over authenticated membership and delivered message history | Custody inputs, never the obsolete summary event |
+| `40902` presence snapshot | Query compatibility selector only: the relay reads its presence cache on demand and returns synthetic kind `20001`, not a stored `40902` event (`buzz@710ed9ff:crates/buzz-relay/src/api/bridge.rs:1915-1985`) | x0x peers sign ML-DSA presence beacons; the local wrapper emits online/offline events from its current cache (`x0x@e301371:src/presence.rs:377-399,447-503,528-574`) | Presence remains ephemeral and is never custodied |
+| `30622` DM visibility | Persisted, private, per-viewer replaceable snapshot of the relay's hidden-DM table (`buzz@710ed9ff:crates/buzz-relay/src/handlers/side_effects.rs:3060-3138`) | User-authored private preference state, signed/encrypted and replicated only to that user's authorized devices; no shared group authority | Sync/custody the user-owned state under user/device capability, not a relay projection |
+| `39005` thread summary | Synthesized from `thread_metadata` in query responses; live form is fan-out-only and never stored (`buzz@710ed9ff:crates/buzz-relay/src/api/bridge.rs:404-557`; `buzz@710ed9ff:crates/buzz-relay/src/handlers/side_effects.rs:710-719`) | Deterministic local materialized view over a complete, validated thread event set, as the fork plan already schedules (`tic-tac-toe@517812b:docs/design/buzz-fork-plan.md:124-135`) | Custody messages/replies/edits/deletions; recompute the summary after merge |
+| `39006` window bounds | One query-time overlay carrying `has_more` and the keyset cursor; never an application record (`buzz@710ed9ff:crates/buzz-relay/src/api/bridge.rs:559-580`) | Ordinary local history-query response metadata | No custody and no protocol author |
+
+Stage 2 does not yet delete the bridge signer: it replaces the key source with
+a per-install compatibility key whose authority ends at the loopback dialect
+while x0xd owns the real ML-DSA identity
+(`tic-tac-toe@517812b:docs/design/buzz-fork-plan.md:113-122`). That key may keep
+wrapping compatibility projections for the unmodified desktop until each
+feature crosses the Stage-3 seam. It must not become an x0x authority.
+
+Therefore the production gap is real but bounded differently: **only `13534`
+and `30622` are persisted projections in this six-kind set that need an
+explicit replacement authority; the first maps to authorized group-state
+commits and the second to user-owned private state.** The other four are
+absent, ephemeral/on-demand, or query metadata and should disappear as event
+kinds. Custody cannot manufacture any projection, but it also must not preserve
+compatibility artifacts whose native replacement is local computation.
 
 Custody alone does **not** provide history from before a user joined, recovery
 after every delivery copy expired, a fresh-device archive after another device
@@ -631,6 +669,14 @@ It should decide, at minimum:
     loss, restart, equivocation/replay, quota exhaustion, metadata snapshot,
     no-plaintext-at-custodian assertions, and newer-then-older replaceable
     delivery proving that stale custody arrival cannot regress state.
+15. **Production versus projection:** the six-row relay-only retirement table
+    above is normative. Custody carries authorized source/state artifacts; it
+    never grants a custodian authority to mint membership, preferences,
+    summaries, presence, or pagination metadata.
+16. **Stage boundary:** the bridge-local key may wrap loopback compatibility
+    projections only until the native consumer for that feature lands. Native
+    acceptance must prove the same UX from x0x-authorized state or deterministic
+    local projection before deleting the corresponding Nostr path.
 
 A follow-up reconciliation ADR should compare:
 
