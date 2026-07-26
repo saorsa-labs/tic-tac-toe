@@ -359,10 +359,26 @@ tree hash, or confirmed transcript
 public tree/transcript commitment
 (`x0x@e301371:src/mls/treekem.rs:427-443`).
 
-The authorization decision must therefore choose and bind a cryptographic
-secure-plane frontier (for example the confirmed transcript/tree hash or a
-digest of the accepted TreeKEM commit), not merely an epoch counter. The
-two-admin test must assert the final roster **and** TreeKEM interoperability:
+The exact frontier already exists in the pinned `saorsa-mls` dependency:
+`TreeKemCommit.tree_hash_after` commits to the resulting tree including parent
+hashes, is covered by the committer's signature, and is recomputed and rejected
+on mismatch by receivers
+(`saorsa-mls@0.3.8:src/treekem_group.rs:140-161,466-511,605-613,905-935`;
+the pin is `x0x@e301371:Cargo.toml:20-24`). x0x should expose this value and
+cross-bind it (or a digest of the complete signed TreeKEM commit containing it)
+into the ML-DSA `GroupStateCommit`; an epoch number is not a cryptographic
+frontier.
+
+That cross-binding requires an ordering change. `tree_hash_after` does not exist
+until `remove_member_verified` has mutated the local TreeKEM group, but the
+current path seals `GroupStateCommit` first. The safe transaction shape is:
+snapshot the old TreeKEM state; generate/apply its commit; extract the signed
+`tree_hash_after`; seal the roster commit over epoch plus that binding; persist
+both; and restore the snapshot if sealing or persistence fails. The receiver
+must verify that the delivered TreeKEM commit matches the group-state binding
+before atomically installing either side.
+
+The two-admin test must assert the final roster **and** TreeKEM interoperability:
 all surviving replicas accept the same serialized operation order, can
 cross-decrypt post-resolution application messages, and excluded members
 cannot decrypt them. An equal epoch alone can pass while the group remains
@@ -768,8 +784,10 @@ It should decide, at minimum:
     concurrently, every replica converges, and the losing proposal is visibly
     rebased/retried or rejected rather than silently lost. For TreeKEM groups,
     equal epoch numbers do not prove convergence: the test must also prove a
-    common cryptographic frontier and post-resolution cross-decryption among
-    all survivors, plus exclusion of removed members.
+    common `TreeKemCommit.tree_hash_after` binding and post-resolution
+    cross-decryption among all survivors, plus exclusion of removed members.
+    The implementation order must generate the TreeKEM commit before sealing
+    the cross-bound group-state commit, with rollback on every later failure.
 
 A follow-up reconciliation ADR should compare:
 
