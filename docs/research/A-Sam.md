@@ -336,14 +336,17 @@ reaches the other node. Ban has the same shape
 
 Incoming membership events are serialized only inside each receiving daemon
 (`x0x@e301371:src/server/routes/named_groups.rs:4575-4591`), and
-`prev_state_hash` validation then rejects whichever sibling arrives second.
-That is compare-and-swap at one replica, but it is not yet a network fork
-choice: different replicas can accept opposite first arrivals. It also means
-“the sibling is rejected, therefore no update is lost” is too strong at the
-product boundary: both initiating HTTP requests may already have returned
-success. Until a loser is deterministically selected and its operation is
-rebased/retried or surfaced as rejected, the user can observe a successful
-administrative action that does not survive convergence.
+state-commit validation then rejects whichever sibling arrives second. For the
+equal-revision race, the reached predicate is `StaleRevision`; the later
+`prev_state_hash` check is not reached
+(`x0x@e301371:src/groups/state_commit.rs:693-712`). That is per-replica
+serialization, but it is not yet a network fork choice: different replicas can
+accept opposite first arrivals. It also means “the sibling is rejected,
+therefore no update is lost” is too strong at the product boundary: both
+initiating HTTP requests may already have returned success. Until a loser is
+deterministically selected and its operation is rebased/retried or surfaced as
+rejected, the user can observe a successful administrative action that does not
+survive convergence.
 
 The fork also reaches the TreeKEM state, but equality of the numeric epoch is
 not a sufficient acceptance assertion. Each sibling removal starts from epoch
@@ -360,23 +363,141 @@ public tree/transcript commitment
 (`x0x@e301371:src/mls/treekem.rs:427-443`).
 
 The exact frontier already exists in the pinned `saorsa-mls` dependency:
-`TreeKemCommit.tree_hash_after` commits to the resulting tree including parent
-hashes, is covered by the committer's signature, and is recomputed and rejected
-on mismatch by receivers
+`TreeKemCommit.tree_hash_after` commits to the resulting public tree including
+parent hashes, is covered by the committer's signature, and is recomputed and
+rejected on mismatch by receivers
 (`saorsa-mls@0.3.8:src/treekem_group.rs:140-161,466-511,605-613,905-935`;
-the pin is `x0x@e301371:Cargo.toml:20-24`). x0x should expose this value and
-cross-bind it (or a digest of the complete signed TreeKEM commit containing it)
-into the ML-DSA `GroupStateCommit`; an epoch number is not a cryptographic
-frontier.
+the pin is `x0x@e301371:Cargo.toml:20-24`). But the value to cross-bind should
+be a digest of the **exact accepted TreeKEM commit bytes**, not
+`tree_hash_after` alone. The complete commit also contains the removed leaves,
+committer leaf, full update path, epoch, tree hash, and signature. A tree hash
+selects the resulting public tree; a commit-byte digest selects the one exact
+signed artifact whose encrypted update path every survivor must process.
 
-That cross-binding requires an ordering change. `tree_hash_after` does not exist
-until `remove_member_verified` has mutated the local TreeKEM group, but the
-current path seals `GroupStateCommit` first. The safe transaction shape is:
-snapshot the old TreeKEM state; generate/apply its commit; extract the signed
-`tree_hash_after`; seal the roster commit over epoch plus that binding; persist
-both; and restore the snapshot if sealing or persistence fails. The receiver
-must verify that the delivered TreeKEM commit matches the group-state binding
-before atomically installing either side.
+No dependency accessor or wire-field change is required:
+`remove_member_verified` already returns the postcard-serialized
+`TreeKemCommit`, and x0x already carries those exact bytes as
+`treekem_commit_b64` beside the signed group-state commit
+(`x0x@e301371:src/mls/treekem.rs:12-15,92-97,365-386`;
+`x0x@e301371:src/server/routes/named_groups.rs:9279-9289,9321-9328`). Hash the
+received bytes directly rather than decode/re-encode them. x0x pins postcard
+1.1.3 (`x0x@e301371:Cargo.lock:2867-2870`), and postcard documents a stable
+wire format from 1.0
+([postcard format stability](https://docs.rs/postcard/latest/postcard/#format-stability)),
+but direct-byte hashing also avoids making canonical reserialization a security
+precondition.
+
+The existing slot already provides authentication. `security_binding` is
+length-prefixed into both the state hash and the ML-DSA signable bytes, and
+receivers recompute the projected state hash before retaining a commit
+(`x0x@e301371:src/groups/state_commit.rs:219-245,350-451`;
+`x0x@e301371:src/groups/mod.rs:640-682`). The defect is therefore weak content,
+not a missing signature or field. Use an exact, versioned, discriminated
+encoding, for example:
+
+```text
+treekem:commit-postcard-v1:epoch=<u64>:blake3=<64-lower-hex>
+gss:key-confirm-v1:epoch=<u64>:blake3=<64-lower-hex>
+```
+
+The TreeKEM digest should use a hard-coded BLAKE3 derive-key context such as
+`x0x security binding treekem commit postcard v1` over a length-prefixed stable
+group ID and the exact commit bytes. The plane, artifact encoding, version,
+algorithm, epoch, and fixed-width digest are all explicit. Unknown schemes must
+fail closed after the compatibility transition; a bare digest would make the
+TreeKEM and GSS meanings confusable in the one shared field. BLAKE3's official
+API distinguishes keyed hashing and context-separated key derivation and
+requires application-specific hard-coded derive-key contexts
+([BLAKE3 official implementation](https://github.com/BLAKE3-team/BLAKE3#the-blake3-crate)).
+
+That cross-binding requires an ordering change. The serialized TreeKEM commit
+does not exist until `remove_member_verified` has mutated the local TreeKEM
+group, but the current path seals `GroupStateCommit` first. The required
+transaction shape is: snapshot the old TreeKEM state; generate/apply its commit;
+digest the returned bytes; seal the roster commit over epoch plus that binding;
+persist both; and restore the snapshot if sealing or persistence fails. The
+receiver must verify that the delivered TreeKEM commit matches the group-state
+binding before atomically installing either side.
+
+Local failure rollback is only the first half. The successful path writes one
+post-commit snapshot to `{group_id}.snap`; its replay journal contains the same
+post-commit envelope and is deleted when persistence completes
+(`x0x@e301371:src/server/routes/named_groups.rs:12442-12455,12601-12638`).
+It retains no parent-epoch pre-image. A node that later loses fork choice has
+therefore destroyed the input needed to restore the parent and apply the winning
+sibling. The authorization ADR must retain a pre-commit checkpoint until its
+fork-resolution policy confirms the selected branch; local HTTP success is not
+that confirmation.
+
+The receive path also rejects at the wrong abstraction boundary for resolving
+this race. `MemberRemoved` calls `apply_stateful_event_to_group`, which runs
+`validate_apply`, and converts any error to a bare `false` before it decodes or
+processes `treekem_commit_b64`
+(`x0x@e301371:src/server/routes/named_groups.rs:1967-1987,4930-4982,5023-5049`).
+Thus the exact sibling reaches neither the TreeKEM epoch check nor a diagnostic,
+despite ADR-0016 saying equal-revision siblings are surfaced rather than
+silently dropped
+(`x0x@e301371:docs/adr/0016-role-based-group-authority-flat-admin.md:109-124`).
+Fork detection and choice must intervene at or above this roster-apply gate,
+where it can classify the sibling, compare the cross-bound TreeKEM artifact,
+select a branch, restore the retained pre-image, and visibly rebase/retry or
+reject the losing operation.
+
+The GSS frontier needs a different primitive. Publishing the rotated secret
+itself is obviously disallowed, while publishing only `gss:epoch=N` repeats the
+TreeKEM defect: two divergent 32-byte secrets can share the same counter. Use a
+public **key-confirmation tag** instead:
+
+1. derive a distinct confirmation key from the fresh 32-byte GSS secret with
+   BLAKE3 derive-key context `x0x gss confirmation key v1`;
+2. MAC a canonical, length-prefixed context containing the stable group ID,
+   new secret epoch, previous state hash, and new roster root with BLAKE3 keyed
+   mode; and
+3. place the resulting 32-byte tag in the versioned GSS binding above.
+
+This follows the same construction pattern as MLS—not its wire format—where a
+confirmation key derived from the new epoch secret MACs the confirmed
+transcript and receivers verify that tag before accepting the new group state
+([RFC 9420 §8.2 and §12.4.2](https://datatracker.ietf.org/doc/html/rfc9420#section-12.4.2)).
+The tag does not disclose a uniformly random 256-bit GSS secret under the
+existing secret-generation assumption
+(`x0x@e301371:src/groups/mod.rs:418-436`), but it is an offline verifier for a
+guessed key. The protocol must therefore never admit password-derived or other
+low-entropy GSS secrets.
+
+GSS verification must be two-phase because the signed roster commit and
+recipient-sealed key are separate, reorderable events. Today ban persists the
+new epoch, sends `SecureShareDelivered` envelopes, and only then publishes the
+`MemberBanned` commit
+(`x0x@e301371:src/server/routes/named_groups.rs:10305-10368,10397-10408`).
+A receiver currently accepts a higher-epoch share from an active admin, opens
+it, installs the secret, and overwrites `security_binding` with the epoch-only
+string even if the state commit has not arrived
+(`x0x@e301371:src/server/routes/named_groups.rs:5803-5835,5854-5890`). That
+cannot verify the join between planes.
+
+The receiver instead needs a pending-state join keyed by
+`(group_id, epoch, key-confirmation-tag)`: if the state commit arrives first,
+retain its signed expected binding with `shared_secret=None`; if the sealed
+share arrives first, retain it as pending but do not install or use it. Only
+after decrypting the share, deriving the tag, and matching the exact signed
+binding may the daemon install the key. The share AAD should also bind the
+versioned tag (or the state-commit hash) so the envelope cannot be relabelled
+between sibling states. Delivery order must not change the result.
+
+GSS remove is not an open policy choice. Accepted ADR-0010 requires secret
+rotation on both ban and remove
+(`x0x@e301371:docs/adr/0010-gss-before-mls-treekem-for-v1-secure-groups.md:35-44,49-68,97-103,140-148`).
+The live non-TreeKEM removal path does not rotate the content key, emits no
+secret epoch, commits the roster before a fail-open legacy-MLS mutation, and
+publishes anyway
+(`x0x@e301371:src/server/routes/named_groups.rs:8425-8454,8478-8525`). This is
+a shipped spec violation for GSS groups, not successor behavior to preserve.
+It is live because newly created `MlsEncrypted && !Hidden` groups deliberately
+remain on GSS
+(`x0x@e301371:src/server/routes/named_groups.rs:6516-6533`). Route both ban and
+remove through the same rotate, key-confirm, seal-to-remaining-members, and
+two-phase receive path before treating GSS as a safe migration source.
 
 The two-admin test must assert the final roster **and** TreeKEM interoperability:
 all surviving replicas accept the same serialized operation order, can
@@ -783,11 +904,18 @@ It should decide, at minimum:
     an end-to-end test in which two authorized admins mutate the same parent
     concurrently, every replica converges, and the losing proposal is visibly
     rebased/retried or rejected rather than silently lost. For TreeKEM groups,
-    equal epoch numbers do not prove convergence: the test must also prove a
-    common `TreeKemCommit.tree_hash_after` binding and post-resolution
-    cross-decryption among all survivors, plus exclusion of removed members.
-    The implementation order must generate the TreeKEM commit before sealing
-    the cross-bound group-state commit, with rollback on every later failure.
+    equal epoch numbers do not prove convergence: the test must prove an
+    identical versioned digest of the exact accepted TreeKEM commit (which
+    transitively binds `tree_hash_after` and the update path),
+    post-resolution cross-decryption among all survivors, and exclusion of
+    removed members. The implementation order must generate the TreeKEM commit
+    before sealing the cross-bound group-state commit. Resolution additionally
+    requires a retained parent-epoch checkpoint until branch confirmation and
+    sibling interception at the roster-apply gate; the current bare rejection
+    before TreeKEM processing cannot satisfy the test. GSS ban/remove tests must
+    likewise prove that each surviving member installs a key whose derived
+    confirmation tag matches the signed state binding, regardless of share/
+    state-event arrival order, while removed members cannot derive the new key.
 
 A follow-up reconciliation ADR should compare:
 
