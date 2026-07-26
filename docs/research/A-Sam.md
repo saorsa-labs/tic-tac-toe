@@ -21,9 +21,10 @@ x0x's current `GET /history`, FTS search, and WebSocket `backfill` replay the
 local daemon's SQLite rows. They give restart survival to a node that witnessed
 the message. They cannot recover a message published while that node was
 offline. This is intentional: ADR-0023 says each node records what it witnessed,
-forbids serving that decrypted history to the network, and requires a new ADR
-for cross-node backfill
+explicitly defers serving history/cross-node backfill to a new ADR with its own
+trust model, and calls its V1 local-only privacy claim load-bearing
 (`x0x@e301371:docs/adr/0023-durable-local-history.md:42-50,91-124,164-177`).
+That is a designated review procedure, not a prohibition on the deferred work.
 The README's “offline-first” claim is therefore true only in the
 close-app/restart-daemon sense it actually states
 ([`README.md:19-31`](../../README.md)); it is not yet relay-equivalent
@@ -42,8 +43,8 @@ explicit participant-owned custodians**:
   measurements justify it;
 - a separate, opt-in same-user device-sync/backup design for full history
   recovery; a bounded delivery spool must not be marketed as an archive;
-- no global DHT, no arbitrary public archive, and no network serving of
-  ADR-0023's decrypted local history.
+- no global DHT, no arbitrary public archive, and no reuse of an ADR-0023 local
+  history store as the ordinary delivery service.
 
 This is not “no storage.” Offline delivery is impossible without an
 always-reachable holder. It is **no privileged global relay**: custody is
@@ -179,10 +180,10 @@ reaches the daemon is absent from all three computations.
 
 Therefore the substantive challenge is confirmed: **a local-only v1 cannot meet
 Buzz's unread/thread/catch-up UX floor**. It will visibly undercount or omit
-messages sent while all of that recipient's devices were offline. But exporting
-another participant's decrypted ADR-0023 history is not the only repair and is
-the wrong privacy boundary. Participant-selected custodians can retain opaque
-addressed ciphertext and deliver it later; the recipient then validates,
+messages sent while all of that recipient's devices were offline. But querying
+another node's private ADR-0023 history record is not the only repair and is the
+wrong default privacy boundary. Participant-selected custodians can retain
+opaque addressed ciphertext and deliver it later; the recipient then validates,
 decrypts, and projects it locally. The required new ADR should consequently be
 framed as **asynchronous delivery/custody**, with reconciliation as one step,
 not as general peer-to-peer history serving.
@@ -196,11 +197,12 @@ different meanings of “cross-node backfill”:
    returning node missed**, Lane B is right: the UX floor requires it. Custody
    fetch is one form of cross-node catch-up, and a local-only design cannot
    substitute for it.
-2. If it means **querying another participant's ADR-0023 local plaintext
-   history**, that stronger mechanism is not required for ordinary offline
-   delivery and would cross the wrong privacy boundary. The recommended
-   custodian transfers only opaque, recipient-addressed drops; validation,
-   decryption, and projection happen on the returning recipient node.
+2. If it means **querying another node's private ADR-0023 local history
+   record**, that stronger mechanism is not required for ordinary offline
+   delivery and would change the load-bearing local-only privacy claim. The
+   recommended custodian transfers only opaque, recipient-addressed drops;
+   validation, decryption, and projection happen on the returning recipient
+   node. The custodian is not serving its own witnessed/decrypted history.
 
 Ciphertext custody meets Buzz's unread/thread/catch-up floor only for a
 precisely bounded case: the user was authorized when the event was sent; every
@@ -208,7 +210,44 @@ durable projection input (messages, replies, edits, deletions, reactions,
 membership changes, and other non-ephemeral state) was deposited; at least one
 selected custodian persisted it; and the recipient returned before expiry.
 Under those conditions the local projection can converge without a remote
-plaintext-history API.
+history-store query API.
+
+The shipped kind registry makes the potential surface concrete
+(`tic-tac-toe@517812b:crates/buzz-core/src/kind.rs:620-637`):
+
+| Shipped classification | Constants |
+|---|---:|
+| Ephemeral (`20000..=29999`) | 10 |
+| Replaceable (`0`, `3`, `41`, `10000..=19999`) | 11 |
+| Parameterized-replaceable (`30000..=39999`) | 22 |
+| Regular / other | 87 |
+| **Actual kind constants** | **130** |
+| **Outside the ephemeral range** | **120** |
+
+This count comes from a structural match over scalar `pub const ...: u32`
+definitions, excluding the four range bounds, followed by the shipped
+predicates; all 130 values are distinct. The correct vocabulary ladder is
+therefore **130 / 59 / 20**, not 134 / 59 / 20. The 120 figure is an upper
+bound on non-ephemeral protocol vocabulary, **not yet the exact custody deposit
+set**. Concrete counterexamples at the imported Buzz anchor are moderation
+commands 9040–9044, which are non-ephemeral but never stored or fanned out as
+ordinary events, and relay-admin commands 9030–9033, which mutate membership
+without being stored
+(`buzz@710ed9ff:crates/buzz-relay/src/handlers/ingest.rs:1572-1587,1807-1816`).
+The ADR therefore needs a generated per-kind action table: custody the event,
+custody the authorized resulting state/audit artifact, retain it in a private
+sidecar only, or exclude it.
+
+The 33 replaceable classes add a separate merge invariant. A late custody drop
+must not overwrite a newer local value: ordinary replaceable state is keyed by
+`(pubkey, kind)` and parameterized state by `(pubkey, kind, d-tag)`, with
+`created_at` ordering and a deterministic equal-timestamp event-ID tie-break.
+The current bridge already rejects stale replaceable events at merge time
+(`x0x-nostr-bridge@19ec83b:src/history/engine.rs:204-276`); the native custody
+path must preserve that behavior rather than applying arrival order. Kind
+`30078` makes this user-visible because its d-tags multiplex read state,
+sections, mutes, stars, and sort
+(`tic-tac-toe@517812b:desktop/src/shared/constants/kinds.ts:42-48`).
 
 Custody alone does **not** provide history from before a user joined, recovery
 after every delivery copy expired, a fresh-device archive after another device
@@ -219,9 +258,9 @@ project must not present the bounded mailbox as unqualified Buzz parity.
 
 The consensus ADR shape should be named broadly enough to avoid a word game:
 **cross-node catch-up via participant-selected ciphertext custody**. It must
-state explicitly that some cross-node recovery is required, while preserving
-ADR-0023's prohibition on serving decrypted local history for ordinary
-delivery.
+state explicitly that some cross-node recovery is required, follow ADR-0023's
+mandated separate-review procedure, and leave its existing V1 local-history
+store and load-bearing local-only privacy claim unchanged.
 
 ## 4. Why x0x cannot catch up a shut-down node today
 
@@ -366,8 +405,9 @@ shipped surface incorrectly until the capability doc is repaired.
 ### 6.1 Keep three stores and three promises separate
 
 1. **Local history store (existing ADR-0023):** decrypted, searchable,
-   user-owned, never served to the network. It records what this daemon
-   witnessed and successfully verified.
+   user-owned, and local-only in V1. It records what this daemon witnessed and
+   successfully verified; network serving is explicitly deferred to a separate
+   ADR.
 2. **Custody spool (new ADR):** opaque end-to-end ciphertext, capability
    addressed, bounded, not searchable by the custodian, and deleted after
    receipt/expiry. It exists only to bridge non-overlapping online windows.
@@ -452,11 +492,12 @@ membership change, custodian replacement, and suspected compromise.
    but UI delivery state must distinguish `sent`, `custodied`, `received`, and
    `read`.
 
-This preserves ADR-0023: the network never receives reader-side plaintext
-history, and a reinstalled device cannot ask random peers for a conversation
-archive. It receives only drops addressed under capabilities it already owns.
-That last sentence is a deliberate non-parity boundary, not a hidden feature:
-full-history restoration requires the separate same-user design below.
+This leaves ADR-0023's existing local-history decision unchanged: the custodian
+does not serve its own witnessed/decrypted history record, and a reinstalled
+device cannot ask random peers for a conversation archive. It receives only
+drops addressed under capabilities it already owns. That last sentence is a
+deliberate non-parity boundary, not a hidden feature: full-history restoration
+requires the separate same-user design below.
 
 ### 6.5 Reconciliation choice
 
@@ -550,9 +591,9 @@ coverage.
 
 ## 8. Decisions the new x0x ADR must make
 
-The first ADR should be titled along the lines of:
+The first ADR should be titled:
 
-> **Participant-selected ciphertext custody for asynchronous delivery**
+> **Cross-node catch-up via participant-selected ciphertext custody**
 
 It should decide, at minimum:
 
@@ -570,8 +611,10 @@ It should decide, at minimum:
    reachability.
 7. **Inner authenticity:** signed/PQC x0x artifacts remain authoritative;
    custodians cannot originate accepted content.
-8. **Ordering:** DM sequence and MLS epoch/commit handling; replay and gap
-   detection.
+8. **Ordering and replacement:** DM sequence and MLS epoch/commit handling;
+   replay and gap detection; latest-wins merge by the shipped replaceable keys,
+   `created_at`, and deterministic equal-timestamp event-ID tie-break rather
+   than custody arrival order.
 9. **Receipts and deletion:** state machine and honest limits of remote
    deletion.
 10. **Threat model:** individual and colluding custodians, traffic observers,
@@ -580,11 +623,14 @@ It should decide, at minimum:
     anonymity transport policy.
 12. **Observability:** counts/bytes/age/quorum health without logging queue
     capabilities or stable social identifiers.
-13. **Compatibility:** local history remains ADR-0023; delivery API and
+13. **Compatibility:** local history remains ADR-0023; a generated per-kind
+    action table distinguishes custodied events, resulting state/audit
+    artifacts, private sidecars, and exclusions; the delivery API,
     `x0x@e301371:SKILL.md`, the API reference, and parity CLI update together.
 14. **Validation:** non-overlapping-online-window e2e tests, multi-custodian
     loss, restart, equivocation/replay, quota exhaustion, metadata snapshot,
-    and no-plaintext-at-custodian assertions.
+    no-plaintext-at-custodian assertions, and newer-then-older replaceable
+    delivery proving that stale custody arrival cannot regress state.
 
 A follow-up reconciliation ADR should compare:
 
@@ -602,9 +648,9 @@ which user/machine identity can authorize an export, how a source device proves
 the new device belongs to the same user, how reader-side plaintext is
 re-encrypted, what happens after device/recovery-key revocation, which scopes
 may be restored, and whether any unattended backup provider is allowed. This
-ADR necessarily narrows ADR-0023's “never served to the network” boundary for
-an explicit owner-authorized path; it must not arrive as an incidental mailbox
-feature.
+ADR would explicitly revise the load-bearing local-only privacy claim for a
+scoped, owner-authorized export path; it must follow ADR-0023's review trigger
+and must not arrive as an incidental mailbox feature.
 
 ## 9. Consequences for tic-tac-toe sequencing and claims
 
@@ -650,7 +696,7 @@ the design vocabulary:
 - every added custodian buys availability with observable metadata, so the
   protocol and UI must expose that trade rather than market it away.
 
-That design fits ADR-0006's participant/explicit-replica model, preserves
-ADR-0023's local-plaintext boundary for ordinary delivery, and gives
-tic-tac-toe a credible path through its foundational relay-free availability
-gaps.
+That design fits ADR-0006's participant/explicit-replica model, leaves
+ADR-0023's V1 local-history store unchanged for ordinary delivery, follows its
+explicit review trigger, and gives tic-tac-toe a credible path through its
+foundational relay-free availability gaps.
