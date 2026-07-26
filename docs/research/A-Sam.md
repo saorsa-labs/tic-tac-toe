@@ -345,6 +345,32 @@ success. Until a loser is deterministically selected and its operation is
 rebased/retried or surfaced as rejected, the user can observe a successful
 administrative action that does not survive convergence.
 
+The fork also reaches the TreeKEM state, but equality of the numeric epoch is
+not a sufficient acceptance assertion. Each sibling removal starts from epoch
+`N`, advertises `N+1` in `security_binding`, then applies and persists a
+different TreeKEM removal commit
+(`x0x@e301371:src/server/routes/named_groups.rs:9263-9302`). Thus two
+cryptographically different trees can both report epoch `N+1`. The signed
+`GroupStateCommit` binds the string `treekem:epoch=N+1`, not the TreeKEM commit,
+tree hash, or confirmed transcript
+(`x0x@e301371:src/groups/state_commit.rs:350-451`;
+`x0x@e301371:src/server/routes/named_groups.rs:9264-9270`), and the current
+`TreeKemMlsGroup` wrapper exposes only epoch, group ID, and member count—not a
+public tree/transcript commitment
+(`x0x@e301371:src/mls/treekem.rs:427-443`).
+
+The authorization decision must therefore choose and bind a cryptographic
+secure-plane frontier (for example the confirmed transcript/tree hash or a
+digest of the accepted TreeKEM commit), not merely an epoch counter. The
+two-admin test must assert the final roster **and** TreeKEM interoperability:
+all surviving replicas accept the same serialized operation order, can
+cross-decrypt post-resolution application messages, and excluded members
+cannot decrypt them. An equal epoch alone can pass while the group remains
+partitioned. The existing rollback helper snapshots and restores only around a
+failed single commit install
+(`x0x@e301371:src/server/routes/named_groups.rs:2071-2103,2176-2228`); it is not
+a sibling-fork resolution mechanism.
+
 Custody alone does **not** provide history from before a user joined, recovery
 after every delivery copy expired, a fresh-device archive after another device
 already acknowledged/deleted the drop, or economical complete history for a
@@ -740,7 +766,10 @@ It should decide, at minimum:
     decision to close x0x ADR-0016's recorded equal-revision fork question and
     an end-to-end test in which two authorized admins mutate the same parent
     concurrently, every replica converges, and the losing proposal is visibly
-    rebased/retried or rejected rather than silently lost.
+    rebased/retried or rejected rather than silently lost. For TreeKEM groups,
+    equal epoch numbers do not prove convergence: the test must also prove a
+    common cryptographic frontier and post-resolution cross-decryption among
+    all survivors, plus exclusion of removed members.
 
 A follow-up reconciliation ADR should compare:
 
