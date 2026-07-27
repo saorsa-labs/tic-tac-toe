@@ -13,7 +13,7 @@ in favor of x0x authority-signed group state. That hand-off is unsafe until the
 roster state, secure-group cryptographic state, and join bootstrap are one
 authenticated frontier.
 
-The current x0x frontier has four independent defects.
+The current x0x frontier has five independent defects.
 
 ### 1. Equal-revision siblings can split replicas
 
@@ -103,6 +103,23 @@ the withdrawn, keyless stub
 
 This chain requires the victim to accept a crafted invite. It is not claimed
 as remote-unauthenticated, and this research did not execute an exploit.
+
+### 5. Card signatures do not bind a signer to an existing group
+
+`GroupCard::verify_signature` proves that `authority_agent_id` derives from
+the supplied public key and signed the card bytes, but explicitly leaves group
+authorization to apply time
+(`x0x@e301371:src/groups/directory.rs:143-195`). Direct
+`import_group_card` verifies that signature, then refreshes an existing
+direct-keyed `GroupInfo` without checking whether `authority_agent_id` is
+authorized by its current roster. The card can replace policy, metadata topic,
+revision/hash frontier and withdrawal state, conditionally rewrite genesis,
+and insert its separately asserted `owner_agent_id` as an Admin
+(`x0x@e301371:src/server/routes/named_groups.rs:11560-11572,11630-11654,11680-11763`).
+
+This is a separate local-ingress authority-binding defect. It requires a user
+or bearer-authenticated local caller to submit an attacker-signed card; no
+crafted import was executed in this research.
 
 ## Decision
 
@@ -215,34 +232,105 @@ unsigned invites must be reissued after the enforcement cutoff or joined
 through a flow in which an authority-signed state anchor establishes the
 frontier before any claimed base fields are installed.
 
-The adjacent group-card import is the enforcement model. `GroupCard` has
-canonical length-prefixed signable bytes plus ML-DSA sign and verify methods
+`GroupCard` supplies the canonical-signature mechanism, not a complete
+authority model. It has length-prefixed signable bytes plus ML-DSA sign and
+verify methods
 (`x0x@e301371:src/groups/directory.rs:31-85,88-165,169-195`), and
-`import_group_card` rejects a failed signature at the entry point, before it
-takes the membership lock or looks up local state
+`import_group_card` rejects a failed signature before its membership lock and
+local lookup
 (`x0x@e301371:src/server/routes/named_groups.rs:11560-11572,11580-11593`).
-This is specifically the model for unauthenticated ingress. The separate
-`GroupCardPublished` metadata arm tolerates an empty card signature at `:5741`,
-but only where authorization is instead derived from the transport-provided
-sender identity: `sender_hex` must name an active Admin-or-higher member of the
-existing record at `:5732-5737`, the card stable ID must match at `:5738-5740`,
-and the sink is the group-card cache at `:5744-5749`, not `named_groups`. The
-`verified` flag also gates this arm at `:4525-4533`, but the source defines it
-as a best-effort identity-discovery-cache annotation at `:4501-4514` and
-explicitly says it is not the membership-authorization control. Do not count
-that racy annotation as an additional authentication precondition. The
-conditional signature pattern must not be copied into invite admission, which
-has no equivalent sender authority. Invite join must reject both absent and
-invalid authentication unconditionally, before a remote artifact can reach
-frontier adoption, locking, or alias fan-out.
+But `verify_signature` explicitly does not establish that the signer is
+authorized for the claimed group (`directory.rs:155-165`). Signature validity
+is therefore necessary, not sufficient, for frontier adoption.
 
-### E. Close stable-ID collision and destructive fan-out independently
+The separate `GroupCardPublished` arm is the pattern not to copy. It tolerates
+an empty card signature at `named_groups.rs:5741` and asks whether
+transport-provided `sender_hex` is Admin-or-higher in the selected local record
+at `:5732-5737`. That is not a sound substitute under this ADR's threat model:
+the resolver loads a direct-key match at `:4554-4588`, while invite bootstrap
+copies `base_members_v2` and the claimed stable ID from the unsigned link at
+`:7642-7675` and stores the stub under that direct key at `:7832-7849`. The
+join path's creator helper selects a self-consistent seeded entry from that
+same unsigned roster and validates only its AgentId shape
+(`x0x@e301371:src/groups/invite.rs:257-305`;
+`src/server/routes/named_groups.rs:7773-7790`). The attacker-authored stub can
+therefore answer both the roster-authority question and the stable-ID
+comparison at `:5738-5740`: the event's independent `group_id` field
+(`named_groups.rs:755-758`) can be `K'` for direct-key resolution while the
+card's `group_id` is victim stable ID `K`.
+
+The `verified` argument at `:4525-4533` has path-specific meaning and must not
+be treated as a transport-wide authority proof:
+
+- The metadata-topic listener passes `PubSubMessage::verified`
+  (`named_groups.rs:6371-6414`). On that path it proves an ML-DSA signature by
+  the publishing AgentId: v2 decode binds the embedded key to the AgentId and
+  payload (`x0x@e301371:src/gossip/pubsub.rs:1093-1138,1173-1206`), failed
+  signed messages are dropped at `:784-791`, and senderless legacy messages
+  are skipped by the listener. A previously unknown attacker signing with
+  their own key therefore satisfies `verified == true`. The x0x wrapper's
+  publish, subscribe, and topic-peer initialization paths consult no group
+  roster (`:398-439,544-612,687-761`); for a connected gossip-plane peer, the
+  invite-derived `K'` topic is not a group-authority boundary.
+- The direct listener passes `DirectMessage::verified`
+  (`x0x@e301371:src/server/mod.rs:1056-1083`). For raw QUIC, `sender` is
+  self-asserted and `verified` is the identity-cache cross-binding to the
+  transport-authenticated MachineId
+  (`x0x@e301371:src/direct.rs:190-222`;
+  `src/lib.rs:8489-8528,8624-8633`). It is the sender-authentication hinge on
+  that path, not a disposable freshness annotation. Gossip-inbox direct
+  delivery verifies both the pubsub origin and inner DM envelope before
+  injecting a direct message with `verified = true`
+  (`x0x@e301371:src/dm_inbox.rs:345-350,407-428,689-700`).
+
+Thus the metadata path demonstrates the cache consequence without a
+pre-existing identity-cache entry: the sender identity is authentic, but
+`sender_is_admin` obtains its group authority from the forged roster. On raw
+QUIC the identity binding remains mandatory, and the next roster-authority
+link is still forgeable. Invite join must reject both absent and invalid
+authentication before any remote frontier is adopted, and no invite-derived
+record may authorize another artifact until its authority anchor is verified.
+
+### E. Close stable-ID collision, card writes, and destructive fan-out independently
 
 Invite handling must test both `group_id` and `stable_group_id` for
 already-joined state as it already does for withdrawn state. Concurrency
 control must serialize on the claimed stable group as well as the MLS group
 ID; two links with different `group_id` values but the same stable ID must not
 race into two stubs.
+
+Group-card mutation requires its own authority-backed boundary. The
+`GroupCardPublished` arm must reject absent or invalid card signatures and
+must verify that the card signer is authorized by an authenticated frontier,
+not merely by the selected local record. A provisional or unauthenticated
+invite stub must never authorize a stable-ID cache write. Today the arm can
+cache an unsigned card under the stub's claimed stable ID at `:5744-5749`;
+revision and issue time select the winner
+(`named_groups.rs:228-240`; `groups/directory.rs:203-213`), even though
+`supersedes` documents that the caller must first verify both signatures at
+`directory.rs:203-205`. Cached entries win the single-card endpoint at
+`named_groups.rs:11520-11539`, and discovery merges them against synthesized
+local cards at `:11319-11363`. A `withdrawn` card can instead evict the cached
+card at `:5746-5747`. This is a third consequence of the forged invite stub,
+separate from the tombstone overwrite. The metadata-topic path establishes
+that an unknown sender can satisfy `verified == true` by signing with their
+own key; it authenticates identity, not authority for the victim stable ID.
+Static analysis did not establish a redirect consumer for the card's
+`metadata_topic`; do not claim a redirect primitive.
+
+Direct card import needs the same distinction between authentication and
+authorization. A valid standalone signature proves the identity in
+`authority_agent_id`, but not that identity's right to claim `group_id`. For a
+non-withdrawn card whose `group_id` already keys a local record,
+`import_group_card` currently updates policy, metadata topic, revisions and
+withdrawal state, may replace genesis, and inserts the card's asserted owner
+as an Admin at `named_groups.rs:11727-11763`. The import boundary must refuse
+to refresh an existing group unless an authority-backed same-group relation
+authorizes the signer and frontier. Unknown groups may be retained as
+quarantined discovery artifacts, but their self-asserted owner must not become
+local authority until that relation is established. This direct-import
+observation is also static; it requires the user or caller to submit the
+crafted signed card.
 
 Do not repair the collision by pruning
 `collect_same_stable_group_aliases`. It has nine production callers and is
@@ -275,9 +363,9 @@ test exists, `mls_group_id` equality remains a strongly supported candidate
 rather than a final wire/storage invariant. If the premise fails, use a
 stronger authority-backed identity relation rather than weakening the guard.
 
-The invite signature, symmetric join guard, and destructive write guard are
-all required. They sever the demonstrated chain at different boundaries and
-defend against different future writers.
+The invite signature, symmetric join guard, authority-backed card-write guards,
+and destructive tombstone guard are all required. They sever the demonstrated
+chains at different boundaries and defend against different future writers.
 
 ### F. Resolve siblings before retiring the Buzz membership projection
 
@@ -294,9 +382,11 @@ HTTP success is not branch confirmation.
 
 ## Rollout sequence
 
-1. **Contain the existing invite/tombstone chain.** Add the symmetric
-   already-joined/locking rule and the same-group destructive write guard.
-   These changes do not require new wire formats.
+1. **Contain the existing invite/card/tombstone chains.** Add the symmetric
+   already-joined/locking rule, prevent provisional stubs from authorizing
+   group-card writes, bind existing-group card imports to established
+   authority, and add the same-group destructive write guard. These changes
+   do not require new invite wire formats.
 2. **Deploy fail-closed receivers.** Parse versioned TreeKEM/GSS bindings,
    persist pending GSS joins, expose structured rejection diagnostics, and keep
    legacy receive behavior only behind an explicit transition policy.
@@ -326,24 +416,31 @@ behavior and pass on the implementation:
 4. an invite claiming an existing stable ID cannot create a competing stub,
    including two simultaneous links with different MLS IDs;
 5. accepting a crafted invite and then receiving an attacker-roster-authorized
+   `GroupCardPublished`, with either an empty signature or a valid signature by
+   the attacker, cannot insert, replace, or evict the real stable ID's cached
+   card, even when the test supplies `verified == true`;
+6. a self-signed card from an identity not authorized for an existing group
+   cannot refresh that record, change its metadata topic or frontier, or add
+   its asserted owner as an Admin;
+7. accepting a crafted invite and then receiving an attacker-roster-authorized
    `GroupDeleted` cannot alter, withdraw, or clear key material from the real
    group;
-6. all three legitimate tombstone callers still update every supported current
+8. all three legitimate tombstone callers still update every supported current
    and migrated alias, while a colliding different group remains unchanged;
-7. GSS share-first and commit-first delivery converge to identical installed
+9. GSS share-first and commit-first delivery converge to identical installed
    state, and neither order exposes the candidate secret before confirmation;
-8. wrong tag, wrong epoch, wrong group ID, wrong roster root, relabelled AAD,
+10. wrong tag, wrong epoch, wrong group ID, wrong roster root, relabelled AAD,
    replayed share, and stale commit all fail closed with structured reasons;
-9. both GSS ban and GSS remove rotate once, deliver to every survivor, and
+11. both GSS ban and GSS remove rotate once, deliver to every survivor, and
    exclude the removed member;
-10. two concurrent TreeKEM admin removals from one parent converge on the same
+12. two concurrent TreeKEM admin removals from one parent converge on the same
     exact accepted commit digest and roster at every replica;
-11. all TreeKEM survivors cross-decrypt post-resolution traffic, while removed
+13. all TreeKEM survivors cross-decrypt post-resolution traffic, while removed
     members cannot decrypt it;
-12. crash/restart at each sender and receiver transaction boundary restores
+14. crash/restart at each sender and receiver transaction boundary restores
     either the complete previous frontier or the complete new frontier, never a
     mixed state; and
-13. sender self-delivery cannot reach the mutation closure after the sender
+15. sender self-delivery cannot reach the mutation closure after the sender
     stored the sealed revision.
 
 Tests must assert exact commit/binding bytes or digests, not merely equal
@@ -357,8 +454,8 @@ numeric epochs.
   authority frontier.
 - Exact TreeKEM and GSS state can no longer be confused by equal epoch numbers.
 - Delivery order stops deciding whether a GSS secret is trusted.
-- The invite/tombstone chain is closed at source, admission guard, and
-  destructive write boundaries.
+- The invite/card/tombstone chains are closed at source, admission, cache,
+  import, and destructive write boundaries.
 - tic-tac-toe gains a concrete gate for retiring relay-authored membership.
 
 ### Costs
@@ -397,7 +494,10 @@ numeric epochs.
    leaves the destructive alias writer reusable by future colliding records.
 7. **Prune the shared alias collector.** It changes nine consumers and does not
    address the unguarded destructive operation.
-8. **Treat per-daemon first arrival as fork choice.** Different replicas can
+8. **Treat signature validity as group authorization.** A self-certifying
+   signature proves who signed, not that the signer owns an arbitrary claimed
+   stable group ID or may replace an existing frontier.
+9. **Treat per-daemon first arrival as fork choice.** Different replicas can
    accept different siblings.
-9. **Let custody choose the winner.** Delivery systems transport authenticated
+10. **Let custody choose the winner.** Delivery systems transport authenticated
    artifacts; they do not grant authorization or define group-state consensus.

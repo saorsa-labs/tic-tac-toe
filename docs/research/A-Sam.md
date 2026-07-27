@@ -552,6 +552,68 @@ remote-unauthenticated path: the victim must first accept a crafted invite
 link. No exploit was executed in this research; the chain was established from
 source at `e301371`.
 
+The same forged stub has a group-card-cache consequence. Metadata-event
+resolution chooses the direct map key before scanning by stable ID
+(`x0x@e301371:src/server/routes/named_groups.rs:4554-4588`), and `caller_role`
+reads `members_v2` (`x0x@e301371:src/groups/mod.rs:1039-1046`). The invite
+helper copies `base_members_v2` and the claimed stable ID from the unsigned link
+and stores the result at the invite's direct group key
+(`x0x@e301371:src/server/routes/named_groups.rs:7642-7675,7832-7849`).
+`creator_agent_id_from_base_state` selects a self-consistent seeded member from
+that same unsigned roster and validates only the resulting AgentId shape
+(`x0x@e301371:src/groups/invite.rs:257-305`;
+`src/server/routes/named_groups.rs:7773-7790`). Consequently the
+attacker-authored record can make its sender Admin+ at `:5732-5737` and make
+the card's victim ID equal `info.stable_group_id()` at `:5738-5740`. The event
+has independent `group_id` and `card` fields (`named_groups.rs:755-758`), so it
+can carry wrapper ID `K'` for direct-key resolution and card stable ID `K` for
+the victim-keyed sink. An empty signature then skips verification at `:5741`,
+and the card is inserted, replaced, or removed under the victim stable ID at
+`:5744-5749`.
+
+Revision and issue time are attacker-controlled ordering inputs
+(`x0x@e301371:src/server/routes/named_groups.rs:228-240`;
+`x0x@e301371:src/groups/directory.rs:203-213`); the latter helper explicitly
+says its caller must have verified both signatures at `:203-205`. The cache
+wins over local synthesis in `get_group_card` and competes with the real
+synthesized card in discovery
+(`x0x@e301371:src/server/routes/named_groups.rs:11319-11363,11520-11539`).
+
+The `verified == true` gate at `named_groups.rs:4525-4533` does not block this
+metadata-topic path. Its listener passes `PubSubMessage::verified`
+(`:6371-6414`), which means that the publishing AgentId's ML-DSA signature
+verified over the topic and exact payload. Decode binds the supplied public key
+to that AgentId (`x0x@e301371:src/gossip/pubsub.rs:1093-1138,1173-1206`);
+failed signed messages are dropped before delivery at `:784-791`, and
+senderless legacy messages are skipped at `named_groups.rs:6411`. An attacker
+signing with their own previously unknown key therefore reaches the handler
+with an authenticated identity. The x0x wrapper derives topic IDs and seeds
+all gossip-plane peers without consulting a group roster
+(`gossip/pubsub.rs:398-439,544-612,687-761`). The crafted invite makes the
+victim subscribe to the `K'`-derived topic (`groups/mod.rs:321-324`;
+`named_groups.rs:7632-7651,7852`), so the open link is group authority, not
+sender authentication.
+
+The direct listener gives the same boolean a different security meaning. A
+raw-QUIC `DirectMessage.sender` is self-asserted; its `verified` value is the
+identity-cache binding from that AgentId to the QUIC-authenticated MachineId
+(`x0x@e301371:src/direct.rs:190-222`;
+`src/lib.rs:8489-8528,8624-8633`;
+`src/server/mod.rs:1056-1083`). Dropping that check would enable sender
+impersonation on the direct path. Keeping it authenticates the sender but does
+not repair the next link: `sender_is_admin` still reads the forged invite
+roster. Gossip-inbox direct delivery separately verifies both the pubsub
+origin and inner DM envelope before injecting a direct message with
+`verified = true` (`x0x@e301371:src/dm_inbox.rs:345-350,407-428,689-700`).
+
+The demonstrated static consequence is therefore cache metadata spoofing,
+replacement, or eviction after the crafted-link social step. It does not
+establish a redirect primitive. Although the card carries a signed-domain
+`metadata_topic` bootstrap hint
+(`x0x@e301371:src/groups/directory.rs:48-52,134-140`), this research did not
+establish a consumer that acts on the poisoned cached value. No exploit was
+run.
+
 The alias mechanics are over-determined but should not be repaired in the
 shared collector. `K` enters the output alias set at
 `named_groups.rs:8663-8664`, `:8666-8671`, and `:9022`; the first and third
@@ -573,28 +635,29 @@ a final invariant. Independently, the join guard must test and serialize both
 invite IDs, and the invite frontier must be authenticated; each closes a
 different scope.
 
-The group-card path supplies the positive enforcement counter-example.
-`GroupCard` has canonical, length-prefixed ML-DSA signable bytes and verification
-(`x0x@e301371:src/groups/directory.rs:31-85,88-195`), and card import rejects a
-failed signature before taking its membership lock or reading local state
-(`x0x@e301371:src/server/routes/named_groups.rs:11560-11593`). Although the
-accepted card may rewrite genesis from its signed group ID at `:291-302`, an
-unverified remote artifact cannot reach the tombstone fan-out. Invite join
-needs that same entry-gate property specifically because it is unauthenticated
-ingress. This is not a claim that every card path requires its own signature:
-the separate `GroupCardPublished` metadata arm permits an empty card signature
-at `:5741`, but only where authorization instead derives from the
-transport-provided sender identity: `sender_hex` must name an active
-Admin-or-higher member of the existing record at `:5732-5737`, the card stable
-ID must match at `:5738-5740`, and the sink is only `group_card_cache` at
-`:5744-5749`. The `verified` flag also gates this arm at `:4525-4533`, but its
-own comment at `:4501-4514` defines it as a best-effort,
-identity-discovery-cache annotation and explicitly distinguishes it from
-membership authorization. It must not be counted as an additional
-authentication control. Invite admission has no equivalent sender authority
-and therefore must reject absent as well as invalid authentication
-unconditionally; copying the optional-signature shape from `:5741` would
-preserve the defect.
+`GroupCard` supplies a canonical signature mechanism, not a complete
+authorization model. Its signable bytes and ML-DSA verification are real
+(`x0x@e301371:src/groups/directory.rs:31-195`), and direct import rejects a
+failed signature before the local lookup
+(`x0x@e301371:src/server/routes/named_groups.rs:11560-11593`). But
+`verify_signature` explicitly says authorization against the local roster is
+an apply-time responsibility (`directory.rs:155-165`). The
+`GroupCardPublished` arm does that apply-time check against the forgeable stub,
+so its empty-signature exception is part of the defect rather than a
+counter-example.
+
+Direct card import exposes the other half of the distinction. A valid
+self-certifying signature proves the identity in `authority_agent_id`, but
+does not prove that identity may claim an arbitrary `group_id`. For a
+non-withdrawn card whose ID directly keys an existing local record,
+`import_group_card` updates policy, metadata topic, revision/hash frontier,
+withdrawal state, can replace genesis, then inserts the card's asserted owner
+as an Admin (`x0x@e301371:src/server/routes/named_groups.rs:11630-11654,11680-11763`).
+No existing-roster authorization check occurs on that branch. This is a
+separate, user-or-bearer-authenticated-local-caller-triggered authority-binding
+defect found by static read; no crafted-card import was executed. The required
+rule on both paths is signature **and** authority-backed same-group
+authorization before any cached or local frontier is replaced.
 
 The receiver instead needs a pending-state join keyed by
 `(group_id, epoch, key-confirmation-tag)`: if the state commit arrives first,
