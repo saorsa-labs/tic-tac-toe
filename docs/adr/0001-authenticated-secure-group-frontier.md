@@ -274,7 +274,7 @@ in this chain it has three transport origins:
   topic-peer initialization paths consult no group roster
   (`:398-439,544-612,687-761`); for a connected gossip-plane peer, the
   invite-derived `K'` topic is not a group-authority boundary.
-- The preferred gossip-inbox direct path is also origin-key authentication,
+- The gossip-inbox direct path is also origin-key authentication,
   not an identity-cache lookup. It first requires a verified pubsub origin,
   verifies the inner DM envelope under that same origin key, rejects an inner
   sender that differs from the outer origin, then injects
@@ -282,27 +282,55 @@ in this chain it has three transport origins:
   (`x0x@e301371:src/dm_inbox.rs:345-350,407-428,689-700`;
   `src/direct.rs:1128-1155`). A normal x0x sender using its own valid identity
   keys can satisfy these origin checks; they do not establish authority for
-  stable ID `K`. Named-group delivery prefers this path when the recipient's
-  gossip-inbox capability is available and uses raw QUIC as the fallback
-  (`x0x@e301371:src/server/routes/named_groups.rs:315-329`;
-  `src/lib.rs:4277-4306,4403-4455`).
-- The same direct listener receives the raw-QUIC fallback
-  (`x0x@e301371:src/server/mod.rs:1056-1083`). Only there is `sender`
-  self-asserted and `DirectMessage::verified` the identity-cache cross-binding
-  to the transport-authenticated MachineId
+  stable ID `K`. The stock named-group sender chooses this path when the
+  recipient's capability is available because its wrappers leave
+  `prefer_raw_quic_if_connected` at the `false` default
+  (`x0x@e301371:src/dm.rs:665-681`;
+  `src/server/routes/direct.rs:20-37`;
+  `src/server/routes/named_groups.rs:315-329`;
+  `src/lib.rs:4277-4306,4362-4455`). `require_gossip_ack` controls delivery
+  acknowledgement, not path selection. This is outbound ordering, not a
+  receiver-side security control: the inbox subscription loop and raw-QUIC
+  receive loop operate independently
+  (`x0x@e301371:src/dm_inbox.rs:304-316`;
+  `src/lib.rs:8468-8634`), while the public send surface accepts a
+  caller-provided `DmSendConfig` (`src/lib.rs:4169-4195`). A remote peer
+  controls its own sender, so the receiver cannot use the stock ordering to
+  narrow the accepted attack surface.
+- The raw-QUIC receive loop independently injects frames into the same direct
+  subscriber surface consumed by the named-group listener
+  (`x0x@e301371:src/lib.rs:8468-8634`;
+  `src/server/mod.rs:1056-1083`). Only there is `sender` self-asserted and
+  `DirectMessage::verified` the identity-cache cross-binding to the
+  transport-authenticated MachineId
   (`x0x@e301371:src/direct.rs:190-222`;
   `src/lib.rs:8489-8528,8624-8633`). It is the sender-authentication hinge on
-  that fallback, not a disposable freshness annotation.
+  that path, not a disposable freshness annotation. But the general discovery
+  cache is not a prior-trust or group-roster barrier for a previously unknown
+  sender. `IdentityAnnouncement::verify` derives and verifies the MachineId
+  under the announced machine key, then accepts the no-user/no-certificate arm
+  without binding `agent_id` to an agent key
+  (`x0x@e301371:src/lib.rs:936-998`). After timestamp, trust, revocation, and
+  optional-certificate gates at `:6458-6542`, the listener discards the result
+  of the stronger direct-agent-origin check and unconditionally calls
+  `upsert_discovered_agent` at `:6618-6626`; that function inserts an unknown
+  `agent_id` outright at `:1641-1692`. The stronger check updates the separate
+  `authenticated_machine_bindings` store used by the gossip-inbox bridge
+  (`:1009-1097,7333-7347`), whereas the raw-QUIC listener reads
+  `identity_discovery_cache` (`:8462,8521-8528`). Therefore an unblocked,
+  unrevoked attacker with no conflicting machine pin can satisfy the raw path's
+  cache precondition by publishing one fresh, machine-signed announcement for
+  its own AgentId and MachineId. The resulting `verified == true` authenticates
+  that announced sender; it still grants no authority for stable ID `K`.
 
-Thus both the metadata-topic and preferred gossip-inbox direct paths
-demonstrate the cache consequence without a pre-existing identity-cache entry:
-the sender identity is authentic, but `sender_is_admin` obtains its group
-authority from the forged roster. The direct listener is not a safer authority
-boundary. On its raw-QUIC fallback the identity binding remains mandatory, and
-the next roster-authority link is still forgeable. Invite join must reject both
-absent and invalid authentication before any remote frontier is adopted, and
-no invite-derived record may authorize another artifact until its authority
-anchor is verified.
+Thus all three remote producers can reach the cache consequence from a
+previously unknown peer without prior roster or trust admission. The
+metadata-topic and gossip-inbox paths use origin-key authentication; raw QUIC
+uses the attacker-populable discovery-cache binding. In every case the sender
+identity is authentic, but `sender_is_admin` obtains its group authority from
+the forged roster. Invite join must reject both absent and invalid
+authentication before any remote frontier is adopted, and no invite-derived
+record may authorize another artifact until its authority anchor is verified.
 
 ### E. Close stable-ID collision, card writes, and destructive fan-out independently
 
@@ -326,11 +354,12 @@ revision and issue time select the winner
 local cards at `:11319-11363`. A `withdrawn` card can instead evict the cached
 card at `:5746-5747`. This is a third consequence of the forged invite stub,
 separate from the tombstone overwrite. Both the metadata-topic path and the
-preferred gossip-inbox direct path establish that a previously unknown sender
-can satisfy `verified == true` by signing with its own key; they authenticate
-identity, not authority for the victim stable ID. Static analysis did not
-establish a redirect consumer for the card's `metadata_topic`; do not claim a
-redirect primitive.
+gossip-inbox direct path establish `verified == true` from the sender's own
+origin signature; the raw-QUIC path establishes it after the sender's
+machine-signed announcement populates the general discovery cache. All three
+authenticate identity, not authority for the victim stable ID. Static analysis
+did not establish a redirect consumer for the card's `metadata_topic`; do not
+claim a redirect primitive.
 
 Direct card import needs the same distinction between authentication and
 authorization. A valid standalone signature proves the identity in
@@ -433,8 +462,11 @@ behavior and pass on the implementation:
    `GroupCardPublished`, with either an empty signature or a valid signature by
    the attacker, cannot insert, replace, or evict the real stable ID's cached
    card through the metadata-topic, gossip-inbox direct, or raw-QUIC direct
-   producer; the raw-QUIC case supplies a valid identity-cache binding rather
-   than bypassing `verified`;
+   producer; the test does not treat the stock sender's path preference as a
+   receiver restriction, and the raw-QUIC case first publishes an acceptable
+   machine-signed identity announcement through the production listener, then
+   obtains `verified == true` from the production general discovery cache
+   rather than injecting a cache fixture or bypassing `verified`;
 6. a self-signed card from an identity not authorized for an existing group
    cannot refresh that record, change its metadata topic or frontier, or add
    its asserted owner as an Admin;

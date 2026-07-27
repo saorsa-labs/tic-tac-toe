@@ -596,19 +596,31 @@ victim subscribe to the `K'`-derived topic (`groups/mod.rs:321-324`;
 sender authentication.
 
 Two remote producer paths relevant to this chain feed the direct listener with
-the same boolean (`x0x@e301371:src/server/mod.rs:1056-1083`). The preferred
+the same boolean (`x0x@e301371:src/server/mod.rs:1056-1083`). The
 gossip-inbox path requires a verified pubsub origin, verifies the inner DM
 envelope under that origin's key, rejects an inner sender that differs from the
 outer origin, then injects `DirectMessage::verified = true`
 (`x0x@e301371:src/dm_inbox.rs:345-350,407-428,689-700`;
 `src/direct.rs:1128-1155`). That is origin-key authentication, satisfiable by
 a normal x0x sender using its own valid identity keys; it does not require a
-prior AgentId→MachineId cache entry. Named-group delivery prefers gossip inbox
-when the recipient capability is available and keeps raw QUIC as the fallback
-(`x0x@e301371:src/server/routes/named_groups.rs:315-329`;
-`src/lib.rs:4277-4306,4403-4455`).
+prior AgentId→MachineId cache entry. The stock named-group sender chooses
+gossip inbox when the recipient capability is available because
+`DmSendConfig::default()` sets `prefer_raw_quic_if_connected = false`, and
+neither the generic direct-route wrapper nor the named-group wrapper changes
+that field (`x0x@e301371:src/dm.rs:665-681`;
+`src/server/routes/direct.rs:20-37`;
+`src/server/routes/named_groups.rs:315-329`). That leaves the raw-first branch
+at `src/lib.rs:4362-4402` inert and selects the gossip arm at `:4403-4437` when
+`gossip_ok` is true (`:4277-4306`). `require_gossip_ack` controls delivery
+acknowledgement, not path selection. This is outbound ordering, not a
+receiver-side security control: the inbox subscription and raw-QUIC receive
+loops operate independently (`x0x@e301371:src/dm_inbox.rs:304-316`;
+`src/lib.rs:8468-8634`), while the public send surface accepts a caller-provided
+`DmSendConfig` (`src/lib.rs:4169-4195`). A remote peer controls its own sender,
+so the receiver cannot use the stock ordering to narrow the accepted attack
+surface.
 
-Only on that raw-QUIC fallback is `DirectMessage.sender` self-asserted and its
+Only on the raw-QUIC receive path is `DirectMessage.sender` self-asserted and its
 `verified` value the identity-cache binding from that AgentId to the
 QUIC-authenticated MachineId
 (`x0x@e301371:src/direct.rs:190-222`;
@@ -616,8 +628,33 @@ QUIC-authenticated MachineId
 impersonation on the fallback. Keeping it authenticates the sender but does
 not repair the next link: `sender_is_admin` still reads the forged invite
 roster. The direct listener is therefore not a safer authority boundary; its
-preferred path reaches the same forged-roster check with origin-key
+gossip-inbox path reaches the same forged-roster check with origin-key
 authentication alone.
+
+The raw-QUIC cache binding is not a prior-trust or roster barrier for an unknown
+sender. `IdentityAnnouncement::verify` derives `machine_id` from the announced
+machine key and verifies the ML-DSA signature under that key
+(`x0x@e301371:src/lib.rs:936-974`), but the no-user/no-certificate arm returns
+success without binding `agent_id` to an agent public key (`:976-997`). The
+identity-announcement listener then applies the freshness, trust, revocation,
+and optional-certificate gates at `:6458-6542`. For a previously unknown,
+unblocked and unrevoked sender with no conflicting machine pin, a fresh
+certificate-free announcement passes those gates.
+
+The listener builds the general `DiscoveredAgent`, calls
+`record_authenticated_machine_binding_from_message`, discards its returned
+boolean, and calls `upsert_discovered_agent` unconditionally
+(`x0x@e301371:src/lib.rs:6600-6626`). The latter inserts an unknown `agent_id`
+outright (`:1641-1692`). The direct-origin check at `:1009-1097` protects only
+the separate `authenticated_machine_bindings` store passed to the gossip-inbox
+bridge at `:7333-7347`; it does not guard the general
+`identity_discovery_cache` cloned by the raw-QUIC listener at `:8462` and read
+for `verified` at `:8521-8528`. Therefore the raw path's extra precondition
+costs the attacker one fresh, machine-signed identity-announcement publish for
+its own AgentId and MachineId. A subsequent raw frame from that MachineId with
+that self-asserted AgentId receives `verified == true`. This still authenticates
+only the announced sender identity; `sender_is_admin` obtains the victim-group
+authority from the forged invite roster.
 
 The demonstrated static consequence is therefore cache metadata spoofing,
 replacement, or eviction after the crafted-link social step. It does not
