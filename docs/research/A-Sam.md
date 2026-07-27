@@ -585,26 +585,39 @@ metadata-topic path. Its listener passes `PubSubMessage::verified`
 verified over the topic and exact payload. Decode binds the supplied public key
 to that AgentId (`x0x@e301371:src/gossip/pubsub.rs:1093-1138,1173-1206`);
 failed signed messages are dropped before delivery at `:784-791`, and
-senderless legacy messages are skipped at `named_groups.rs:6411`. An attacker
-signing with their own previously unknown key therefore reaches the handler
-with an authenticated identity. The x0x wrapper derives topic IDs and seeds
-all gossip-plane peers without consulting a group roster
+senderless legacy messages are skipped at `named_groups.rs:6411`. Every
+metadata event reaching the apply call at `:6413` therefore has
+`verified == true`; an attacker signing with its own previously unknown key
+reaches the handler with an authenticated identity. The x0x wrapper derives
+topic IDs and seeds all gossip-plane peers without consulting a group roster
 (`gossip/pubsub.rs:398-439,544-612,687-761`). The crafted invite makes the
 victim subscribe to the `K'`-derived topic (`groups/mod.rs:321-324`;
 `named_groups.rs:7632-7651,7852`), so the open link is group authority, not
 sender authentication.
 
-The direct listener gives the same boolean a different security meaning. A
-raw-QUIC `DirectMessage.sender` is self-asserted; its `verified` value is the
-identity-cache binding from that AgentId to the QUIC-authenticated MachineId
+Two remote producer paths relevant to this chain feed the direct listener with
+the same boolean (`x0x@e301371:src/server/mod.rs:1056-1083`). The preferred
+gossip-inbox path requires a verified pubsub origin, verifies the inner DM
+envelope under that origin's key, rejects an inner sender that differs from the
+outer origin, then injects `DirectMessage::verified = true`
+(`x0x@e301371:src/dm_inbox.rs:345-350,407-428,689-700`;
+`src/direct.rs:1128-1155`). That is origin-key authentication, satisfiable by
+a normal x0x sender using its own valid identity keys; it does not require a
+prior AgentId→MachineId cache entry. Named-group delivery prefers gossip inbox
+when the recipient capability is available and keeps raw QUIC as the fallback
+(`x0x@e301371:src/server/routes/named_groups.rs:315-329`;
+`src/lib.rs:4277-4306,4403-4455`).
+
+Only on that raw-QUIC fallback is `DirectMessage.sender` self-asserted and its
+`verified` value the identity-cache binding from that AgentId to the
+QUIC-authenticated MachineId
 (`x0x@e301371:src/direct.rs:190-222`;
-`src/lib.rs:8489-8528,8624-8633`;
-`src/server/mod.rs:1056-1083`). Dropping that check would enable sender
-impersonation on the direct path. Keeping it authenticates the sender but does
+`src/lib.rs:8489-8528,8624-8633`). Dropping that check would enable sender
+impersonation on the fallback. Keeping it authenticates the sender but does
 not repair the next link: `sender_is_admin` still reads the forged invite
-roster. Gossip-inbox direct delivery separately verifies both the pubsub
-origin and inner DM envelope before injecting a direct message with
-`verified = true` (`x0x@e301371:src/dm_inbox.rs:345-350,407-428,689-700`).
+roster. The direct listener is therefore not a safer authority boundary; its
+preferred path reaches the same forged-roster check with origin-key
+authentication alone.
 
 The demonstrated static consequence is therefore cache metadata spoofing,
 replacement, or eviction after the crafted-link social step. It does not
