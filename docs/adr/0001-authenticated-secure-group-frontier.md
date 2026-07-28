@@ -143,8 +143,12 @@ HTTP success and per-daemon first arrival are not branch confirmation.
 
 ## Validation
 
-The final controls must fail on the reviewed x0x behavior or on a mutation and
-pass on the implementation. At minimum they must independently exercise:
+The final controls must fail on the reviewed x0x behavior and pass on the
+implementation. Where a control cannot fail on the reviewed behavior,
+acceptance requires, for each element named in the eleven numbered items
+immediately following, either a change to the implementation that makes some
+control fail on that element, or a statement that no control observes that
+element. At minimum they must independently exercise:
 
 1. concurrent sibling creation, deterministic convergence, visible loser
    handling, exact TreeKEM commit identity, survivor cross-decryption, and
