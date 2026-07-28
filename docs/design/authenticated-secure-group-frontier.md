@@ -44,6 +44,12 @@ choice unresolved
 (`x0x@e301371:docs/adr/0016-role-based-group-authority-flat-admin.md:109-124,210-215`;
 `x0x@e301371:src/groups/state_commit.rs:350-451,690-720`).
 
+ADR-0016 calls deterministic fork choice “future work” at `:119-124` and
+“Future (recorded, not planned)” at `:213-215`. Its rebase-and-retry mechanism
+is scoped to “on stale rejection” at `:212`. Two admins operating on different
+daemons can each see the same parent as current, so neither local mutation is
+stale, neither is rejected, and that retry path does not serialize them.
+
 The daemon-local membership mutex cannot serialize two different admins'
 daemons. Both HTTP mutations may return success before either sibling reaches
 the other node
