@@ -62,10 +62,16 @@ replicas can retain different first arrivals.
 
 TreeKEM remove currently binds an epoch-only string. Two different sibling
 commits can both say `treekem:epoch=N+1` while producing different trees and
-update paths. The exact serialized `TreeKemCommit` already travels beside the
-state commit and its dependency-level signature covers `tree_hash_after`, but
-the x0x state commit does not cross-bind that artifact
-(`x0x@e301371:src/mls/treekem.rs:12-15,92-97,365-386`;
+update paths. `TreeKemMlsGroup` exposes no stable tree or transcript digest
+accessor; its three direct state-value accessors expose epoch, group ID, and
+member count. That does not block exact binding: `remove_member_verified`
+returns the serialized `TreeKemCommit`, and the production path receives those
+bytes as `treekem_commit` immediately after the current `seal_commit`. Decision
+B reorders those operations so the bytes are in scope when the state commit is
+sealed. The exact bytes already travel beside the state commit, and their
+dependency-level signature covers `tree_hash_after`, but the x0x state commit
+does not cross-bind that artifact
+(`x0x@e301371:src/mls/treekem.rs:12-15,92-97,183-489`;
 `x0x@e301371:src/server/routes/named_groups.rs:9263-9328`;
 `saorsa-mls@0.3.8:src/treekem_group.rs:140-161,466-511,605-613,905-935`).
 

@@ -358,9 +358,10 @@ cryptographically different trees can both report epoch `N+1`. The signed
 tree hash, or confirmed transcript
 (`x0x@e301371:src/groups/state_commit.rs:350-451`;
 `x0x@e301371:src/server/routes/named_groups.rs:9264-9270`), and the current
-`TreeKemMlsGroup` wrapper exposes only epoch, group ID, and member count—not a
-public tree/transcript commitment
-(`x0x@e301371:src/mls/treekem.rs:427-443`).
+`TreeKemMlsGroup` wrapper exposes no public tree/transcript digest accessor. Its
+three direct state-value accessors expose epoch, group ID, and member count;
+`remove_member_verified` instead returns the exact serialized commit bytes
+(`x0x@e301371:src/mls/treekem.rs:183-489`).
 
 The exact frontier already exists in the pinned `saorsa-mls` dependency:
 `TreeKemCommit.tree_hash_after` commits to the resulting public tree including
