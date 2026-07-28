@@ -23,7 +23,7 @@ The reviewed x0x state presents five decision-driving conditions:
 4. invite bootstrap adopts an unsigned base projection before authority is
    established; and
 5. `GroupCard` ingress applies inconsistent signature policy. In particular,
-   the globally subscribed gossip path deliberately accepts unsigned pre-D.3
+   the globally subscribed gossip path deliberately accepts unsigned legacy
    cards, then ranks and serves them without later verification, while other
    paths reject unsigned cards.
 
@@ -32,9 +32,8 @@ in discovery. The applied-metadata path is not the sole defect and cannot be
 fixed in isolation: it is behind an Admin check, while the global gossip
 listener has no caller identity in scope.
 
-Independent source review of conditions 2, 3, and 4 is still in progress.
-Acceptance is blocked until that review either confirms them or this decision
-and its validation gates are revised at a new commit.
+Independent source review confirmed conditions 2, 3, and 4 against the reviewed
+x0x state, removing the acceptance hold on those conditions.
 
 The evolving source analysis, mechanisms, rollout, compatibility bounds, and
 probe results live in the linked reference implementation. This ADR is
@@ -45,33 +44,51 @@ self-contained; that chapter elaborates the decision but does not define it.
 ### A. Define one authenticated frontier
 
 A membership mutation is complete only when the authority-signed roster state,
-the exact applicable secure-plane artifact, all state and secret epochs, the
-previous-state hash, the roster root, and any bootstrap anchor agree.
+the exact applicable secure-plane artifact, monotonic state and secret epochs,
+the previous-state hash, the roster root, and any bootstrap anchor agree.
 
 No component may become current before every applicable join verifies.
 Roster and cryptographic state must be durably installed or rolled back as one
-caller-visible transaction. Versioned bindings are mandatory; unknown schemes
-and legacy epoch-only schemes fail closed after an explicit transition.
+caller-visible transaction. Versioned bindings are mandatory:
+
+```text
+treekem:commit-postcard-v1:epoch=<u64>:blake3=<64-lower-hex>
+gss:key-confirm-v1:epoch=<u64>:blake3=<64-lower-hex>
+```
+
+Receivers must expose structured rejection diagnostics. Cross-bound senders may
+emit exact bindings and confirmation tags only after compatible receivers
+exist. Once telemetry and migration evidence show the supported fleet has
+crossed the explicit transition cutoff, unknown schemes, legacy epoch-only
+schemes, and unsigned invites fail closed.
 
 ### B. Cross-bind the exact TreeKEM commit
 
 TreeKEM state commits must bind a domain-separated digest of the exact
 transmitted `TreeKemCommit` bytes together with the stable group ID. Senders
-must retain a recoverable parent checkpoint until branch choice is confirmed.
-Receivers must verify the roster commit, the TreeKEM commit, and their
-cross-binding before installing either.
+must retain a recoverable parent checkpoint, generate and locally apply the
+TreeKEM commit, digest its exact bytes, seal the roster commit, persist both
+artifacts, and publish only after persistence succeeds. Local failure restores
+the checkpoint. Receivers must verify the roster commit, the TreeKEM commit,
+and their cross-binding before installing either.
 
 ### C. Confirm GSS keys and join in two phases
 
 Each GSS rotation must use a fresh uniformly random 32-byte secret and a
 domain-separated confirmation tag covering the stable group ID, secret epoch,
-state revision, previous-state hash, and roster root.
+state revision, previous-state hash, and roster root. The tag travels in the
+versioned GSS binding, and the sealed-share AAD must bind that tag or the
+state-commit hash.
 
 Commit-first and share-first delivery both create pending state. Neither the
 candidate secret nor the new roster becomes current until both artifacts are
 present and the tag verifies; installation is then atomic. Remove and ban use
 the same rotate, confirm, reseal-to-survivors, and receive path. Public
 confirmation tags must never be derived from low-entropy secrets.
+
+The existing `old_epoch < secret_epoch` conditional remains until the pending
+join is deployed; removing it earlier can lose a valid share under reorderable
+delivery. Sender self-delivery is not a permanent reason to retain it.
 
 ### D. Authenticate invite bootstrap before adoption
 
@@ -94,14 +111,23 @@ direct IDs for one stable ID.
 
 Every path that imports, applies, caches, ranks, or serves a `GroupCard` must
 verify its signature and authorize its signer against an authenticated
-same-group frontier. The global gossip listener is included. A pre-D.3
-compatibility path may quarantine an unsigned legacy card as non-authoritative,
-but it must not feed current-state selection, `supersedes`, or discovery
-responses. An invite-derived provisional record cannot authorize a card write.
+same-group frontier. The global gossip listener is included. An explicit
+compatibility path for unsigned legacy cards accepted by global gossip may
+quarantine them as non-authoritative, but they must not feed current-state
+selection, `supersedes`, or discovery responses. That path ends at the
+telemetry-and-migration cutoff defined above. An invite-derived provisional
+record cannot authorize a card write.
+
+Unknown groups may be retained as quarantined discovery artifacts, but their
+self-asserted owners must not become local authority until an authenticated
+same-group relation is established.
 
 Destructive alias fan-out must require an authority-backed same-group relation
 before overwriting an existing record. Absent aliases may receive a tombstone;
 an unrelated colliding record may not be altered or stripped of key material.
+`mls_group_id` equality remains only a candidate write-site discriminator until
+tests prove all legitimate alias shapes. If that premise fails, use a stronger
+authority-backed identity relation rather than weakening the guard.
 
 ### F. Resolve siblings before retiring Buzz membership
 
@@ -117,10 +143,6 @@ HTTP success and per-daemon first arrival are not branch confirmation.
 
 ## Validation
 
-**Hold:** the gate list is provisional until independent review of conditions
-2, 3, and 4 completes. Any changed condition requires a revised list and a new
-reviewed commit before acceptance.
-
 The final controls must fail on the reviewed x0x behavior or on a mutation and
 pass on the implementation. At minimum they must independently exercise:
 
@@ -128,15 +150,30 @@ pass on the implementation. At minimum they must independently exercise:
    handling, exact TreeKEM commit identity, survivor cross-decryption, and
    removed-member exclusion;
 2. GSS commit-first and share-first convergence, rejection of every mismatched
-   context input, atomic crash recovery, and equivalent remove/ban rotation;
-3. absent, invalid, altered, self-consistent-but-unauthorized, and replayed
+   context input, and proof that neither order exposes the candidate secret
+   before confirmation;
+3. wrong tag, wrong epoch, wrong group ID, wrong roster root, relabelled AAD,
+   replayed share, and stale commit all failing closed with structured reasons;
+4. GSS ban and remove each rotating exactly once, delivering to every survivor,
+   and excluding the removed member;
+5. crash and restart at each sender and receiver transaction boundary restoring
+   either the complete previous frontier or the complete new frontier, never a
+   mixed state;
+6. sender self-delivery failing to reach the mutation closure after the sender
+   stores the sealed revision;
+7. absent, invalid, altered, self-consistent-but-unauthorized, and replayed
    invite bootstrap artifacts before any stub is persisted;
-4. stable-ID collision under sequential and concurrent admission;
-5. unsigned, invalidly signed, and unauthorized higher-revision cards at every
-   ingress path, including public gossip, plus the declared pre-D.3 transition;
-6. unauthorized direct import, cache replacement or eviction, discovery
+8. stable-ID collision under sequential and concurrent admission;
+9. unsigned, invalidly signed, and unauthorized higher-revision cards at every
+   ingress path, including public gossip and its explicit compatibility path
+   for accepted unsigned legacy cards; the raw-QUIC control must first publish
+   an acceptable machine-signed identity announcement through the production
+   listener, then obtain `verified == true` from the production general
+   discovery cache rather than by injecting a cache fixture or bypassing
+   `verified`;
+10. unauthorized direct import, cache replacement or eviction, discovery
    override, asserted-owner promotion, and metadata/frontier rewrite; and
-7. all legitimate tombstone callers plus refusal to modify a colliding
+11. all legitimate tombstone callers plus refusal to modify a colliding
    different group.
 
 Controls must assert authenticated bytes, digests, authority relations, and

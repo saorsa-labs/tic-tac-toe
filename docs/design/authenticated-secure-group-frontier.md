@@ -33,6 +33,10 @@ The corrected research blob after the full-range repair is
 correction and citation repair were separately checked at source in Buzz events
 `a196365bb045bf171a3264d093ac49a966e93b9d97a03909577e9749b72fe69d` and
 `677b651ceef0ddd2ae4abc6893a10ac560d03e41ecb535810d223c7ce77dbf6d`.
+Independent verification of conditions 2, 3, and 4 is recorded at
+`tic-tac-toe@d67b831:docs/review/adr-0001-source-verification-dario.md`; the
+decision-preservation loss check is recorded at
+`tic-tac-toe@9406214:docs/review/adr-0001-loss-check-dario.md`.
 
 ## Grounding
 
@@ -41,9 +45,9 @@ in favor of x0x authority-signed group state. That hand-off is unsafe until the
 roster state, secure-group cryptographic state, and join bootstrap are one
 authenticated frontier.
 
-The source analysis identifies five independent defects. Defects 2, 3, and 4
-remain provisional until the assigned independent source review completes;
-the mechanism and validation matrix must change if any of them does not hold.
+The source analysis identifies five independent defects. Independent source
+review confirmed defects 2, 3, and 4 against the reviewed x0x state, closing the
+acceptance hold on those conditions.
 
 ### 1. Equal-revision siblings can split replicas
 
@@ -87,7 +91,8 @@ does not cross-bind that artifact
 
 GSS has the corresponding problem: publishing the rotated secret is forbidden,
 but an epoch-only binding cannot distinguish two different 32-byte secrets at
-the same epoch.
+the same epoch
+(`x0x@e301371:src/groups/mod.rs:429-436`).
 
 ### 3. GSS share and state events are installed independently
 
@@ -105,9 +110,11 @@ The share is restricted to an active Admin whose actor and transport sender
 match, so this is an authorized-malicious or sibling-fork case, not arbitrary
 peer injection (`x0x@e301371:src/server/routes/named_groups.rs:5820-5826`).
 
-Accepted ADR-0010 also requires GSS rotation on remove as well as ban. The live
-non-TreeKEM remove path does not rotate or reseal the content key
-(`x0x@e301371:docs/adr/0010-gss-before-mls-treekem-for-v1-secure-groups.md:35-44,49-68,97-103,140-148`;
+ADR-0010's forward path is superseded for new private groups, but its
+ban/remove rotation requirement still governs grandfathered GSS groups and
+public encrypted presets. The live non-TreeKEM remove path does not rotate or
+reseal the content key
+(`x0x@e301371:docs/adr/0010-gss-before-mls-treekem-for-v1-secure-groups.md:1-8,35-44,49-68,97-103,140-148`;
 `x0x@e301371:src/server/routes/named_groups.rs:8425-8525`).
 
 ### 4. Invite bootstrap is unsigned and can reach destructive aliases
@@ -544,12 +551,12 @@ HTTP success is not branch confirmation.
 
 No tic-tac-toe product code is authorized by this proposed ADR.
 
-## Detailed validation scenarios (provisional)
+## Detailed validation scenarios
 
 These scenarios are preserved from the reviewed 551-line ADR for the loss
-check. They are implementation detail, not the authoritative gate list. ADR
-0001's Validation section remains held until independent review of defects 2,
-3, and 4 completes; the final chapter matrix must follow that reviewed list.
+check. They are implementation detail, not the authoritative gate list; ADR
+0001's Validation section is authoritative and follows the completed
+independent review of defects 2, 3, and 4.
 
 Each retained scenario must fail on the reviewed behavior or on a mutation and
 pass on the implementation:
