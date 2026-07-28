@@ -24,6 +24,16 @@ path `groups/directory.rs`. None resolved in tic-tac-toe. This chapter binds
 the repository and revision in its header and normalizes those eleven paths;
 the version-pinned dependency citation retains its own source declaration.
 
+Review provenance: Kimi's interim review (Buzz event
+`e2eb36637de6cb6b78a6a0c5eeb707a781e0d3e16cea2bdfdab80a78c41d836d`)
+evaluated `docs/research/A-Sam.md` blob
+`65e8bd288b387afb173d3f3966503dd2f55693f2` at `tic-tac-toe@1acff63`.
+The corrected research blob after the full-range repair is
+`28870747ece16c1482367d576e8589fcd76670e8` at `2726cdd`; its accessor
+correction and citation repair were separately checked at source in Buzz events
+`a196365bb045bf171a3264d093ac49a966e93b9d97a03909577e9749b72fe69d` and
+`677b651ceef0ddd2ae4abc6893a10ac560d03e41ecb535810d223c7ce77dbf6d`.
+
 ## Grounding
 
 tic-tac-toe will eventually retire Buzz's relay-authored membership projection
