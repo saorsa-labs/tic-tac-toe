@@ -361,7 +361,7 @@ tree hash, or confirmed transcript
 `TreeKemMlsGroup` wrapper exposes no public tree/transcript digest accessor. Its
 three direct state-value accessors expose epoch, group ID, and member count;
 `remove_member_verified` instead returns the exact serialized commit bytes
-(`x0x@e301371:src/mls/treekem.rs:183-489`).
+(`x0x@e301371:src/mls/treekem.rs:183-527`).
 
 The exact frontier already exists in the pinned `saorsa-mls` dependency:
 `TreeKemCommit.tree_hash_after` commits to the resulting public tree including

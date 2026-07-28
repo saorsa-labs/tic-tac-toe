@@ -71,7 +71,7 @@ B reorders those operations so the bytes are in scope when the state commit is
 sealed. The exact bytes already travel beside the state commit, and their
 dependency-level signature covers `tree_hash_after`, but the x0x state commit
 does not cross-bind that artifact
-(`x0x@e301371:src/mls/treekem.rs:12-15,92-97,183-489`;
+(`x0x@e301371:src/mls/treekem.rs:12-15,92-97,183-527`;
 `x0x@e301371:src/server/routes/named_groups.rs:9263-9328`;
 `saorsa-mls@0.3.8:src/treekem_group.rs:140-161,466-511,605-613,905-935`).
 
