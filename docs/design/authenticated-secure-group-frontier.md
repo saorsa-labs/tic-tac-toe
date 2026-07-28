@@ -1,10 +1,12 @@
-# ADR 0001: Authenticate the secure-group state frontier
+# Authenticated secure-group frontier — reference implementation
 
-- **Status:** Proposed
-- **Date:** 2026-07-27
-- **Decision owners:** x0x and tic-tac-toe maintainers
-- **Scope:** design only; implementation requires David's approval
-- **Reviewed x0x state:** `e3013710d7ed69077de9a799dffdbeb5ac80535a`
+Implements: [ADR 0001](../adr/0001-authenticated-secure-group-frontier.md)
+Resolves at: `x0x@e3013710d7ed69077de9a799dffdbeb5ac80535a`
+Source: the `x0x` repository; every source and x0x ADR citation resolves there unless another repository or version is named explicitly.
+
+This chapter contains the evolving evidence, mechanism, rollout, and validation
+detail for ADR 0001. The ADR is authoritative for the frozen decision. Removing
+this chapter must not change what the ADR decides.
 
 ## Context
 
