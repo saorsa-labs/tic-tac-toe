@@ -1,6 +1,6 @@
 # ADR 0001: Authenticate the secure-group state frontier
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-27
 - **Decision owners:** x0x and tic-tac-toe maintainers
 - **Scope:** design only; implementation requires David's approval
