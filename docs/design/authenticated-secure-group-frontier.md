@@ -8,14 +8,32 @@ This chapter contains the evolving evidence, mechanism, rollout, and validation
 detail for ADR 0001. The ADR is authoritative for the frozen decision. Removing
 this chapter must not change what the ADR decides.
 
-## Context
+## Citation contract and audit
+
+Every repository path in this chapter is relative to the x0x repository named
+by `Resolves at:`. Throughout this chapter, unless a citation or its governing
+block declaration names another file, every bare `:N` or `:N-N` citation
+resolves to `src/server/routes/named_groups.rs`. A citation never inherits a
+different repository, revision, or file merely from neighbouring prose.
+
+The source document contained 55 citation tokens: 34 explicitly stamped x0x
+citations, 20 unstamped but x0x-directed citations, and one version-pinned
+`saorsa-mls` citation. Of the 20 unstamped citations, only nine used full
+repository-relative paths; ten used bare basenames and one used the partial
+path `groups/directory.rs`. None resolved in tic-tac-toe. This chapter binds
+the repository and revision in its header and normalizes those eleven paths;
+the version-pinned dependency citation retains its own source declaration.
+
+## Grounding
 
 tic-tac-toe will eventually retire Buzz's relay-authored membership projection
 in favor of x0x authority-signed group state. That hand-off is unsafe until the
 roster state, secure-group cryptographic state, and join bootstrap are one
 authenticated frontier.
 
-The current x0x frontier has five independent defects.
+The source analysis identifies five independent defects. Defects 2, 3, and 4
+remain provisional until the assigned independent source review completes;
+the mechanism and validation matrix must change if any of them does not hold.
 
 ### 1. Equal-revision siblings can split replicas
 
@@ -106,24 +124,62 @@ the withdrawn, keyless stub
 This chain requires the victim to accept a crafted invite. It is not claimed
 as remote-unauthenticated, and this research did not execute an exploit.
 
-### 5. Card signatures do not bind a signer to an existing group
+### 5. Group-card signature policy is inconsistent across ingress paths
 
 `GroupCard::verify_signature` proves that `authority_agent_id` derives from
 the supplied public key and signed the card bytes, but explicitly leaves group
 authorization to apply time
-(`x0x@e301371:src/groups/directory.rs:143-195`). Direct
-`import_group_card` verifies that signature, then refreshes an existing
-direct-keyed `GroupInfo` without checking whether `authority_agent_id` is
-authorized by its current roster. The card can replace policy, metadata topic,
-revision/hash frontier and withdrawal state, conditionally rewrite genesis,
-and insert its separately asserted `owner_agent_id` as an Admin
+(`x0x@e301371:src/groups/directory.rs:143-195`).
+
+The reviewed server applies four policies at five sites:
+
+1. global `GroupCardPublished` gossip accepts unsigned cards deliberately for
+   pre-D.3 compatibility and rejects only invalid non-empty signatures
+   (`x0x@e301371:src/server/routes/named_groups.rs:1134-1167`);
+2. the directory-shard path rejects an empty or invalid signature
+   (`x0x@e301371:src/server/routes/named_groups.rs:1452-1459`);
+3. the LTC delivery path rejects an empty or invalid signature
+   (`x0x@e301371:src/server/routes/named_groups.rs:1676-1679`);
+4. applied metadata accepts an empty signature with no compatibility comment,
+   although this path first requires `sender_is_admin` and matching group ID
+   (`x0x@e301371:src/server/routes/named_groups.rs:5732-5741`); and
+5. direct `import_group_card` verifies unconditionally
+   (`x0x@e301371:src/server/routes/named_groups.rs:11560-11567`).
+
+The applied-metadata condition is therefore an undocumented instance of a
+documented carve-out, not an isolated check that can simply be tightened.
+The deliberate global-gossip instance is the reachable one: its subscription
+handler has no caller identity in scope before cache admission. The
+applied-metadata instance is behind an existing Admin gate.
+
+The cache consequence is authoritative, not cosmetic. `discover_groups`
+merges cached cards into `GET /groups/discover` without re-verifying them
+(`x0x@e301371:src/server/routes/named_groups.rs:11320-11347`).
+`GroupCard::supersedes` ranks by revision and issue time while documenting that
+the caller must already have verified both signatures
+(`x0x@e301371:src/groups/directory.rs:203-213`). An unsigned card naming an
+existing group with a higher revision can therefore displace the signed card.
+The card's own discoverability field controls the public-shard decision, while
+the local-withdrawn check only helps when this node already knows the group is
+withdrawn
+(`x0x@e301371:src/server/routes/named_groups.rs:1195-1210`).
+
+Direct import has a separate authority-binding defect. It verifies the
+standalone signature, then refreshes an existing direct-keyed `GroupInfo`
+without checking whether `authority_agent_id` is authorized by its current
+roster. The card can replace policy, metadata topic, revision/hash frontier
+and withdrawal state, conditionally rewrite genesis, and insert its separately
+asserted `owner_agent_id` as an Admin
 (`x0x@e301371:src/server/routes/named_groups.rs:11560-11572,11630-11654,11680-11763`).
+This local-ingress case requires a user or bearer-authenticated local caller;
+no crafted import was executed.
 
-This is a separate local-ingress authority-binding defect. It requires a user
-or bearer-authenticated local caller to submit an attacker-signed card; no
-crafted import was executed in this research.
+Two impact bounds remain open and must travel with this evidence. The review
+did not establish whether x0x's pubsub transport restricts publishers on the
+global topic, so “any peer on the network” is not widened to “anyone.” It also
+did not trace how a tic-tac-toe or x0x client acts on the discovery response.
 
-## Decision
+## Reference implementation
 
 ### A. Define one authenticated frontier
 
@@ -242,35 +298,43 @@ verify methods
 local lookup
 (`x0x@e301371:src/server/routes/named_groups.rs:11560-11572,11580-11593`).
 But `verify_signature` explicitly does not establish that the signer is
-authorized for the claimed group (`directory.rs:155-165`). Signature validity
-is therefore necessary, not sufficient, for frontier adoption.
+authorized for the claimed group (`src/groups/directory.rs:155-165`).
+Signature validity is therefore necessary, not sufficient, for frontier
+adoption.
 
-The separate `GroupCardPublished` arm is the pattern not to copy. It tolerates
-an empty card signature at `named_groups.rs:5741` and asks whether
-transport-provided `sender_hex` is Admin-or-higher in the selected local record
-at `:5732-5737`. That is not a sound substitute under this ADR's threat model:
-the resolver loads a direct-key match at `:4554-4588`, while invite bootstrap
-copies `base_members_v2` and the claimed stable ID from the unsigned link at
-`:7642-7675` and stores the stub under that direct key at `:7832-7849`. The
-join path's creator helper selects a self-consistent seeded entry from that
-same unsigned roster and validates only its AgentId shape
+The applied-metadata `GroupCardPublished` arm uses the same permissive
+empty-signature shape as the global-gossip compatibility carve-out, but without
+documenting that compatibility purpose
+(`src/server/routes/named_groups.rs:1162-1167,5732-5741`). It is also the less
+exposed path: transport-provided `sender_hex` must be Admin-or-higher in the
+selected local record and the card's stable ID must match. Tightening this arm
+alone would leave the unauthenticated global-gossip admission in place and
+could accidentally remove compatibility from only one of two permissive sites.
+
+The applied-metadata path still participates in the crafted-invite chain. Its
+resolver loads a direct-key match at `:4554-4588`, while invite bootstrap copies
+`base_members_v2` and the claimed stable ID from the unsigned link at
+`:7642-7675` and stores the stub under that direct key at `:7832-7849`. The join
+path's creator helper selects a self-consistent seeded entry from that same
+unsigned roster and validates only its AgentId shape
 (`x0x@e301371:src/groups/invite.rs:257-305`;
 `src/server/routes/named_groups.rs:7773-7790`). The attacker-authored stub can
 therefore answer both the roster-authority question and the stable-ID
 comparison at `:5738-5740`: the event's independent `group_id` field
-(`named_groups.rs:755-758`) can be `K'` for direct-key resolution while the
-card's `group_id` is victim stable ID `K`.
+(`src/server/routes/named_groups.rs:755-758`) can be `K'` for direct-key
+resolution while the card's `group_id` is victim stable ID `K`.
 
 The `verified` argument at `:4525-4533` has path-specific meaning and must not
 be treated as a transport-wide authority proof. For the remote delivery paths
 in this chain it has three transport origins:
 
 - The metadata-topic listener passes `PubSubMessage::verified`
-  (`named_groups.rs:6371-6414`). On that path it proves an ML-DSA signature by
-  the publishing AgentId: v2 decode binds the embedded key to the AgentId and
-  payload (`x0x@e301371:src/gossip/pubsub.rs:1093-1138,1173-1206`), failed
-  signed messages are dropped at `:784-791`, and senderless legacy messages
-  are skipped by the listener. Every metadata event reaching the apply call at
+  (`src/server/routes/named_groups.rs:6371-6414`). On that path it proves an
+  ML-DSA signature by the publishing AgentId: v2 decode binds the embedded key
+  to the AgentId and payload
+  (`x0x@e301371:src/gossip/pubsub.rs:1093-1138,1173-1206`), failed signed
+  messages are dropped at `:784-791`, and senderless legacy messages are
+  skipped by the listener. Every metadata event reaching the apply call at
   `:6413` therefore has `verified == true`, including a previously unknown
   attacker signing with its own key. The x0x wrapper's publish, subscribe, and
   topic-peer initialization paths consult no group roster
@@ -342,26 +406,34 @@ control must serialize on the claimed stable group as well as the MLS group
 ID; two links with different `group_id` values but the same stable ID must not
 race into two stubs.
 
-Group-card mutation requires its own authority-backed boundary. The
-`GroupCardPublished` arm must reject absent or invalid card signatures and
-must verify that the card signer is authorized by an authenticated frontier,
-not merely by the selected local record. A provisional or unauthenticated
-invite stub must never authorize a stable-ID cache write. Today the arm can
-cache an unsigned card under the stub's claimed stable ID at `:5744-5749`;
-revision and issue time select the winner
-(`named_groups.rs:228-240`; `groups/directory.rs:203-213`), even though
-`supersedes` documents that the caller must first verify both signatures at
-`directory.rs:203-205`. Cached entries win the single-card endpoint at
-`named_groups.rs:11520-11539`, and discovery merges them against synthesized
-local cards at `:11319-11363`. A `withdrawn` card can instead evict the cached
-card at `:5746-5747`. This is a third consequence of the forged invite stub,
-separate from the tombstone overwrite. Both the metadata-topic path and the
-gossip-inbox direct path establish `verified == true` from the sender's own
-origin signature; the raw-QUIC path establishes it after the sender's
-machine-signed announcement populates the general discovery cache. All three
-authenticate identity, not authority for the victim stable ID. Static analysis
-did not establish a redirect consumer for the card's `metadata_topic`; do not
-claim a redirect primitive.
+Group-card mutation requires one authority-backed policy across all five
+ingress sites. The global-gossip and applied-metadata paths cannot remain
+permissive while the directory-shard, LTC, and direct-import paths are strict.
+If pre-D.3 compatibility is retained, an unsigned card must be quarantined as
+non-authoritative: it cannot enter current-state selection, be passed to
+`supersedes`, or be returned from discovery. Every authoritative card path must
+verify the signature and authorize the signer against an authenticated
+same-group frontier.
+
+A provisional or unauthenticated invite stub must never authorize a stable-ID
+cache write. Today the applied-metadata arm can cache an unsigned card under
+the stub's claimed stable ID at `:5744-5749`; revision and issue time select
+the winner
+(`src/server/routes/named_groups.rs:228-240`;
+`src/groups/directory.rs:203-213`), even though `supersedes` documents that the
+caller must first verify both signatures at
+`src/groups/directory.rs:203-205`. Cached entries win the single-card endpoint
+at `src/server/routes/named_groups.rs:11520-11539`, and discovery merges them
+against synthesized local cards at `:11319-11363`. A `withdrawn` card can
+instead evict the cached card at `:5746-5747`. This is a third consequence of
+the forged invite stub, separate from the tombstone overwrite.
+
+Both the metadata-topic path and the gossip-inbox direct path establish
+`verified == true` from the sender's own origin signature; the raw-QUIC path
+establishes it after the sender's machine-signed announcement populates the
+general discovery cache. All three authenticate identity, not authority for
+the victim stable ID. Static analysis did not establish a redirect consumer
+for the card's `metadata_topic`; do not claim a redirect primitive.
 
 Direct card import needs the same distinction between authentication and
 authorization. A valid standalone signature proves the identity in
@@ -369,26 +441,27 @@ authorization. A valid standalone signature proves the identity in
 non-withdrawn card whose `group_id` already keys a local record,
 `import_group_card` currently updates policy, metadata topic, revisions and
 withdrawal state, may replace genesis, and inserts the card's asserted owner
-as an Admin at `named_groups.rs:11727-11763`. The import boundary must refuse
-to refresh an existing group unless an authority-backed same-group relation
-authorizes the signer and frontier. Unknown groups may be retained as
-quarantined discovery artifacts, but their self-asserted owner must not become
-local authority until that relation is established. This direct-import
-observation is also static; it requires the user or caller to submit the
-crafted signed card.
+as an Admin at `src/server/routes/named_groups.rs:11727-11763`. The import
+boundary must refuse to refresh an existing group unless an authority-backed
+same-group relation authorizes the signer and frontier. Unknown groups may be
+retained as quarantined discovery artifacts, but their self-asserted owner
+must not become local authority until that relation is established. This
+direct-import observation is also static; it requires the user or caller to
+submit the crafted signed card.
 
 Do not repair the collision by pruning
 `collect_same_stable_group_aliases`. It has nine production callers and is
 correctly answering which keys currently name a stable group. In the tombstone
-case, `K` reaches the output alias set at `named_groups.rs:8663-8664`,
-`:8666-8671`, and `:9022`; the first and third share one caller-derived source,
-while the map scan is the second independent source. Removing one insertion is
-not a class-closing repair.
+case, `K` reaches the output alias set at
+`src/server/routes/named_groups.rs:8663-8664`, `:8666-8671`, and `:9022`; the
+first and third share one caller-derived source, while the map scan is the
+second independent source. Removing one insertion is not a class-closing
+repair.
 
-Repair the destructive boundary at `named_groups.rs:9023-9025`: before
-overwriting an existing record, require an authority-backed same-group
-predicate between that record and the tombstone. Absent keys may still receive
-the tombstone.
+Repair the destructive boundary at
+`src/server/routes/named_groups.rs:9023-9025`: before overwriting an existing
+record, require an authority-backed same-group predicate between that record
+and the tombstone. Absent keys may still receive the tombstone.
 
 Source probes now support simple equality of `mls_group_id` as the write-site
 discriminator at two of the three callers:
@@ -449,10 +522,15 @@ HTTP success is not branch confirmation.
 
 No tic-tac-toe product code is authorized by this proposed ADR.
 
-## Validation
+## Detailed validation scenarios (provisional)
 
-The change is accepted only when the following tests fail on the reviewed
-behavior and pass on the implementation:
+These scenarios are preserved from the reviewed 551-line ADR for the loss
+check. They are implementation detail, not the authoritative gate list. ADR
+0001's Validation section remains held until independent review of defects 2,
+3, and 4 completes; the final chapter matrix must follow that reviewed list.
+
+Each retained scenario must fail on the reviewed behavior or on a mutation and
+pass on the implementation:
 
 1. a forged or unsigned modern invite cannot seed any base frontier field;
 2. an invite with a valid signature but altered revision, roster, stable ID,
@@ -495,59 +573,3 @@ behavior and pass on the implementation:
 
 Tests must assert exact commit/binding bytes or digests, not merely equal
 numeric epochs.
-
-## Consequences
-
-### Positive
-
-- Membership, cryptographic state, and bootstrap become one auditable PQC
-  authority frontier.
-- Exact TreeKEM and GSS state can no longer be confused by equal epoch numbers.
-- Delivery order stops deciding whether a GSS secret is trusted.
-- The invite/card/tombstone chains are closed at source, admission, cache,
-  import, and destructive write boundaries.
-- tic-tac-toe gains a concrete gate for retiring relay-authored membership.
-
-### Costs
-
-- TreeKEM senders need rollback/checkpoint retention and receivers need atomic
-  cross-plane installation.
-- GSS receivers need durable pending-share/pending-commit state and garbage
-  collection.
-- Unsigned legacy invite links must be reissued or follow a deliberately
-  restricted bootstrap path.
-- Deterministic sibling resolution is additional protocol work, not a custody
-  or UI concern.
-
-### Unchanged boundaries
-
-- Invite authentication does not replace the one-time admission handshake or
-  the authority-signed `MemberAdded`; it authenticates the state frontier
-  adopted locally.
-- This ADR does not design cross-node application-message custody or full
-  history recovery.
-- This ADR does not authorize product implementation.
-
-## Alternatives rejected
-
-1. **Keep epoch-only bindings.** Equal epochs can name different TreeKEM trees
-   or GSS secrets.
-2. **Hash only `tree_hash_after`.** It selects the resulting public tree but not
-   the exact signed commit/update path every survivor must process.
-3. **Install GSS shares immediately.** This preserves arrival-order behavior
-   but leaves the join unauthenticated.
-4. **Strengthen binding syntax without signing invites.** An attacker can
-   construct a syntactically valid binding inside the same unsigned artifact.
-5. **Trust a recomputed invite state hash.** Every hash input is attacker
-   controlled until an authority authenticates the anchor.
-6. **Fix only the already-joined guard.** It closes the current invite route but
-   leaves the destructive alias writer reusable by future colliding records.
-7. **Prune the shared alias collector.** It changes nine consumers and does not
-   address the unguarded destructive operation.
-8. **Treat signature validity as group authorization.** A self-certifying
-   signature proves who signed, not that the signer owns an arbitrary claimed
-   stable group ID or may replace an existing frontier.
-9. **Treat per-daemon first arrival as fork choice.** Different replicas can
-   accept different siblings.
-10. **Let custody choose the winner.** Delivery systems transport authenticated
-   artifacts; they do not grant authorization or define group-state consensus.
