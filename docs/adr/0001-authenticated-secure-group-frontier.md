@@ -119,7 +119,7 @@ telemetry-and-migration cutoff defined above. An invite-derived provisional
 record cannot authorize a card write.
 
 Unknown groups may be retained as quarantined discovery artifacts, but their
-self-asserted owners must not become local authority until an authenticated
+self-asserted owners must not become local authority until an authority-backed
 same-group relation is established.
 
 Destructive alias fan-out must require an authority-backed same-group relation
