@@ -44,6 +44,6 @@ excluded crates remain reachable at the upstream anchor for cherry-picks.
 - Imported Buzz code: **Apache-2.0** (Block, Inc.) — `LICENSE-APACHE` + `NOTICE`.
 - tic-tac-toe additions (everything not listed as imported above, incl. docs,
   CI, justfile, and all Stage 1+ new code): the repo's dual license
-  (AGPL-3.0 / commercial).
+  (**MIT OR Apache-2.0**) — `LICENSE-MIT` + `LICENSE-APACHE`.
 - From Stage 1 onward, modified imported files carry a
   `// Modified from block/buzz @ 710ed9ff — see FORK.md` header (§4(b) marking).

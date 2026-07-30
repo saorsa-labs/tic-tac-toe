@@ -8,5 +8,5 @@ Apache License, Version 2.0 (see LICENSE-APACHE).
 Buzz is Copyright 2026 Block, Inc.
 
 Modifications to the imported code are documented in FORK.md.
-Original tic-tac-toe code is dual-licensed AGPL-3.0 / commercial by
-Saorsa Labs Ltd.
+Original tic-tac-toe code is dual-licensed under MIT OR Apache-2.0 by
+Saorsa Labs Ltd. See LICENSE-MIT and LICENSE-APACHE.
