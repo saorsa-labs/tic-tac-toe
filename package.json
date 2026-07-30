@@ -1,5 +1,6 @@
 {
   "name": "tic-tac-toe-workspace",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "packageManager": "pnpm@11.4.0"
 }

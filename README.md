@@ -62,4 +62,5 @@ The substrate dependency — x0x ADR-0023 durable local history — is
 
 ## License
 
-Dual-licensed: AGPL-3.0 or commercial. Contact saorsalabs@gmail.com.
+Dual-licensed under MIT OR Apache-2.0. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
