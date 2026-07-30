@@ -77,18 +77,26 @@ BRIDGE_PORT="${BRIDGE_PORT:-$(free_port)}"
 X0XD_API_PORT="${X0XD_API_PORT:-$(free_port)}"
 X0XD_QUIC_PORT="${X0XD_QUIC_PORT:-$(free_port)}"
 
-# --- build binaries if absent ----------------------------------------------
+# --- build binaries (always — cargo fingerprints decide freshness) ----------
+#
+# We invoke `cargo build` every run instead of gating on the presence of a
+# previously-built binary. cargo's own dep-info fingerprinting no-ops in well
+# under a second when the tree is already up to date and, unlike a presence or
+# mtime check, also catches deleted source files, build.rs / env changes,
+# Cargo.lock movement and toolchain changes.
+#
+# The previous presence-only guard (`if [[ ! -x "$BIN" ]]`) let a binary built
+# before an upstream fix landed masquerade as a passing gate: the bridge's
+# 39006 window-bounds overlay silently keyed off the wrong cursor, the stale
+# binary served it, and the client threw every page away (empty timeline).
+# Binding the gate to source freshness — not binary presence — closes that.
 
 X0XD_BIN="$X0X_DIR/target/debug/x0xd"
-if [[ ! -x "$X0XD_BIN" ]]; then
-  log "building x0xd (debug) ..."
-  ( cd "$X0X_DIR" && cargo build --bin x0xd )
-fi
+log "ensuring x0xd (debug) is current ..."
+( cd "$X0X_DIR" && cargo build --bin x0xd )
 BRIDGE_BIN="$BRIDGE_DIR/target/debug/x0x-nostr-bridge"
-if [[ ! -x "$BRIDGE_BIN" ]]; then
-  log "building x0x-nostr-bridge (debug) ..."
-  ( cd "$BRIDGE_DIR" && cargo build --bin x0x-nostr-bridge )
-fi
+log "ensuring x0x-nostr-bridge (debug) is current ..."
+( cd "$BRIDGE_DIR" && cargo build --bin x0x-nostr-bridge )
 
 # --- isolated x0xd ----------------------------------------------------------
 
