@@ -3,11 +3,8 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import { mergeMessages } from "@/features/messages/hooks";
-import {
-  getChannelIdFromTags,
-  getThreadReference,
-} from "@/features/messages/lib/threading";
-import { getEventById } from "@/shared/api/tauri";
+import { getThreadReference } from "@/features/messages/lib/threading";
+import { fetchNativeMessagesById } from "@/features/messages/lib/nativeMessaging";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
 export function useLoadMissingAncestors(
@@ -77,27 +74,23 @@ export function useLoadMissingAncestors(
 
     let isCancelled = false;
 
-    void Promise.all(
-      [...missingAncestorIds].map(async (eventId) => {
-        try {
-          const event = await getEventById(eventId);
-
-          if (
-            isCancelled ||
-            getChannelIdFromTags(event.tags) !== activeChannel.id
-          ) {
-            return;
-          }
-
+    void fetchNativeMessagesById(activeChannel, missingAncestorIds)
+      .then((events) => {
+        if (isCancelled) return;
+        for (const event of events) {
           queryClient.setQueryData<RelayEvent[]>(
             channelMessagesKey(activeChannel.id),
             (current = []) => mergeMessages(current, event),
           );
-        } catch (error) {
-          console.error("Failed to load ancestor event", eventId, error);
         }
-      }),
-    );
+      })
+      .catch((error) => {
+        console.error(
+          "Failed to load native thread ancestors",
+          [...missingAncestorIds],
+          error,
+        );
+      });
 
     return () => {
       isCancelled = true;

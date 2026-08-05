@@ -1,73 +1,18 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
-  collectMessageIdsForAuxBackfill,
-  fetchStructuralAuxForMessages,
-} from "@/features/messages/lib/auxBackfill";
-import {
   threadRepliesKey,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
-import { relayClient } from "@/shared/api/relayClient";
-import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
-import { getThreadReplies } from "@/shared/api/tauri";
-import type { Channel, RelayEvent, ThreadCursor } from "@/shared/api/types";
+import { fetchNativeThreadReplies } from "@/features/messages/lib/nativeMessaging";
+import type { Channel, RelayEvent } from "@/shared/api/types";
 
-const THREAD_PAGE_LIMIT = 200;
-const MAX_THREAD_PAGES = 500;
-
-/**
- * Append the structural aux closure (edits/deletions) for the fetched replies.
- * The server thread-subtree query resolves deletions itself but omits
- * kind:40003 edits, so a bare refetch would render every edited reply with its
- * original text. Best-effort: an aux failure logs and returns the replies
- * unadorned rather than failing the whole thread load.
- */
-async function fetchThreadAuxBestEffort(
-  label: string,
-  channelId: string,
-  fetchAux: () => Promise<RelayEvent[]>,
-): Promise<RelayEvent[]> {
-  try {
-    return await fetchAux();
-  } catch (error) {
-    console.error(
-      `Failed to backfill thread reply ${label} for channel`,
-      channelId,
-      error,
-    );
-    return [];
-  }
-}
-
+/** Retained for cache/test callers; native history needs no aux-event query. */
 export function collectThreadAuxMessageIds(
   threadRootId: string,
   replies: RelayEvent[],
 ): string[] {
-  return [
-    ...new Set([threadRootId, ...collectMessageIdsForAuxBackfill(replies)]),
-  ];
-}
-
-async function withThreadAux(
-  channelId: string,
-  threadRootId: string,
-  replies: RelayEvent[],
-): Promise<RelayEvent[]> {
-  const messageIds = collectThreadAuxMessageIds(threadRootId, replies);
-  const [structuralAux, reactions] = await Promise.all([
-    fetchThreadAuxBestEffort("structural aux", channelId, () =>
-      fetchStructuralAuxForMessages(channelId, messageIds),
-    ),
-    fetchThreadAuxBestEffort("reactions", channelId, () =>
-      relayClient.fetchAuxEventsByReference(
-        channelId,
-        messageIds,
-        buildChannelReactionAuxFilter,
-      ),
-    ),
-  ]);
-  return sortMessages([...replies, ...structuralAux, ...reactions]);
+  return [...new Set([threadRootId, ...replies.map((reply) => reply.id)])];
 }
 
 /** Fetch a thread subtree into a cache independent from channel window pages. */
@@ -90,33 +35,15 @@ export function useThreadReplies(
       const cacheAtStart =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const idsAtStart = new Set(cacheAtStart.map((event) => event.id));
-      const replies: RelayEvent[] = [];
-      let cursor: ThreadCursor | null = null;
-      for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
-        const response = await getThreadReplies(
-          openThreadRootId,
-          activeChannel.id,
-          { limit: THREAD_PAGE_LIMIT, cursor },
-        );
-        replies.push(...response.events);
-        if (!response.nextCursor) {
-          const fetched = await withThreadAux(
-            activeChannel.id,
-            openThreadRootId,
-            replies,
-          );
-          const current =
-            queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-          const receivedInFlight = current.filter(
-            (event) => !idsAtStart.has(event.id),
-          );
-          return sortMessages([...fetched, ...receivedInFlight]);
-        }
-        cursor = response.nextCursor;
-      }
-      throw new Error(
-        `Thread ${openThreadRootId} exceeded the page safety limit.`,
+      const replies = await fetchNativeThreadReplies(
+        activeChannel,
+        openThreadRootId,
       );
+      const current = queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const receivedInFlight = current.filter(
+        (event) => !idsAtStart.has(event.id),
+      );
+      return sortMessages([...replies, ...receivedInFlight]);
     },
     staleTime: 0,
     gcTime: 60 * 60 * 1_000,

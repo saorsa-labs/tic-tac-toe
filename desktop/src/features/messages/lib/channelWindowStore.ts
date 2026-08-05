@@ -1,6 +1,11 @@
 import type { RelayEvent } from "@/shared/api/types";
 
-export type ChannelWindowCursor = { createdAt: number; eventId: string };
+export type ChannelWindowCursor = {
+  createdAt: number;
+  eventId: string;
+  /** x0xd history rowid cursor; absent on legacy relay windows. */
+  beforeId?: number;
+};
 export type ChannelWindowThreadSummary = {
   replyCount: number;
   descendantCount: number;
@@ -52,7 +57,8 @@ function cursorsEqual(
     (left !== null &&
       right !== null &&
       left.createdAt === right.createdAt &&
-      left.eventId === right.eventId)
+      left.eventId === right.eventId &&
+      left.beforeId === right.beforeId)
   );
 }
 
@@ -84,7 +90,11 @@ function assertValidPage(page: ChannelWindowPage) {
     if (seen.has(event.id))
       throw new Error(`Duplicate channel row ${event.id}.`);
     seen.add(event.id);
-    if (page.startCursor && !isStrictlyOlder(event, page.startCursor)) {
+    if (
+      page.startCursor &&
+      page.startCursor.beforeId === undefined &&
+      !isStrictlyOlder(event, page.startCursor)
+    ) {
       throw new Error(
         `Channel row ${event.id} is outside its cursor interval.`,
       );
@@ -109,10 +119,16 @@ export function replaceNewestChannelWindow(
   }
   assertValidPage(page);
   const ids = new Set(page.rows.map((row) => row.event.id));
+  const localKeys = new Set(
+    page.rows.map((row) => row.event.localKey).filter(Boolean),
+  );
   const auxIds = new Set(page.aux.map((event) => event.id));
   return {
     pages: [page],
-    liveOverlay: current.liveOverlay.filter((event) => !ids.has(event.id)),
+    liveOverlay: current.liveOverlay.filter(
+      (event) =>
+        !ids.has(event.id) && !localKeys.has(event.localKey ?? event.id),
+    ),
     liveAux: current.liveAux.filter((event) => !auxIds.has(event.id)),
     // A head refetch is the authoritative resync moment (subscribe/reconnect
     // both funnel here): every retained page is replaced, so live summaries
@@ -148,10 +164,17 @@ export function appendOlderChannelWindow(
     }
   }
   const pageIds = new Set(page.rows.map((row) => row.event.id));
+  const pageLocalKeys = new Set(
+    page.rows.map((row) => row.event.localKey).filter(Boolean),
+  );
   return {
     ...current,
     pages: [...current.pages, page],
-    liveOverlay: current.liveOverlay.filter((event) => !pageIds.has(event.id)),
+    liveOverlay: current.liveOverlay.filter(
+      (event) =>
+        !pageIds.has(event.id) &&
+        !pageLocalKeys.has(event.localKey ?? event.id),
+    ),
   };
 }
 
@@ -196,9 +219,14 @@ export function mergeLiveChannelWindowEvent(
     }
     return { ...current, liveAux: [...current.liveAux, event] };
   }
+  const renderKey = event.localKey ?? event.id;
   if (
     current.pages.some((page) =>
-      page.rows.some((row) => row.event.id === event.id),
+      page.rows.some(
+        (row) =>
+          row.event.id === event.id ||
+          (row.event.localKey ?? row.event.id) === renderKey,
+      ),
     )
   ) {
     return current;
@@ -215,7 +243,11 @@ export function mergeLiveChannelWindowEvent(
   return {
     ...current,
     liveOverlay: current.liveOverlay
-      .filter((candidate) => candidate.id !== event.id)
+      .filter(
+        (candidate) =>
+          candidate.id !== event.id &&
+          (candidate.localKey ?? candidate.id) !== renderKey,
+      )
       .concat(event)
       .sort(compareRelayOrder),
   };

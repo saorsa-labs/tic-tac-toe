@@ -10,14 +10,10 @@ import {
 import {
   buildReplyTags,
   getThreadReference,
-  isBroadcastReply,
   normalizeMentionPubkeys,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
-import {
-  projectChannelWindowMessages,
-  refreshChannelWindowMessages,
-} from "@/features/messages/lib/projectChannelWindow";
+import { projectChannelWindowMessages } from "@/features/messages/lib/projectChannelWindow";
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
 import {
   mergeMessages,
@@ -31,41 +27,32 @@ import {
   clearTimeoutState,
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
-import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
-import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
-import { reactionEmojiUrl } from "@/shared/api/customEmoji";
-import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
-  addReaction,
-  deleteMessage,
-  editMessage,
-  removeReaction,
-  sendChannelMessage,
-} from "@/shared/api/tauri";
-import { getChannelWindowEvents } from "@/shared/api/channelWindow";
+  NATIVE_DELETE_BLOCKER,
+  NATIVE_EDIT_BLOCKER,
+  NATIVE_REACTION_BLOCKER,
+  NATIVE_RICH_MESSAGE_BLOCKER,
+  NATIVE_THREAD_WRITE_BLOCKER,
+  fetchNativeChannelWindow,
+  nativePublishTopic,
+  nativeScopeForChannel,
+} from "@/features/messages/lib/nativeMessaging";
+import {
+  buildChannelMessagePayload,
+  liveMessageToRelayEvent,
+} from "@/shared/api/nativeMessageAdapter";
+import { subscribeX0xLive, x0xPublish } from "@/shared/api/tauriNativeX0x";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
-// Same .mjs the renderer uses, so the cache-update projection can't drift
-// from the on-render overlay.
-import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
   emptyChannelWindowStore,
-  mapChannelWindowEvents,
   mergeLiveChannelWindowEvent,
-  mergeLiveThreadSummary,
   replaceNewestChannelWindow,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
 import {
-  parseChannelWindowResponse,
-  parseLiveThreadSummary,
-} from "@/features/messages/lib/channelWindowResponse";
-import {
-  CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
-  KIND_CHANNEL_THREAD_SUMMARY,
   KIND_STREAM_MESSAGE,
-  KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 
 type MessageQueryContext = {
@@ -77,7 +64,6 @@ type MessageQueryContext = {
 };
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
-const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
 export function createOptimisticMessage(
   channelId: string,
@@ -88,6 +74,11 @@ export function createOptimisticMessage(
   parentEventId: string | null = null,
   mediaTags: string[][] = [],
 ): RelayEvent {
+  const authorAgentId = identity?.agentId;
+  if (!authorAgentId) {
+    throw new Error("createOptimisticMessage requires the native x0x AgentId.");
+  }
+
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
 
@@ -95,7 +86,7 @@ export function createOptimisticMessage(
     tags.push(
       ...buildReplyTags(
         channelId,
-        identity.pubkey,
+        authorAgentId,
         parentEventId,
         resolveReplyRootId(parentEventId, currentMessages),
         mentionPubkeys,
@@ -103,10 +94,10 @@ export function createOptimisticMessage(
     );
   } else {
     tags.push(["h", channelId]);
-    tags.push(["p", identity.pubkey]);
+    tags.push(["p", authorAgentId]);
     for (const pubkey of normalizeMentionPubkeys(
       mentionPubkeys,
-      identity.pubkey,
+      authorAgentId,
     )) {
       tags.push(["p", pubkey]);
     }
@@ -119,7 +110,7 @@ export function createOptimisticMessage(
   return {
     id: localKey,
     localKey,
-    pubkey: identity.pubkey,
+    pubkey: authorAgentId,
     created_at: Math.floor(Date.now() / 1_000),
     kind: KIND_STREAM_MESSAGE,
     tags,
@@ -238,8 +229,7 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       if (!channel) throw new Error("No channel selected.");
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const events = await getChannelWindowEvents(channel.id);
-      const page = parseChannelWindowResponse(events, channel.id, null);
+      const page = await fetchNativeChannelWindow(channel);
       const current =
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
         emptyChannelWindowStore();
@@ -256,145 +246,81 @@ export function useChannelSubscription(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
-  const refreshNewestWindow = useEffectEvent(async () => {
-    if (!channelId) return;
-    await refreshChannelWindowMessages(queryClient, channelId);
-  });
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
-    if (!channelId) return;
-    if (event.kind === KIND_CHANNEL_THREAD_SUMMARY) {
-      // Relay-pushed live badge recount — window-store overlay only, never a
-      // timeline row (mirrors the page path, where 39005 is metadata).
-      const parsed = parseLiveThreadSummary(event);
-      if (!parsed) return;
-      const windowKey = channelWindowKey(channelId);
-      const current =
-        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-        emptyChannelWindowStore();
-      const next = mergeLiveThreadSummary(current, parsed.rootId, parsed.live);
-      if (next !== current) queryClient.setQueryData(windowKey, next);
-      return;
-    }
-    const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
-    const threadReference = isTimelineRow
-      ? getThreadReference(event.tags)
-      : null;
-    if (threadReference?.parentId != null) {
-      const rootId = threadReference?.rootId;
-      if (rootId) {
+    if (!channelId || !CHANNEL_TIMELINE_KINDS.has(event.kind)) return;
+    const threadReference = getThreadReference(event.tags);
+    if (threadReference.parentId != null) {
+      if (threadReference.rootId) {
         queryClient.setQueryData<RelayEvent[]>(
-          threadRepliesKey(channelId, rootId),
+          threadRepliesKey(channelId, threadReference.rootId),
           (current = []) => mergeMessages(current, event),
         );
       }
-      if (!isBroadcastReply(event.tags)) return;
-    }
-    if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return;
-    if (!isTimelineRow) {
-      queryClient.setQueriesData<RelayEvent[]>(
-        { queryKey: ["thread-replies", channelId] },
-        (current = []) => mergeMessages(current, event),
-      );
+      return;
     }
 
     const windowKey = channelWindowKey(channelId);
     const current =
       queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
       emptyChannelWindowStore();
-    const next = mergeLiveChannelWindowEvent(current, event, isTimelineRow);
+    const next = mergeLiveChannelWindowEvent(current, event);
     if (next !== current) {
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, channelId);
     }
-
-    if (event.kind === KIND_SYSTEM_MESSAGE) {
-      try {
-        const payload = JSON.parse(event.content) as { type?: string };
-        if (
-          payload.type === "member_joined" ||
-          payload.type === "member_left" ||
-          payload.type === "member_removed"
-        ) {
-          void queryClient.invalidateQueries({
-            queryKey: ["channels", channelId, "members"],
-          });
-          void queryClient.invalidateQueries({
-            queryKey: ["channels"],
-            exact: true,
-          });
-        }
-      } catch {
-        // Non-JSON system message — ignore.
-      }
-    }
   });
 
-  // Notify the relay client which channel is currently visible so its live
-  // subscriptions are replayed first on reconnect, reducing latency on
-  // degraded networks.
   useEffect(() => {
-    if (!channelId || channelType === "forum") return;
-    setVisibleChannel(channelId);
-    return () => {
-      setVisibleChannel(null);
-    };
-  }, [channelId, channelType]);
+    if (!channel || !channelId || channelType === "forum") return;
 
-  useEffect(() => {
-    if (!channelId || channelType === "forum") {
+    let isDisposed = false;
+    let subscription: Awaited<ReturnType<typeof subscribeX0xLive>> | null =
+      null;
+    let scope: ReturnType<typeof nativeScopeForChannel>;
+    try {
+      scope = nativeScopeForChannel(channel);
+    } catch (error) {
+      console.error("Failed to resolve native channel scope", channelId, error);
       return;
     }
 
-    let isDisposed = false;
-    let cleanup: (() => Promise<void>) | undefined;
-    const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
-      void refreshNewestWindow().catch((error) => {
+    void subscribeX0xLive({ scope, backfill: { limit: 50 } }, (frame) => {
+      if (isDisposed) return;
+      if (frame.type === "error") {
+        console.error(
+          "Native x0xd channel stream error",
+          channelId,
+          frame.message,
+        );
+        return;
+      }
+      if (frame.type !== "message") return;
+      const event = liveMessageToRelayEvent(frame, channelId);
+      if (event) appendMessage(event);
+    })
+      .then((opened) => {
+        if (isDisposed) {
+          void opened.close();
+        } else {
+          subscription = opened;
+        }
+      })
+      .catch((error) => {
         if (!isDisposed) {
           console.error(
-            "Failed to refresh channel window after reconnecting",
+            "Failed to subscribe to native x0xd channel",
             channelId,
             error,
           );
         }
       });
-    });
-
-    relayClient
-      .subscribeToChannelLive(channelId, (event) => {
-        if (!isDisposed) {
-          appendMessage(event);
-        }
-      })
-      .then((dispose) => {
-        if (isDisposed) {
-          void dispose();
-          return;
-        }
-
-        cleanup = dispose;
-        void refreshNewestWindow().catch((error) => {
-          if (!isDisposed) {
-            console.error(
-              "Failed to refresh channel window after subscribing",
-              channelId,
-              error,
-            );
-          }
-        });
-      })
-      .catch((error) => {
-        console.error("Failed to subscribe to channel", channelId, error);
-      });
 
     return () => {
       isDisposed = true;
-      disposeReconnectListener();
-      if (cleanup) {
-        void cleanup();
-      }
+      if (subscription) void subscription.close();
     };
-  }, [channelId, channelType]);
+  }, [channel, channelId, channelType]);
 }
 
 export function useSendMessageMutation(
@@ -450,87 +376,42 @@ export function useSendMessageMutation(
         throw new Error("No identity available for sending messages.");
       }
 
-      // `mediaTags` arrives as the merged outgoing tag set (imeta + NIP-30
-      // emoji). Split it so each kind goes to its own validated Tauri arg —
-      // emoji tags must NOT ride the imeta-only `media` channel (that gate
-      // rejects any non-imeta prefix, which silently dropped emoji sends).
-      const {
-        mediaTags: imetaTags,
-        emojiTags,
-        mentionTags,
-      } = splitOutgoingTags(mediaTags);
-      const recipientPubkeys = messageMentionPubkeys(
-        effectiveChannel,
-        identity.pubkey,
-        mentionPubkeys,
-      );
-
-      // Messages carrying media OR custom-emoji tags MUST go through REST so
-      // the relay's tag validation runs. The WebSocket path emits no extra
-      // tags, so emoji-only messages would otherwise lose their emoji tag.
-      if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
-        const result = await sendChannelMessage(
-          effectiveChannel.id,
-          content,
-          parentEventId ?? null,
-          imetaTags,
-          recipientPubkeys,
-          undefined,
-          emojiTags,
-          mentionTags,
-        );
-
-        // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
-        // For replies, buildReplyTags already includes ["p", author] and ["h", channel].
-        // For non-replies (media-only), we add them ourselves.
-        const replyTags = parentEventId
-          ? buildReplyTags(
-              effectiveChannel.id,
-              identity.pubkey,
-              parentEventId,
-              resolveReplyRootId(parentEventId, cachedMessages),
-              recipientPubkeys,
-            )
-          : [];
-        const baseTags = parentEventId
-          ? replyTags // buildReplyTags includes h + author p + mention ps
-          : [
-              ["h", effectiveChannel.id],
-              ["p", identity.pubkey],
-            ]; // non-reply: add ourselves
-
-        return {
-          id: result.eventId,
-          pubkey: identity.pubkey,
-          created_at: result.createdAt,
-          kind: KIND_STREAM_MESSAGE,
-          tags: [
-            ...baseTags,
-            // For non-replies, add mention p-tags here (replies get them via buildReplyTags)
-            ...(!parentEventId
-              ? normalizeMentionPubkeys(recipientPubkeys, identity.pubkey).map(
-                  (pk) => ["p", pk],
-                )
-              : []),
-            ...imetaTags,
-            ...emojiTags,
-            ...mentionTags,
-          ],
-          content: content.trim(),
-          sig: "",
-        };
+      if (parentEventId) {
+        throw new Error(NATIVE_THREAD_WRITE_BLOCKER);
+      }
+      const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
+      if (imetaTags.length > 0 || emojiTags.length > 0) {
+        throw new Error(NATIVE_RICH_MESSAGE_BLOCKER);
       }
 
-      return relayClient.sendMessage(
-        effectiveChannel.id,
-        content,
-        recipientPubkeys,
-        mentionTags,
+      const recipientAgentIds = messageMentionPubkeys(
+        effectiveChannel,
+        identity.agentId,
+        mentionPubkeys,
       );
+      const topic = await nativePublishTopic(effectiveChannel);
+      const native = buildChannelMessagePayload({
+        text: content.trim(),
+        mentions: recipientAgentIds,
+      });
+      await x0xPublish({ topic, payload: native.payload });
+
+      return {
+        id: native.clientId,
+        localKey: native.clientId,
+        pubkey: identity.agentId,
+        created_at: Math.floor(native.createdAt / 1_000),
+        kind: KIND_STREAM_MESSAGE,
+        tags: [
+          ["h", effectiveChannel.id],
+          ["p", identity.agentId],
+          ...normalizeMentionPubkeys(recipientAgentIds, identity.agentId).map(
+            (agentId) => ["p", agentId],
+          ),
+        ],
+        content: content.trim(),
+        sig: "",
+      };
     },
     onMutate: async ({
       channelId: capturedChannelId,
@@ -635,7 +516,6 @@ export function useSendMessageMutation(
 }
 
 export function useToggleReactionMutation() {
-  const queryClient = useQueryClient();
   return useMutation<
     void,
     Error,
@@ -645,40 +525,17 @@ export function useToggleReactionMutation() {
       remove: boolean;
     }
   >({
-    mutationFn: async ({ eventId, emoji, remove }) => {
-      if (remove) {
-        await removeReaction(eventId, emoji);
-        return;
-      }
-
-      // Custom-emoji reaction: emoji is `:shortcode:`. Resolve its image URL
-      // from the cached community palette so the kind:7 carries the NIP-30
-      // `["emoji", shortcode, url]` tag. Unicode reactions resolve to no URL.
-      const emojiUrl = reactionEmojiUrl(
-        emoji,
-        queryClient.getQueryData<CustomEmoji[]>(customEmojiQueryKey),
-      );
-      await addReaction(eventId, emoji, emojiUrl);
+    mutationFn: async () => {
+      throw new Error(NATIVE_REACTION_BLOCKER);
     },
   });
 }
 
 export function useDeleteMessageMutation(channel: Channel | null) {
-  const queryClient = useQueryClient();
-
   return useMutation<void, Error, { eventId: string }>({
-    mutationFn: async ({ eventId }) => {
-      if (!channel) {
-        throw new Error("No channel selected.");
-      }
-      await deleteMessage(channel.id, eventId);
-    },
-    onSuccess: (_data, { eventId }) => {
-      if (!channel) return;
-      queryClient.setQueryData<RelayEvent[]>(
-        channelMessagesKey(channel.id),
-        (current = []) => current.filter((message) => message.id !== eventId),
-      );
+    mutationFn: async () => {
+      if (!channel) throw new Error("No channel selected.");
+      throw new Error(NATIVE_DELETE_BLOCKER);
     },
     onError: (error) => {
       toast.error(`Failed to delete message: ${error.message}`);
@@ -687,8 +544,6 @@ export function useDeleteMessageMutation(channel: Channel | null) {
 }
 
 export function useEditMessageMutation(channel: Channel | null) {
-  const queryClient = useQueryClient();
-
   return useMutation<
     void,
     Error,
@@ -696,64 +551,12 @@ export function useEditMessageMutation(channel: Channel | null) {
       eventId: string;
       content: string;
       mediaTags?: string[][];
-      // Pubkeys of mentions *newly added* by this edit, diffed at the composer.
-      // Only these receive a `p` tag so a typo-fix edit re-wakes nobody.
       mentionPubkeys?: string[];
     }
   >({
-    mutationFn: async ({ eventId, content, mediaTags, mentionPubkeys }) => {
-      if (!channel) {
-        throw new Error("No channel selected.");
-      }
-
-      // `mediaTags` arrives as the merged outgoing set (imeta + NIP-30 emoji).
-      // Split so each rides its own validated Tauri arg — emoji tags must NOT
-      // go through the imeta-only `mediaTags` channel (the Rust `imeta_tags`
-      // guard rejects any non-imeta prefix), mirroring the send path.
-      const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
-
-      await editMessage(
-        channel.id,
-        eventId,
-        content,
-        imetaTags,
-        emojiTags,
-        mentionPubkeys,
-      );
-    },
-    onSuccess: (_data, { eventId, content, mediaTags }) => {
-      if (!channel) {
-        return;
-      }
-
-      // Apply-on-success cache update: reflect the edit's new content and
-      // imeta tag set immediately, so the local cache matches what the
-      // receiver overlay (formatTimelineMessages) will produce when the
-      // edit event arrives back from the relay. (Not a true optimistic
-      // update — runs in onSuccess, not onMutate. Worth bearing the cost
-      // only because the edit event round-trip can lag perceptibly.)
-      const applyEdit = (message: RelayEvent): RelayEvent => {
-        if (message.id !== eventId) return message;
-        const nextTags = mediaTags
-          ? applyEditTagOverlay(message.tags, mediaTags)
-          : message.tags;
-        return { ...message, content, tags: nextTags };
-      };
-
-      // The WINDOW STORE is the source of truth: every live merge
-      // re-flattens it over `channelMessagesKey`, so patching only the
-      // flattened array gets reverted by the next live event (see
-      // mapChannelWindowEvents). Update the store first, then keep the
-      // flattened cache in step for immediate paint.
-      queryClient.setQueryData<ChannelWindowStore>(
-        channelWindowKey(channel.id),
-        (current) =>
-          current ? mapChannelWindowEvents(current, applyEdit) : current,
-      );
-      queryClient.setQueryData<RelayEvent[]>(
-        channelMessagesKey(channel.id),
-        (current = []) => current.map(applyEdit),
-      );
+    mutationFn: async () => {
+      if (!channel) throw new Error("No channel selected.");
+      throw new Error(NATIVE_EDIT_BLOCKER);
     },
   });
 }

@@ -222,6 +222,33 @@ test("authoritative refresh reconciles duplicate live rows", () => {
   );
 });
 
+test("native history refresh reconciles a live client correlation key", () => {
+  const live = { ...event("client-id", 110), localKey: "client-id" };
+  const withLive = mergeLiveChannelWindowEvent(emptyChannelWindowStore(), live);
+  const durable = {
+    ...event("daemon-msg-id", 110),
+    localKey: "client-id",
+  };
+  const refreshed = replaceNewestChannelWindow(withLive, page(null, [durable]));
+
+  assert.deepEqual(refreshed.liveOverlay, []);
+  assert.equal(flattenChannelWindowEvents(refreshed)[0].id, durable.id);
+});
+
+test("native live duplicates already present in history are ignored", () => {
+  const durable = {
+    ...event("daemon-msg-id", 110),
+    localKey: "client-id",
+  };
+  const store = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [durable]),
+  );
+  const live = { ...event("client-id", 110), localKey: "client-id" };
+
+  assert.equal(mergeLiveChannelWindowEvent(store, live), store);
+});
+
 test("older-page append reconciles a live row pushed below page zero", () => {
   const initial = replaceNewestChannelWindow(
     emptyChannelWindowStore(),
