@@ -178,6 +178,15 @@ pub async fn x0x_subscribe_live(
             }
         };
 
+        // `run_subscribe` may finish in the same scheduler turn that its last
+        // frames enter the bounded bridge. Drain those frames before reporting
+        // completion so a socket close cannot discard the tail of the stream.
+        while let Ok(frame) = rx.try_recv() {
+            if on_frame.send(frame).is_err() {
+                break;
+            }
+        }
+
         if let Err(error) = transport_result {
             // X0xClient errors contain sanitized stage/status context only;
             // bearer tokens never enter their variants or Display output.
