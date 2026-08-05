@@ -1,12 +1,13 @@
+// Modified from block/buzz @ 710ed9ff — see FORK.md (Stage 1: local x0xd + bridge supervisor)
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
 mod app_state;
 mod archive;
-mod builderlab;
 mod commands;
 mod deep_link;
 mod event_sync;
 mod events;
 mod huddle;
+mod local_stack;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -27,10 +28,12 @@ mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod symphony;
+mod symphony_client;
 mod templates;
 mod util;
-use app_state::{build_app_state, resolve_persisted_identity, AppState};
-use builderlab::*;
+mod x0x_client;
+use app_state::{resolve_persisted_identity, try_build_app_state, AppState};
 use commands::*;
 use deep_link::{
     acknowledge_pending_community_deep_link, handle_deep_link_url,
@@ -162,6 +165,14 @@ pub fn run() {
             eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
         }
     }
+
+    let app_state = match try_build_app_state() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to initialize HTTP clients: {error}");
+            return;
+        }
+    };
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -350,11 +361,9 @@ pub fn run() {
                 responder.respond(response);
             });
         })
-        .manage(build_app_state())
+        .manage(app_state)
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
-        .manage(BuilderlabSession::default())
-        .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -418,16 +427,6 @@ pub fn run() {
                 .load(std::sync::atomic::Ordering::Acquire);
             let recovery_mode = identity_lost || keyring_locked;
 
-            // Snapshot owner keys after identity resolution; the best-effort
-            // event reconcile itself runs off the synchronous setup path below.
-            let owner_keys = match state.keys.lock() {
-                Ok(k) => k.clone(),
-                Err(e) => {
-                    eprintln!("buzz-desktop: fatal: owner keys lock poisoned: {e}");
-                    std::process::exit(1);
-                }
-            };
-
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
             // set but no source_version). Must run before
@@ -443,6 +442,16 @@ pub fn run() {
             // through every call site.
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
+            }
+
+            // Bring up the local x0xd + x0x-nostr-bridge stack (M1a
+            // spawn-or-attach). Installs `ws://127.0.0.1:3300` as the runtime
+            // relay default via the existing relay seam (without overwriting a
+            // workspace override). Best-effort: on failure the typed error is
+            // captured and the relay falls back to env/build-time defaults.
+            // Skipped in identity-recovery mode to keep recovery boot fast.
+            if !recovery_mode {
+                crate::local_stack::bring_up_local_stack(&app_handle);
             }
 
             // Bring up the runtime-owned shared-compute coordinator before
@@ -466,11 +475,17 @@ pub fn run() {
             let proxy_client = state.http_client.clone();
             let proxy_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                let port = media_proxy::spawn_media_proxy(proxy_client, proxy_handle.clone()).await;
-                let state = proxy_handle.state::<AppState>();
-                state
-                    .media_proxy_port
-                    .store(port, std::sync::atomic::Ordering::Relaxed);
+                match media_proxy::spawn_media_proxy(proxy_client, proxy_handle.clone()).await {
+                    Ok(port) => {
+                        let state = proxy_handle.state::<AppState>();
+                        state
+                            .media_proxy_port
+                            .store(port, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        eprintln!("buzz-desktop: media proxy failed to start: {error}");
+                    }
+                }
             });
 
             // Create the Buzz nest (~/.buzz or ~/.buzz-dev for dev builds) before
@@ -538,6 +553,15 @@ pub fn run() {
             // hold the boot path hostage. Skipped in recovery mode — the owner
             // key is ephemeral.
             if !recovery_mode {
+                // Snapshot owner keys via the fail-closed gate; this block only
+                // runs outside recovery, so an Err here means a poisoned lock.
+                let owner_keys = match state.signing_keys() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        eprintln!("buzz-desktop: fatal: owner keys unavailable: {e}");
+                        std::process::exit(1);
+                    }
+                };
                 event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
             }
 
@@ -647,24 +671,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
-            start_builderlab_login,
-            cancel_builderlab_login,
-            get_builderlab_auth,
-            clear_builderlab_auth,
-            get_builderlab_nostr_identity,
-            bind_builderlab_nostr_identity,
-            delete_builderlab_nostr_identity,
-            list_builderlab_communities,
-            check_builderlab_community_name,
-            create_builderlab_community,
-            archive_builderlab_community,
-            unarchive_builderlab_community,
-            transfer_builderlab_community,
             title_bar_double_click,
             get_identity,
-            get_nsec,
-            import_identity,
-            persist_current_identity,
+            get_recovery_state,
+            recover_lost_identity,
             get_profile,
             update_profile,
             update_profile_at_relay,
@@ -827,17 +837,6 @@ pub fn run() {
             encode_team_snapshot_for_send,
             preview_team_snapshot_import,
             confirm_team_snapshot_import,
-            get_channel_workflows,
-            get_channels_workflows,
-            get_workflow,
-            create_workflow,
-            update_workflow,
-            delete_workflow,
-            get_workflow_runs,
-            get_run_approvals,
-            trigger_workflow,
-            grant_approval,
-            deny_approval,
             publish_note,
             get_contact_list,
             set_contact_list,
@@ -899,6 +898,20 @@ pub fn run() {
             x0x_request_group_join,
             x0x_update_group_policy,
             x0x_update_group,
+            x0x_list_task_lists,
+            x0x_create_task_list,
+            x0x_list_tasks,
+            x0x_add_task,
+            x0x_update_task,
+            x0x_list_stores,
+            x0x_create_store,
+            x0x_join_store,
+            x0x_list_store_keys,
+            x0x_get_store_value,
+            x0x_put_store_value,
+            x0x_delete_store_value,
+            x0x_get_agent_card,
+            x0x_import_agent_card,
             symphony_supervision_status,
             start_symphony,
             stop_symphony,
@@ -917,7 +930,6 @@ pub fn run() {
             symphony_routes,
             symphony_subscribe_events,
             set_prevent_sleep_active,
-            get_agent_memory,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,
             observer_archive_default_enabled,
@@ -935,8 +947,15 @@ pub fn run() {
             is_auto_update_supported,
             set_window_vibrancy,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .build(tauri::generate_context!());
+
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to build tauri application: {error}");
+            return;
+        }
+    };
 
     let shutdown_done = Arc::new(AtomicBool::new(false));
 
