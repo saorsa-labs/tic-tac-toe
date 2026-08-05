@@ -31,6 +31,9 @@ mod media_transcode;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;
 mod messages;
+mod native_symphony;
+mod native_membership;
+mod native_x0x;
 mod notifications;
 mod observer_archive;
 mod os_idle;
@@ -84,6 +87,9 @@ pub use media_download::*;
 #[cfg(feature = "mesh-llm")]
 pub use mesh_llm::*;
 pub use messages::*;
+pub use native_membership::*;
+pub use native_symphony::*;
+pub use native_x0x::*;
 pub use notifications::*;
 pub use observer_archive::*;
 pub use os_idle::*;
