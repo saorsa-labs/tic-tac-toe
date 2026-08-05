@@ -1,7 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
-import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
 import "@fontsource-variable/inter/wght.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
@@ -80,7 +79,6 @@ function renderApp() {
                 <PoofBurstProvider>
                   <UpdaterProvider>
                     <App />
-                    <NostrBindConsentDialog />
                   </UpdaterProvider>
                   <Toaster />
                 </PoofBurstProvider>

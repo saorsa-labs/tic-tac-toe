@@ -6,7 +6,6 @@ import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 import type { Community } from "@/features/communities/types";
 import { AddCommunityDialog } from "@/features/communities/ui/AddCommunityDialog";
 import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
-import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
 import {
   useChannelSections,
@@ -44,8 +43,6 @@ import {
 } from "@/features/sidebar/ui/CustomChannelSection";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
-import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
-import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
@@ -69,7 +66,6 @@ import {
   SidebarMenu,
   SidebarMenuItem,
   SidebarRail,
-  useSidebar,
 } from "@/shared/ui/sidebar";
 
 type CollapsibleSidebarGroup =
@@ -92,7 +88,6 @@ type AppSidebarProps = {
   isCreatingChannel: boolean;
   isCreatingForum: boolean;
   profile?: Profile;
-  relayConnectionCard: ReturnType<typeof useSidebarRelayConnectionCard>;
   selfPresenceStatus: PresenceStatus;
   errorMessage?: string;
   selectedChannelId: string | null;
@@ -184,7 +179,6 @@ export function AppSidebar({
   isCreatingChannel,
   isCreatingForum,
   profile,
-  relayConnectionCard,
   selfPresenceStatus,
   errorMessage,
   selectedChannelId,
@@ -236,8 +230,6 @@ export function AppSidebar({
   const activeWorkingByChannelId = useActiveWorkingChannelsById();
   const { status: updateStatus } = useUpdaterContext();
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
-  const { open: sidebarOpen, openMobile } = useSidebar();
-  const isMobile = useIsMobile();
   const [isSidebarUpdateCardDismissed, setIsSidebarUpdateCardDismissed] =
     React.useState(false);
   const showSidebarUpdateCard =
@@ -832,7 +824,7 @@ export function AppSidebar({
                 </>
               ) : null}
 
-              {errorMessage && !relayConnectionCard.hasRelayUnreachableError ? (
+              {errorMessage ? (
                 <div className="px-3 py-2 text-sm text-destructive">
                   {errorMessage}
                 </div>
@@ -853,19 +845,6 @@ export function AppSidebar({
           ) : null}
 
           <SidebarFooter>
-            {relayConnectionCard.showSidebarRelayConnectionCard &&
-            (isMobile ? openMobile : sidebarOpen) ? (
-              <SidebarRelayConnectionCard
-                className="mb-2"
-                isConnected={relayConnectionCard.isRelayConnectionSuccess}
-                isReconnectPending={relayConnectionCard.isRelayReconnectPending}
-                isWaitingOnReconnectHook={
-                  relayConnectionCard.isWaitingOnReconnectHook
-                }
-                onDismiss={relayConnectionCard.onDismissRelayConnectionCard}
-                onReconnect={relayConnectionCard.onReconnectRelay}
-              />
-            ) : null}
             {showSidebarUpdateCard ? (
               <div className="mb-2 group-data-[collapsible=icon]:hidden">
                 <SidebarUpdateCard

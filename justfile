@@ -21,9 +21,13 @@ desktop-smoke:
 crates-check:
     cargo check -p buzz-core -p buzz-persona -p buzz-sdk -p buzz-agent -p buzz-media
 
-# M1a relay-mode acceptance gate: isolated x0xd + x0x-nostr-bridge + integration specs
-bridge-gate:
-    scripts/bridge-gate.sh
+# Reject compatibility transports and retired bridge configuration in the packaged app.
+no-relay-gate:
+    node scripts/no-relay-gate.mjs
+
+# Stage x0xd for the active target triple (Tauri externalBin naming).
+stage-sidecars:
+    scripts/stage-sidecars.sh
 
 # Full validation
 check: desktop-check crates-check

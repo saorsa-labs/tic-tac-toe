@@ -1,4 +1,4 @@
-// Modified from block/buzz @ 710ed9ff — see FORK.md (Stage 1: local x0xd + bridge supervisor)
+// Modified from block/buzz @ 710ed9ff — see FORK.md (native x0xd data layer)
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
 mod app_state;
 mod archive;
@@ -18,7 +18,6 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
-mod native_websocket;
 mod nostr_bind;
 pub mod nostr_convert;
 mod prevent_sleep;
@@ -247,7 +246,6 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(native_websocket::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
 
@@ -444,11 +442,8 @@ pub fn run() {
                 *guard = Some(app_handle.clone());
             }
 
-            // Bring up the local x0xd + x0x-nostr-bridge stack (M1a
-            // spawn-or-attach). Installs `ws://127.0.0.1:3300` as the runtime
-            // relay default via the existing relay seam (without overwriting a
-            // workspace override). Best-effort: on failure the typed error is
-            // captured and the relay falls back to env/build-time defaults.
+            // Spawn or attach to the named local x0xd instance. The desktop
+            // communicates with its authenticated REST/WS API directly.
             // Skipped in identity-recovery mode to keep recovery boot fast.
             if !recovery_mode {
                 crate::local_stack::bring_up_local_stack(&app_handle);

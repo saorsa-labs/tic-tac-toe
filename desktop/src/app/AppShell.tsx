@@ -79,9 +79,7 @@ import {
 } from "@/features/communities/communityNavigationStorage";
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
-import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
@@ -93,8 +91,6 @@ import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
-import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
-import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
@@ -192,7 +188,6 @@ export function AppShell() {
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useAgentMetricArchiveSeed(deferredPubkey);
   const profileQuery = useProfileQuery();
-  useRelayAutoHeal();
   usePresenceSubscription();
   useUserStatusSubscription();
   useCommunityEmojiLiveUpdates();
@@ -224,10 +219,6 @@ export function AppShell() {
     channelsQuery.error instanceof Error
       ? channelsQuery.error.message
       : undefined;
-  const relayConnectionCard = useSidebarRelayConnectionCard(
-    channelsErrorMessage,
-    communitiesHook.activeCommunity?.relayUrl,
-  );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
     [channels],
@@ -339,7 +330,6 @@ export function AppShell() {
     unmuteThread,
   } = useUnreadChannels(sidebarChannels, activeChannel, {
     pubkey: identityQuery.data?.pubkey,
-    relayClient,
     relayUrl: communitiesHook.activeCommunity?.relayUrl,
     currentPubkey: identityQuery.data?.pubkey,
     mutedChannelIds,
@@ -826,7 +816,6 @@ export function AppShell() {
                           homeBadgeCount={homeBadgeCount + dueReminderBadge}
                           addCommunityPrefill={addCommunityDialog.prefill}
                           isAddCommunityOpen={addCommunityDialog.open}
-                          relayConnectionCard={relayConnectionCard}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
                           isLoading={channelsQuery.isLoading}
@@ -925,12 +914,6 @@ export function AppShell() {
                             </BuzzTheme.ContentSurface>
                           </SidebarInset>
                         </MainInsetProvider>
-                        <RelayConnectionOverlay
-                          card={relayConnectionCard}
-                          errorMessage={channelsErrorMessage}
-                          hasCommunityRail={hasCommunityRail}
-                          isHuddleDrawerOpen={isHuddleDrawerOpen}
-                        />
                       </div>
                     )}
                     <RequestedAgentCreateDialogs />
