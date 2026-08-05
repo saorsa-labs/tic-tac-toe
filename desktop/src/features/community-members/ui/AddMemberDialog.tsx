@@ -84,7 +84,7 @@ export function AddMemberDialog({
           <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
             <DialogTitle>Add member</DialogTitle>
             <DialogDescription>
-              Add a user to this relay by their public key.
+              Add a user to this x0x group by their Agent ID.
             </DialogDescription>
           </DialogHeader>
 
@@ -102,7 +102,7 @@ export function AddMemberDialog({
                     className="text-sm font-medium"
                     htmlFor="member-pubkey"
                   >
-                    Public key
+                    Agent ID
                   </label>
                   <Input
                     autoCapitalize="none"
@@ -111,7 +111,7 @@ export function AddMemberDialog({
                     id="member-pubkey"
                     maxLength={64}
                     onChange={(e) => setPubkey(e.target.value)}
-                    placeholder="64-character hex pubkey"
+                    placeholder="64-character x0x Agent ID"
                     spellCheck={false}
                     value={pubkey}
                   />
@@ -122,7 +122,7 @@ export function AddMemberDialog({
                   ) : null}
                   {isAlreadyMember ? (
                     <p className="text-xs text-destructive">
-                      This pubkey is already a relay member.
+                      This Agent ID is already a group member.
                     </p>
                   ) : null}
                 </div>

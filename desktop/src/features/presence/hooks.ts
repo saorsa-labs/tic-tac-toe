@@ -1,21 +1,18 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { relayClient } from "@/shared/api/relayClient";
-import { isRateLimited } from "@/shared/api/relayRateLimitGate";
-import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { getOsIdleSeconds } from "@/shared/api/osIdle";
-import { getPresence } from "@/shared/api/tauri";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import {
+  getNativePresence,
+  setNativePresence,
+} from "@/features/profile/nativeSocialApi";
 import {
   mergePresenceUpdate,
-  parseLivePresenceEvent,
   presenceQueryWantsPubkey,
   resolveAutomaticPresenceStatus,
 } from "@/features/presence/lib/presence";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
-const PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
 const PRESENCE_ACTIVITY_THROTTLE_MS = 1_000;
 const PRESENCE_TTL_SECONDS = 90;
@@ -23,9 +20,9 @@ const PRESENCE_PREFERENCE_STORAGE_KEY = "buzz-presence-preference";
 
 type PresencePreference = "auto" | "away" | "offline" | null;
 
-function normalizePubkeys(pubkeys: string[]) {
-  return [...new Set(pubkeys.map((pubkey) => normalizePubkey(pubkey)))]
-    .filter((pubkey) => pubkey.length > 0)
+function normalizePubkeys(agentIds: string[]) {
+  return [...new Set(agentIds.map((agentId) => agentId.trim().toLowerCase()))]
+    .filter((agentId) => agentId.length > 0)
     .sort();
 }
 
@@ -81,84 +78,23 @@ export function usePresenceQuery(
 ) {
   const normalizedPubkeys = normalizePubkeys(pubkeys);
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
-  const connectionState = useRelayConnection();
-  const connected = connectionState === "connected";
-
   return useQuery<PresenceLookup>({
     enabled,
     queryKey: presenceQueryKey(normalizedPubkeys),
-    queryFn: () => getPresence(normalizedPubkeys),
+    queryFn: () => getNativePresence(normalizedPubkeys),
     staleTime: 30_000,
-    // Backstop poll: catches REST-only writers (ACP agents) and TTL expiry
-    // (crashed clients). WS events handle the fast path. Pause on degraded
-    // connections — HTTP presence calls fail anyway and consume relay quota.
-    refetchInterval: connected ? 60_000 : false,
+    refetchInterval: 60_000,
   });
 }
 
-/**
- * Subscribe to kind:20001 presence events over WebSocket and update the
- * TanStack Query presence cache in-place when updates arrive. Call once
- * in AppShell. Uses setQueriesData for targeted per-pubkey updates without
- * triggering refetches. Retries with exponential backoff on failure.
- */
+/** Poll the daemon-owned presence frontier; no RelayEvent is emitted or parsed. */
 export function usePresenceSubscription() {
   const queryClient = useQueryClient();
-
   React.useEffect(() => {
-    let unsub: (() => Promise<void>) | null = null;
-    let isCancelled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-
-    function handlePresenceEvent(event: { pubkey: string; content: string }) {
-      if (isCancelled) return;
-      const parsed = parseLivePresenceEvent(event);
-      if (!parsed) return;
-      const { pubkey, status } = parsed;
-      queryClient.setQueriesData<PresenceLookup>(
-        {
-          queryKey: ["presence"],
-          predicate: (query) =>
-            presenceQueryWantsPubkey(query.queryKey, pubkey),
-        },
-        (old) => mergePresenceUpdate(old, pubkey, status),
-      );
-    }
-
-    function subscribeWithRetry(attempt = 0) {
-      if (isCancelled) return;
-      void relayClient
-        .subscribeToPresenceUpdates(handlePresenceEvent)
-        .then((unsubFn) => {
-          if (isCancelled) {
-            void unsubFn();
-            return;
-          }
-          unsub = unsubFn;
-        })
-        .catch(() => {
-          if (!isCancelled) {
-            const delay = Math.min(1000 * 2 ** attempt, 30_000);
-            retryTimer = setTimeout(
-              () => subscribeWithRetry(attempt + 1),
-              delay,
-            );
-          }
-        });
-    }
-    subscribeWithRetry();
-
-    const unsubReconnect = relayClient.subscribeToReconnects(() => {
-      if (!isCancelled)
-        void queryClient.invalidateQueries({ queryKey: ["presence"] });
-    });
-
-    return () => {
-      isCancelled = true;
-      unsubReconnect();
-      if (retryTimer) clearTimeout(retryTimer);
-      if (unsub) void unsub();
-    };
+    const interval = window.setInterval(() => {
+      void queryClient.invalidateQueries({ queryKey: ["presence"] });
+    }, 30_000);
+    return () => window.clearInterval(interval);
   }, [queryClient]);
 }
 
@@ -168,11 +104,8 @@ export function useSetPresenceMutation(pubkey?: string) {
 
   return useMutation({
     mutationFn: async (status: PresenceStatus) => {
-      await relayClient.sendPresence(status);
-      return {
-        status,
-        ttlSeconds: status === "offline" ? 0 : PRESENCE_TTL_SECONDS,
-      };
+      await setNativePresence(status);
+      return { status, ttlSeconds: PRESENCE_TTL_SECONDS };
     },
     onSuccess: ({ status }) => {
       if (normalizedPubkey.length === 0) return;
@@ -213,7 +146,6 @@ export function usePresenceSession(pubkey?: string) {
       resolveAutomaticPresenceStatusSync(lastActivityAtRef.current, Date.now()),
   );
   const automaticStatusRef = React.useRef(automaticStatus);
-  const skipNextSyncRef = React.useRef<PresenceStatus | null>(null);
 
   const applyAutomaticStatus = React.useEffectEvent((next: PresenceStatus) => {
     if (next !== automaticStatusRef.current) {
@@ -337,56 +269,15 @@ export function usePresenceSession(pubkey?: string) {
       }
 
       setPresencePreference(nextPreference);
-      skipNextSyncRef.current = status;
-
       try {
         await setPresenceMutation.mutateAsync(status);
       } catch (error) {
-        skipNextSyncRef.current = null;
         setPresencePreference(previousPreference);
         throw error;
       }
     },
     [presencePreference, setPresenceMutation],
   );
-
-  const syncPresence = React.useEffectEvent((status: PresenceStatus) => {
-    void setPresenceMutation.mutateAsync(status).catch(() => {
-      return;
-    });
-  });
-
-  React.useEffect(() => {
-    if (normalizedPubkey.length === 0) {
-      return;
-    }
-
-    if (skipNextSyncRef.current === currentStatus) {
-      skipNextSyncRef.current = null;
-      return;
-    }
-
-    syncPresence(currentStatus);
-  }, [currentStatus, normalizedPubkey]);
-
-  React.useEffect(() => {
-    if (normalizedPubkey.length === 0 || currentStatus === "offline") {
-      return;
-    }
-
-    const intervalId = window.setInterval(() => {
-      // Skip heartbeat ticks while the relay is unavailable or rate-limited —
-      // the publish would fail anyway and consumes quota the recovery needs.
-      if (relayClient.getConnectionState() !== "connected" || isRateLimited()) {
-        return;
-      }
-      syncPresence(currentStatus);
-    }, PRESENCE_HEARTBEAT_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [currentStatus, normalizedPubkey]);
 
   return {
     currentStatus,

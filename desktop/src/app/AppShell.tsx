@@ -178,32 +178,36 @@ export function AppShell() {
   // deferred) and unconditionally repairs the DB subscription on internal
   // builds — otherwise frames emitted before the listener opens are lost.
   const observerReconciled = useObserverArchiveReconciliation(
-    identityQuery.data?.pubkey,
+    identityQuery.data?.relayPubkey,
   );
   // useArchiveSync must wait for reconciliation, or listeners could open
   // before kind 24200 is guaranteed present in the subscription.
   useArchiveSync(observerReconciled);
   // Kind 44200 is relay-persisted (durable) and stays deferred: missed
   // startup frames can be replayed, so there's no ordering constraint.
-  const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
+  const deferredPubkey = startupReady
+    ? identityQuery.data?.relayPubkey
+    : undefined;
   useAgentMetricArchiveSeed(deferredPubkey);
   const profileQuery = useProfileQuery();
   usePresenceSubscription();
   useUserStatusSubscription();
   useCommunityEmojiLiveUpdates();
-  useMembershipNotifications(identityQuery.data?.pubkey);
-  const presenceSession = usePresenceSession(deferredPubkey);
+  useMembershipNotifications(identityQuery.data?.relayPubkey);
+  const presenceSession = usePresenceSession(
+    startupReady ? identityQuery.data?.agentId : undefined,
+  );
   const selfStatusQuery = useUserStatusQuery(
     deferredPubkey ? [deferredPubkey] : [],
   );
   const setUserStatusMutation = useSetUserStatusMutation(deferredPubkey);
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
-    useHomeFeedNotifications(identityQuery.data?.pubkey);
-  const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
+    useHomeFeedNotifications(identityQuery.data?.relayPubkey);
+  const feedItemState = useFeedItemState(identityQuery.data?.relayPubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
   useReminderNotifications(
-    identityQuery.data?.pubkey,
+    identityQuery.data?.relayPubkey,
     notificationSettings.settings,
     channels,
   );

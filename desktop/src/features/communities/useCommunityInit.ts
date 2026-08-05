@@ -34,6 +34,7 @@ import {
   shouldAutoConnectDefaultRelay,
 } from "./communityStorage";
 import type { Community } from "./types";
+import { bindNativeGroup } from "./nativeCommunityApi";
 
 /**
  * Tear down all community-scoped module singletons so the new
@@ -129,7 +130,7 @@ export function useCommunityInit(
             if (cancelled) return;
             const community = initFirstCommunity(
               defaultRelayUrl,
-              identity.pubkey,
+              identity.relayPubkey,
             );
             if (community && !cancelled) {
               window.location.reload();
@@ -194,7 +195,38 @@ export function useCommunityInit(
       hasInitializedRef.current = true;
       appliedRelayUrlRef.current = activeCommunity.relayUrl;
 
-      // Apply community config to the Tauri backend.
+      // Native workspaces bind the daemon's opaque group id and never apply a
+      // relay URL/token. Failure leaves the loading gate closed.
+      if (activeCommunity.groupId) {
+        try {
+          await bindNativeGroup(activeCommunity.groupId);
+        } catch (error) {
+          if (!cancelled) {
+            setResult({
+              isReady: false,
+              needsSetup: false,
+              appliedKey: null,
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Failed to activate native workspace",
+            });
+          }
+          return;
+        }
+        if (!cancelled) {
+          restoreActiveAgentTurnsForCommunity(activeCommunity.id);
+          prevCommunityIdRef.current = activeCommunity.id;
+          setResult({
+            isReady: true,
+            needsSetup: false,
+            appliedKey: communityKey,
+          });
+        }
+        return;
+      }
+
+      // Apply legacy community config to the Tauri backend.
       //
       // Note: we deliberately do NOT pass an nsec here. The persisted
       // `identity.key` file (resolved at startup by `resolve_persisted_identity`,
@@ -247,7 +279,7 @@ export function useCommunityInit(
         try {
           const identity = await getIdentity();
           if (cancelled) return;
-          initDraftStore(identity.pubkey, activeCommunity.relayUrl);
+          initDraftStore(identity.relayPubkey, activeCommunity.relayUrl);
         } catch (err) {
           if (cancelled) return;
           console.error(
@@ -277,6 +309,7 @@ export function useCommunityInit(
   }, [
     activeCommunity?.id,
     activeCommunity?.relayUrl,
+    activeCommunity?.groupId,
     activeCommunity?.token,
     activeCommunity?.reposDir,
     isSharedIdentity,

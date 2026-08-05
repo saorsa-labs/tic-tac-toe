@@ -15,16 +15,15 @@ import {
 } from "@/features/onboarding/welcome";
 import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
 import { registerAvatarWhenReady } from "@/features/profile/avatarProfileSync";
-import { profileQueryKey } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
-import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
+import { setNativeGroupDisplayName } from "@/features/profile/nativeSocialApi";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
-import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
@@ -162,7 +161,6 @@ export function CommunityOnboardingFlow({
   const [isPending, setIsPending] = React.useState(false);
   const [starterChannelFailureCount, setStarterChannelFailureCount] =
     React.useState(0);
-  const [deniedPubkey, setDeniedPubkey] = React.useState("");
   const [isMembershipDenied, setIsMembershipDenied] = React.useState(false);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
     React.useState(false);
@@ -238,7 +236,7 @@ export function CommunityOnboardingFlow({
   const finish = React.useCallback(async () => {
     if (!relayUrl) return;
     const identity = await getIdentity();
-    markCommunityOnboardingComplete(identity.pubkey, relayUrl);
+    markCommunityOnboardingComplete(identity.relayPubkey, relayUrl);
     clear();
   }, [clear, relayUrl]);
   const finalize = React.useCallback(async () => {
@@ -249,7 +247,7 @@ export function CommunityOnboardingFlow({
       const identity = await getIdentity();
       const result = await initializeStarterChannels(queryClient, {
         focus: true,
-        pubkey: identity.pubkey,
+        pubkey: identity.relayPubkey,
         communityScope: relayUrl,
       });
       if (!result.ok) throw new Error(result.reason);
@@ -260,7 +258,7 @@ export function CommunityOnboardingFlow({
         // yank a later Home visit back to Welcome.
         takePendingWelcomeChannelForDirectEntry();
         window.location.hash = `/channels/${result.focusChannelId}`;
-        markCommunityOnboardingComplete(identity.pubkey, relayUrl);
+        markCommunityOnboardingComplete(identity.relayPubkey, relayUrl);
         // Keep this screen mounted as a curtain over the loading app; the
         // "entering" stage fades it out once Welcome reports ready.
         update({ stage: "entering", error: undefined });
@@ -293,7 +291,7 @@ export function CommunityOnboardingFlow({
   // the user navigated Back). Only seeds fields that are still empty so that
   // any user edits are preserved.
   React.useEffect(() => {
-    if (!isProfileStage) return;
+    if (!isProfileStage || transaction?.groupId) return;
     void getProfile()
       .then((profile) => {
         if (profile.displayName) {
@@ -310,7 +308,7 @@ export function CommunityOnboardingFlow({
       .catch(() => {
         // Seeding is best-effort; silently ignore failures.
       });
-  }, [isProfileStage]);
+  }, [isProfileStage, transaction?.groupId]);
 
   React.useLayoutEffect(() => {
     if (isProfileStage && !isAvatarEditorOpen) {
@@ -346,19 +344,10 @@ export function CommunityOnboardingFlow({
           activeRelayUrl={transaction.relayUrl}
           onBack={() => setIsMembershipDenied(false)}
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
-          onImportKey={async (nsec) => {
-            const identity = await importIdentity(nsec);
-            relayClient.disconnect();
-            queryClient.setQueryData(["identity"], identity);
-            queryClient.removeQueries({ queryKey: profileQueryKey });
-            setIsMembershipDenied(false);
-            update({ stage: "connecting", error: undefined });
-          }}
           onRetry={() => {
             setIsMembershipDenied(false);
             update({ stage: "connecting", error: undefined });
           }}
-          pubkey={deniedPubkey}
         />
         {isCommunityChangeOpen ? (
           <CommunityChangeOverlay
@@ -398,14 +387,26 @@ export function CommunityOnboardingFlow({
           : null;
 
       try {
-        const profile = await updateProfile({
-          displayName: displayName.trim(),
-          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
-        });
-        deferredAvatar?.release({
-          expectedPubkey: profile.pubkey,
-          expectedAvatarUrl: profile.avatarUrl,
-        });
+        if (transaction.groupId) {
+          if (candidateAvatarUrl) {
+            throw new Error(
+              "This x0xd version does not expose native avatar profiles.",
+            );
+          }
+          await setNativeGroupDisplayName(
+            transaction.groupId,
+            displayName.trim(),
+          );
+        } else {
+          const profile = await updateProfile({
+            displayName: displayName.trim(),
+            avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
+          });
+          deferredAvatar?.release({
+            expectedPubkey: profile.pubkey,
+            expectedAvatarUrl: profile.avatarUrl,
+          });
+        }
       } catch (error) {
         deferredAvatar?.cancel();
         throw error;
@@ -413,12 +414,6 @@ export function CommunityOnboardingFlow({
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
       if (isRelayMembershipDeniedError(error)) {
-        try {
-          const identity = await getIdentity();
-          setDeniedPubkey(identity.pubkey);
-        } catch {
-          setDeniedPubkey("");
-        }
         setIsMembershipDenied(true);
         return;
       }

@@ -27,7 +27,7 @@ export type CommunityOnboardingStage =
    */
   | "entering";
 
-export type FirstCommunityPage = "join" | "member" | "owned";
+export type FirstCommunityPage = "join" | "member";
 
 export type CommunityOnboardingTransaction = {
   id: string;
@@ -47,6 +47,8 @@ export type CommunityOnboardingTransaction = {
    */
   policyReceipt?: string;
   communityId?: string;
+  /** Daemon-owned named-group id for native x0xd onboarding. */
+  groupId?: string;
   previousCommunityId?: string;
   addedCommunity?: boolean;
   createdAt: string;
@@ -63,6 +65,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
     | "stage"
     | "relayUrl"
     | "communityId"
+    | "groupId"
     | "previousCommunityId"
     | "addedCommunity"
     | "communityName"
@@ -80,10 +83,12 @@ export type StartCommunityOnboardingInput = {
   token?: string;
   reposDir?: string;
   policyReceipt?: string;
+  groupId?: string;
 };
 
 function canonicalRelayUrl(rawRelayUrl: string) {
   const trimmed = rawRelayUrl.trim();
+  if (trimmed.startsWith("x0x://")) return trimmed;
   const withScheme = /^(ws|wss):\/\//i.test(trimmed)
     ? trimmed
     : normalizeRelayUrl(trimmed);
@@ -182,6 +187,7 @@ export function startCommunityOnboarding(
     relayUrl,
     inviteCode: input.inviteCode?.trim() || undefined,
     communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
+    groupId: input.groupId,
     token: input.token?.trim() || undefined,
     reposDir: input.reposDir,
     policyReceipt: input.policyReceipt,

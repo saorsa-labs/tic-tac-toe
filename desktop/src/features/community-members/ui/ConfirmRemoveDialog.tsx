@@ -1,7 +1,6 @@
 import { toast } from "sonner";
 
 import { truncatePubkey } from "@/shared/lib/pubkey";
-import { PubKey } from "@/shared/ui/PubKey";
 import { useRemoveRelayMemberMutation } from "@/features/community-members/hooks";
 import type { RelayMember } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -43,15 +42,8 @@ export function ConfirmRemoveDialog({
         <DialogHeader>
           <DialogTitle>Remove {label}?</DialogTitle>
           <DialogDescription>
-            This will immediately revoke their access to the relay.
+            This will ban the Agent ID and rotate the private group epoch.
           </DialogDescription>
-          {member ? (
-            <PubKey
-              pubkey={member.pubkey}
-              testId="confirm-remove-member-pubkey"
-              variant="full"
-            />
-          ) : null}
         </DialogHeader>
         <div className="flex justify-end gap-2">
           <Button

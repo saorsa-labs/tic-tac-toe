@@ -5,11 +5,11 @@ import {
   inviteErrorMessage,
   isInviteExpiredError,
 } from "@/shared/api/inviteHelpers";
-import { claimInvite } from "@/shared/api/invites";
+import { joinNativeCommunity } from "@/features/communities/nativeCommunityApi";
 
 /**
- * Drive the `claiming` stage after machine onboarding completes: claim the
- * invite with the user's final identity, then advance to `connecting`.
+ * Drive the `claiming` stage after machine onboarding completes: join the
+ * native x0xd group with the final AgentId, then advance to `connecting`.
  * Completion is fenced by transaction ID so cancelling or replacing the
  * transaction while the request is pending cannot mutate the replacement.
  *
@@ -26,13 +26,17 @@ export function useClaimInvite() {
       return;
     }
     setIsPending(true);
-    void claimInvite(
-      transaction.relayUrl,
-      transaction.inviteCode ?? "",
-      transaction.policyReceipt,
-    )
-      .then(() => {
-        update({ stage: "connecting", error: undefined }, transaction.id);
+    void joinNativeCommunity({ invite: transaction.inviteCode ?? "" })
+      .then((group) => {
+        update(
+          {
+            stage: "connecting",
+            groupId: group.groupId,
+            communityName: group.name,
+            error: undefined,
+          },
+          transaction.id,
+        );
       })
       .catch((error: unknown) =>
         update(

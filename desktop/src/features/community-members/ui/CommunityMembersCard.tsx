@@ -2,17 +2,17 @@ import * as React from "react";
 import { MoreHorizontal, Plus, Shield, ShieldCheck, User } from "lucide-react";
 import { toast } from "sonner";
 
-import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { truncatePubkey } from "@/shared/lib/pubkey";
-import { PubKey } from "@/shared/ui/PubKey";
 import {
   useChangeRelayMemberRoleMutation,
   useMyRelayMembershipQuery,
   useRelayMembersQuery,
+  type NativeMemberRenderShape,
 } from "@/features/community-members/hooks";
-import type { RelayMember, RelayMemberRole } from "@/shared/api/types";
+import type { RelayMemberRole } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -71,11 +71,11 @@ function MemberRow({
   onRemove,
   onChangeRole,
 }: {
-  member: RelayMember;
+  member: NativeMemberRenderShape;
   displayName: string | null;
   currentPubkey?: string;
   viewerRole: RelayMemberRole | null;
-  onRemove: (member: RelayMember) => void;
+  onRemove: (member: NativeMemberRenderShape) => void;
   onChangeRole: (pubkey: string, newRole: string) => void;
 }) {
   const isSelf = currentPubkey?.toLowerCase() === member.pubkey.toLowerCase();
@@ -109,7 +109,6 @@ function MemberRow({
             ) : null}
           </div>
           <p className="flex items-center gap-2 text-xs text-muted-foreground">
-            <PubKey className="text-xs" pubkey={member.pubkey} />
             <span>Joined {formatRelativeDate(member.createdAt)}</span>
           </p>
         </div>
@@ -165,18 +164,19 @@ function MemberRow({
 const ROLE_ORDER: Record<string, number> = { owner: 0, admin: 1, member: 2 };
 
 export function CommunityMembersCard({
-  currentPubkey,
+  currentPubkey: _currentPubkey,
 }: {
   currentPubkey?: string;
 }) {
+  const identityQuery = useIdentityQuery();
+  const currentAgentId = identityQuery.data?.agentId;
   const membersQuery = useRelayMembersQuery();
   const myMembershipQuery = useMyRelayMembershipQuery();
   const changeRoleMutation = useChangeRelayMemberRoleMutation();
 
   const [addDialogOpen, setAddDialogOpen] = React.useState(false);
-  const [removeTarget, setRemoveTarget] = React.useState<RelayMember | null>(
-    null,
-  );
+  const [removeTarget, setRemoveTarget] =
+    React.useState<NativeMemberRenderShape | null>(null);
 
   const members = React.useMemo(() => {
     const raw = membersQuery.data ?? [];
@@ -188,13 +188,6 @@ export function CommunityMembersCard({
   const isOwner = myMembership?.role === "owner";
   const isAdmin = myMembership?.role === "admin";
   const canManage = isOwner || isAdmin;
-
-  const memberPubkeys = React.useMemo(
-    () => members.map((m) => m.pubkey),
-    [members],
-  );
-  const profilesQuery = useUsersBatchQuery(memberPubkeys);
-  const profiles = profilesQuery.data?.profiles ?? {};
 
   function handleChangeRole(pubkey: string, newRole: string) {
     changeRoleMutation.mutate(
@@ -223,7 +216,7 @@ export function CommunityMembersCard({
             </h2>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Manage who has access to this relay.
+            Manage who has access to this x0x group.
           </p>
         </div>
 
@@ -251,10 +244,8 @@ export function CommunityMembersCard({
         <div className="mt-4 space-y-2">
           {members.map((member) => (
             <MemberRow
-              currentPubkey={currentPubkey}
-              displayName={
-                profiles[member.pubkey.toLowerCase()]?.displayName ?? null
-              }
+              currentPubkey={currentAgentId}
+              displayName={member.displayName}
               key={member.pubkey}
               member={member}
               onChangeRole={handleChangeRole}
@@ -274,11 +265,7 @@ export function CommunityMembersCard({
       />
       <ConfirmRemoveDialog
         member={removeTarget}
-        displayName={
-          removeTarget
-            ? (profiles[removeTarget.pubkey.toLowerCase()]?.displayName ?? null)
-            : null
-        }
+        displayName={removeTarget?.displayName ?? null}
         onOpenChange={(open) => {
           if (!open) setRemoveTarget(null);
         }}

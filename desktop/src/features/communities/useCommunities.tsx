@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -10,9 +11,12 @@ import type { ReactNode } from "react";
 
 import type { Community } from "./types";
 import {
+  leaveNativeCommunity,
+  listNativeCommunities,
+} from "./nativeCommunityApi";
+import {
   clearCommunityStorage,
   loadActiveCommunityId,
-  loadCommunities,
   saveActiveCommunityId,
   saveCommunities,
 } from "./communityStorage";
@@ -154,14 +158,39 @@ export function useCommunities(): UseCommunitiesReturn {
 }
 
 function useCommunitiesInternal(): UseCommunitiesReturn {
-  const [communities, setCommunitiesState] =
-    useState<Community[]>(loadCommunities);
+  const [communities, setCommunitiesState] = useState<Community[]>([]);
   const [activeId, setActiveId] = useState<string | null>(
     loadActiveCommunityId,
   );
   const [reinitKey, setReinitKey] = useState(0);
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
+
+  useEffect(() => {
+    let cancelled = false;
+    void listNativeCommunities()
+      .then((nativeCommunities) => {
+        if (cancelled) return;
+        setCommunitiesState(nativeCommunities);
+        const preferredId = loadActiveCommunityId();
+        if (
+          nativeCommunities.length > 0 &&
+          !nativeCommunities.some((community) => community.id === preferredId)
+        ) {
+          const firstId = nativeCommunities[0].id;
+          saveActiveCommunityId(firstId);
+          setActiveId(firstId);
+        }
+      })
+      .catch(() => {
+        // Fail closed: never revive locally-persisted relay protocol state when
+        // the authenticated native group surface is unavailable.
+        if (!cancelled) setCommunitiesState([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeCommunity = useMemo(
     () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
@@ -190,7 +219,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       } else {
         next = [...prev, community];
       }
-      saveCommunities(next);
+      saveCommunities(next.filter((item) => !item.groupId));
       return next;
     });
     return resolvedId;
@@ -209,8 +238,18 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       // updater guard (length > 1) so we only GC when removal will actually
       // proceed. Runs outside the updater — updaters can execute twice under
       // React StrictMode.
-      if (communities.length > 1) {
-        const removed = communities.find((w) => w.id === id);
+      const removalTarget = communities.find(
+        (community) => community.id === id,
+      );
+      if (communities.length > 1 || removalTarget?.groupId) {
+        const removed = removalTarget;
+        if (removed?.groupId) {
+          void leaveNativeCommunity(removed.groupId).catch(() => {
+            // Restore the daemon frontier after a rejected leave; never fall
+            // back to a relay-side leave event.
+            void listNativeCommunities().then(setCommunitiesState);
+          });
+        }
         if (removed) {
           removeSelfProfileCachesForRelay(removed.relayUrl);
           removeChannelSnapshotForRelay(removed.relayUrl);
@@ -221,12 +260,12 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       }
 
       setCommunitiesState((prev) => {
-        // Never allow removing the last community
-        if (prev.length <= 1) {
-          return prev;
-        }
+        // Legacy relay workspaces kept their last-item guard. A daemon-owned
+        // group may be left even when it is the final group.
+        const target = prev.find((community) => community.id === id);
+        if (prev.length <= 1 && !target?.groupId) return prev;
         const next = prev.filter((w) => w.id !== id);
-        saveCommunities(next);
+        saveCommunities(next.filter((item) => !item.groupId));
 
         // If removing the active community, switch to first remaining
         if (activeId === id && next.length > 0) {
@@ -272,7 +311,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
           const next = prev.map((w) =>
             w.id === id ? { ...w, ...updates } : w,
           );
-          saveCommunities(next);
+          saveCommunities(next.filter((item) => !item.groupId));
           return next;
         });
 
@@ -289,7 +328,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   const reorderCommunities = useCallback((orderedIds: string[]) => {
     setCommunitiesState((prev) => {
       const next = applyCommunitiesOrder(prev, orderedIds);
-      saveCommunities(next);
+      saveCommunities(next.filter((item) => !item.groupId));
       return next;
     });
   }, []);

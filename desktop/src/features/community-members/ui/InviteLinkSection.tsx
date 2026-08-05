@@ -3,8 +3,9 @@ import { QRCodeCanvas } from "qrcode.react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import { mintInvite } from "@/shared/api/invites";
+import { getActiveNativeGroupId } from "@/features/communities/nativeCommunityApi";
 import { invokeTauri } from "@/shared/api/tauri";
+import { x0xMintGroupInvite } from "@/shared/api/tauriNativeX0x";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -39,12 +40,10 @@ function formatExpiry(expiresAtUnix: number): string {
 }
 
 /**
- * "Create invite link" section of the relay-access settings card.
+ * "Create invite link" section of the native group-access settings card.
  *
- * Mints a stateless invite code via `POST /api/invites` (owner/admin only —
- * the parent card already gates on that) and surfaces the shareable
- * `/invite/<code>` landing-page URL. Codes are multi-use until expiry and
- * are not individually revocable; the relay key is the revocation lever.
+ * Mints the one-time invite through authenticated x0xd. No relay event or
+ * Nostr signer is involved; expiry and authorization are enforced by x0xd.
  */
 export function InviteLinkSection() {
   const [ttlSecs, setTtlSecs] = React.useState(TTL_OPTIONS[1].value);
@@ -69,8 +68,16 @@ export function InviteLinkSection() {
     setCopied(false);
     setMinting(true);
     try {
-      const minted = await mintInvite(ttlSecs);
-      setInvite({ url: minted.url, expiresAt: minted.expiresAt });
+      const groupId = await getActiveNativeGroupId();
+      const minted = await x0xMintGroupInvite({
+        groupId,
+        expirySecs: ttlSecs,
+      });
+      const expiresAt =
+        minted.expiresAtMs > 1_000_000_000_000
+          ? Math.floor(minted.expiresAtMs / 1000)
+          : minted.expiresAtMs;
+      setInvite({ url: minted.inviteLink, expiresAt });
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -204,7 +211,7 @@ export function InviteLinkSection() {
           <div className="space-y-1 text-xs text-muted-foreground">
             <p>
               Scan this QR code or share the link above to invite someone to
-              this relay.
+              this private group.
             </p>
             <p>
               Anyone with this link or QR code can join as a member until{" "}
@@ -214,8 +221,8 @@ export function InviteLinkSection() {
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          Create a shareable link that lets anyone join this relay as a member
-          until it expires.
+          Create a one-time x0x link that lets one person join this group until
+          it expires.
         </p>
       )}
       {qrMenu ? (

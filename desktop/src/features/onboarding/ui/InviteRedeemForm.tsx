@@ -18,15 +18,13 @@ import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { JoinPolicyNotice } from "./JoinPolicyNotice";
-import {
-  ONBOARDING_KEY_ROW_CLASS,
-  ONBOARDING_KEY_TEXT_CLASS,
-} from "./NsecMaskedDisplay";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
 
 const POLICY_DISCOVERY_DELAY_MS = 250;
 const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
+const ONBOARDING_INPUT_ROW_CLASS = "flex min-w-0 items-center gap-4";
+const ONBOARDING_INPUT_TEXT_CLASS = "buzz-onboarding-key-text";
 const SPOTLIGHT_TEXTURE_CONTENT_CLASS = "mx-auto w-full max-w-[920px]";
 const SPOTLIGHT_OVERFLOW_FADE = {
   WebkitMaskImage:
@@ -78,13 +76,20 @@ export function InviteRedeemForm({
   const [isLoadingPolicy, setIsLoadingPolicy] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
-  const parsed = React.useMemo(
-    () => parseInviteInput(inviteInput),
-    [inviteInput],
+  const nativeInvite = React.useMemo<string | null>(() => {
+    const value = inviteInput.trim();
+    return value.startsWith("x0x://invite/") ? value : null;
+  }, [inviteInput]);
+  const parsed = React.useMemo<ReturnType<typeof parseInviteInput>>(
+    () => (nativeInvite ? null : parseInviteInput(inviteInput)),
+    [inviteInput, nativeInvite],
   );
   const normalizedRelayUrl = React.useMemo(
-    () => (onConnect && !parsed ? normalizeRelayUrl(inviteInput) : null),
-    [inviteInput, onConnect, parsed],
+    () =>
+      onConnect && !parsed && !nativeInvite
+        ? normalizeRelayUrl(inviteInput)
+        : null,
+    [inviteInput, nativeInvite, onConnect, parsed],
   );
   const parsedInvite = parsed;
   const isBareCode = parsedInvite !== null && !("relayWsUrl" in parsedInvite);
@@ -124,6 +129,7 @@ export function InviteRedeemForm({
   }, [bareCodeRelayUrl, parsedInvite]);
 
   const canSubmit =
+    nativeInvite !== null ||
     (parsedInvite !== null &&
       ("relayWsUrl" in parsedInvite ||
         (isBareCode && bareCodeRelayUrl.trim().length > 0))) ||
@@ -135,6 +141,10 @@ export function InviteRedeemForm({
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
+      if (nativeInvite) {
+        onRedeem("x0x://local", nativeInvite);
+        return;
+      }
       if (normalizedRelayUrl) {
         onConnect?.(normalizedRelayUrl);
         return;
@@ -199,6 +209,7 @@ export function InviteRedeemForm({
       agreementConfirmed,
       bareCodeRelayUrl,
       joinPolicy,
+      nativeInvite,
       onRedeem,
       normalizedRelayUrl,
       onConnect,
@@ -301,22 +312,20 @@ export function InviteRedeemForm({
           >
             <label className="block w-full" htmlFor="invite-input">
               <span className="sr-only">Invite link or code</span>
-              <span className={ONBOARDING_KEY_ROW_CLASS}>
+              <span className={ONBOARDING_INPUT_ROW_CLASS}>
                 <input
                   autoCapitalize="none"
                   autoComplete="off"
                   autoCorrect="off"
                   className={cn(
-                    ONBOARDING_KEY_TEXT_CLASS,
+                    ONBOARDING_INPUT_TEXT_CLASS,
                     "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
                   )}
                   data-testid="invite-redeem-input"
                   disabled={isRedeeming}
                   id="invite-input"
                   onChange={handleInviteInputChange}
-                  placeholder={
-                    placeholder ?? "https://relay.example.com/invite/abc123"
-                  }
+                  placeholder={placeholder ?? "x0x://invite/..."}
                   spellCheck={false}
                   type="text"
                   value={inviteInput}
@@ -342,7 +351,7 @@ export function InviteRedeemForm({
             disabled={isRedeeming}
             id="invite-input"
             onChange={handleInviteInputChange}
-            placeholder="https://relay.example.com/invite/abc123 or paste a code"
+            placeholder="x0x://invite/..."
             spellCheck={false}
             type="text"
             value={inviteInput}

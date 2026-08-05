@@ -276,7 +276,7 @@ function AppReady({
 }
 
 function CommunityApp({
-  currentPubkey,
+  currentPubkey: _currentPubkey,
   onBackToMachineConfig,
   sharedIdentity,
 }: {
@@ -374,12 +374,14 @@ function CommunityApp({
       (community) => community.relayUrl === transaction.relayUrl,
     );
     const id = addCommunity({
-      id: crypto.randomUUID(),
+      id: transaction.groupId ?? crypto.randomUUID(),
+      groupId: transaction.groupId,
       name: transaction.communityName,
-      relayUrl: transaction.relayUrl,
+      relayUrl: transaction.groupId
+        ? `x0x://group/${encodeURIComponent(transaction.groupId)}`
+        : transaction.relayUrl,
       token: transaction.token,
       reposDir: transaction.reposDir,
-      pubkey: currentPubkey ?? undefined,
       addedAt: new Date().toISOString(),
     });
     communityOnboarding.update({
@@ -395,7 +397,6 @@ function CommunityApp({
     addCommunity,
     communities,
     communityOnboarding,
-    currentPubkey,
     reconnectCommunity,
     transitionCommunity,
   ]);
@@ -450,6 +451,14 @@ function CommunityApp({
     if (profileCheckTransactionRef.current === transactionId) return;
     profileCheckTransactionRef.current = transactionId;
 
+    if (transaction.groupId) {
+      communityOnboarding.update(
+        { stage: "profile", error: undefined },
+        transactionId,
+      );
+      return;
+    }
+
     // resolveProfileCheckAction resolves exactly once (Promise.race + timer
     // cleared on settle), so no settled flag is needed here.
     void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
@@ -476,6 +485,7 @@ function CommunityApp({
     transaction?.stage,
     transaction?.id,
     transaction?.relayUrl,
+    transaction?.groupId,
   ]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the
@@ -661,7 +671,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     <>
       <MachineOnboardingFlow
         complete={completeMachineOnboarding}
-        continueWithIdentity={machine.continueWithIdentity}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
         queryClient={machine.queryClient}

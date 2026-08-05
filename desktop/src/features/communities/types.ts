@@ -1,6 +1,9 @@
 export type Community = {
   id: string;
+  /** Opaque x0xd named-group id. Present for every native workspace. */
+  groupId?: string;
   name: string;
+  /** Legacy render-shape field. Native workspaces use an `x0x://group/...` UI namespace, never a relay endpoint. */
   relayUrl: string;
   token?: string;
   /**

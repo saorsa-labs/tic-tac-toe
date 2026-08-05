@@ -28,6 +28,10 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::x0x_client::X0xClient;
 
+#[path = "native_social.rs"]
+mod native_social;
+pub use native_social::*;
+
 // ── TS-facing output types (camelCase) ───────────────────────────────────────
 
 /// One roster entry — mirrors `X0xGroupMember` in `tauriNativeX0x.ts`.
