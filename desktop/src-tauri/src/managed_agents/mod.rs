@@ -1,5 +1,6 @@
 mod agent_env;
 pub(crate) mod agent_events;
+pub(crate) mod agent_identity;
 pub(crate) mod agent_snapshot;
 pub(crate) mod team_snapshot;
 pub(crate) use agent_env::{

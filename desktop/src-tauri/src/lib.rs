@@ -3,6 +3,7 @@
 mod app_state;
 mod archive;
 mod commands;
+mod company_template;
 mod deep_link;
 mod event_sync;
 mod events;
@@ -929,6 +930,9 @@ pub fn run() {
             symphony_proof,
             symphony_routes,
             symphony_subscribe_events,
+            list_company_templates,
+            instantiate_company_template,
+            cancel_company_run,
             set_prevent_sleep_active,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,

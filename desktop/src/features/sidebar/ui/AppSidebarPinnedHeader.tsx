@@ -1,4 +1,4 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, Building2, FolderGit2, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -16,6 +16,7 @@ type SidebarSelectedView =
   | "home"
   | "channel"
   | "messages"
+  | "company"
   | "agents"
   | "workflows"
   | "pulse"
@@ -38,6 +39,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectCompany: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -83,6 +85,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectCompany,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -143,6 +146,18 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-company-view"
+            isActive={selectedView === "company"}
+            onClick={onSelectCompany}
+            tooltip="Company"
+            type="button"
+          >
+            <Building2 className="h-4 w-4" />
+            <SidebarMenuLabel>Company</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
         <SidebarMenuItem>
           <SidebarMenuButton
             data-testid="open-agents-view"

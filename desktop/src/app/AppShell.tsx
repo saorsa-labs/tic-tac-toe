@@ -120,6 +120,7 @@ export function AppShell() {
   const {
     goAgents,
     goChannel,
+    goCompany,
     goHome,
     goNewMessage,
     goProjects,
@@ -866,6 +867,7 @@ export function AppShell() {
                           onSelectChannel={(channelId) =>
                             void goChannel(channelId)
                           }
+                          onSelectCompany={() => void goCompany()}
                           onOpenSearchResult={handleOpenSearchResult}
                           searchChannels={channels}
                           searchFocusRequest={searchFocusRequest}

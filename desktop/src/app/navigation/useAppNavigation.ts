@@ -57,6 +57,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goCompany = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/company",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goAgents = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -297,6 +308,7 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goCompany,
     goForumPost,
     goHome,
     goNewMessage,

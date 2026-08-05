@@ -22,6 +22,12 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         if let Err(error) = shutdown_managed_agents(app) {
             eprintln!("buzz-desktop: failed to stop managed agents: {error}");
         }
+        // Company role identities are dedicated x0xd children and must be
+        // reaped before the owner x0xd they depend on.
+        crate::managed_agents::agent_identity::shutdown_all_company_agent_identities();
+        // Symphony depends on the owner x0xd for signing identity.
+        crate::symphony::shutdown_symphony_owned(app);
+        crate::local_stack::shutdown_owned(app);
         #[cfg(feature = "mesh-llm")]
         shutdown_mesh_runtime(app);
     }
@@ -41,6 +47,9 @@ pub(crate) fn install_signal_handler(
             .store(true, Ordering::SeqCst);
         if !shutdown_done.swap(true, Ordering::SeqCst) {
             let _ = shutdown_managed_agents(&app);
+            crate::managed_agents::agent_identity::shutdown_all_company_agent_identities();
+            crate::symphony::shutdown_symphony_owned(&app);
+            crate::local_stack::shutdown_owned(&app);
             #[cfg(feature = "mesh-llm")]
             shutdown_mesh_runtime(&app);
         }
