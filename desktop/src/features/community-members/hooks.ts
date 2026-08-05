@@ -39,7 +39,7 @@ function legacyRole(role: X0xGroupMember["role"]): RelayMemberRole {
 /**
  * Adapter for existing Buzz member rows. `pubkey` contains an x0x AgentId on
  * this native-only path; inputs are validated before they reach the daemon and
- * npub/bech32 identifiers are never decoded or reinterpreted.
+ * legacy encoded identifiers are never decoded or reinterpreted.
  */
 export function nativeMemberToRelayShape(
   member: X0xGroupMember,

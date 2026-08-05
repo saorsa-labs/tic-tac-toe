@@ -264,7 +264,9 @@ function fromRawStore(
 }
 
 export async function x0xListStores(): Promise<X0xStoreSummary[]> {
-  const raw = await invokeTauri<{ stores: RawStoreSummary[] }>("x0x_list_stores");
+  const raw = await invokeTauri<{ stores: RawStoreSummary[] }>(
+    "x0x_list_stores",
+  );
   return raw.stores.map((store) => fromRawStore(store));
 }
 
@@ -292,10 +294,15 @@ export async function x0xJoinStore(input: {
   return fromRawStore(raw, input.storeId);
 }
 
-export async function x0xListStoreKeys(storeId: string): Promise<X0xStoreKey[]> {
-  const raw = await invokeTauri<{ keys: RawStoreKey[] }>("x0x_list_store_keys", {
-    storeId,
-  });
+export async function x0xListStoreKeys(
+  storeId: string,
+): Promise<X0xStoreKey[]> {
+  const raw = await invokeTauri<{ keys: RawStoreKey[] }>(
+    "x0x_list_store_keys",
+    {
+      storeId,
+    },
+  );
   return raw.keys.map((key) => ({
     key: key.key,
     contentType: key.content_type,
@@ -427,10 +434,9 @@ function fromRawAgentCard(card: RawAgentCard): X0xAgentCard {
   };
 }
 
-export async function x0xGetAgentCard(input: {
-  displayName?: string;
-  includeGroups?: boolean;
-} = {}): Promise<X0xAgentCardEnvelope> {
+export async function x0xGetAgentCard(
+  input: { displayName?: string; includeGroups?: boolean } = {},
+): Promise<X0xAgentCardEnvelope> {
   const raw = await invokeTauri<{ card: RawAgentCard; link: string }>(
     "x0x_get_agent_card",
     {

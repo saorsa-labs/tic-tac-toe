@@ -18,7 +18,12 @@ export default defineConfig({
   projects: [
     {
       name: "smoke",
+      // M3+ smoke is intentionally transport-focused. The imported Buzz specs
+      // below remain available for migration work, but most still exercise the
+      // retired relay mock dialect and therefore are not release smoke gates.
+      grep: /native workspace|built-in Company/,
       testMatch: [
+        "**/native-smoke.spec.ts",
         "**/smoke.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
         "**/identity-key-help.spec.ts",
@@ -109,7 +114,6 @@ export default defineConfig({
         "**/onboarding-backup.spec.ts",
         "**/onboarding-agent-defaults.spec.ts",
         "**/nostr-bind.spec.ts",
-        "**/profile-nsec-reveal.spec.ts",
         "**/signout-confirmation.spec.ts",
         "**/agent-provider-dropdowns.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",
@@ -140,6 +144,7 @@ export default defineConfig({
         "**/agents-everywhere.live.spec.ts",
         "**/relay-restart.live.spec.ts",
         "**/parity-ancestor-island.spec.ts",
+        "**/relay-bridge-acceptance.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

@@ -55,7 +55,9 @@ async function definitionStores(): Promise<X0xStoreSummary[]> {
   );
 }
 
-async function ensureDefinitionStore(groupId: string): Promise<X0xStoreSummary> {
+async function ensureDefinitionStore(
+  groupId: string,
+): Promise<X0xStoreSummary> {
   const stores = await x0xListStores();
   const existing = stores.find((store) =>
     isWorkflowDefinitionStore(store, groupId),
@@ -102,7 +104,9 @@ async function workflowsInStore(store: X0xStoreSummary): Promise<Workflow[]> {
       return payload === null ? null : definitionPayloadToWorkflow(payload);
     }),
   );
-  return workflows.filter((workflow): workflow is Workflow => workflow !== null);
+  return workflows.filter(
+    (workflow): workflow is Workflow => workflow !== null,
+  );
 }
 
 async function locateWorkflow(workflowId: string): Promise<{
@@ -113,7 +117,9 @@ async function locateWorkflow(workflowId: string): Promise<{
     const payload = await readDefinition(store.id, workflowId);
     if (payload !== null) return { store, payload };
   }
-  throw new Error(`Workflow ${workflowId} was not found in native x0xd stores.`);
+  throw new Error(
+    `Workflow ${workflowId} was not found in native x0xd stores.`,
+  );
 }
 
 export async function getChannelWorkflows(
