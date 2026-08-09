@@ -55,8 +55,8 @@ import {
 import { RequiredFieldLabel } from "./agentConfigControls";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
-  relayMeshModelPickerState,
-} from "./relayMeshModelPicker";
+  sharedComputeModelPickerState,
+} from "./sharedComputeModelPicker";
 import {
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
@@ -156,8 +156,6 @@ export function AgentDefinitionDialog({
   // snap the dropdown back to the default — an edit-mode regression.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
-  const [isAvatarUploadPending, setIsAvatarUploadPending] =
-    React.useState(false);
   const {
     globalConfig,
     inheritedDefaults: {
@@ -212,7 +210,6 @@ export function AgentDefinitionDialog({
     // behavior value demands attention. Having env vars or a name pool is not
     // sufficient reason to auto-open.
     setShowAdvancedFields(false);
-    setIsAvatarUploadPending(false);
     isRuntimeAutoSeededRef.current = false;
     hasSeededForOpenRef.current = false;
   }, [initialValues, open]);
@@ -257,7 +254,6 @@ export function AgentDefinitionDialog({
       setBehaviorDraft(emptyPersonaBehaviorDraft);
       behaviorSeedRef.current = emptyPersonaBehaviorDraft;
       setShowAdvancedFields(false);
-      setIsAvatarUploadPending(false);
       // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
       // [initialValues, open] effect resets both when the dialog re-opens.
     }
@@ -461,8 +457,7 @@ export function AgentDefinitionDialog({
     // D1: localModeSatisfied covers both missingNormalizedFields AND
     // missingEnvKeys — credential env keys now block submit, not just display.
     localModeSatisfied &&
-    customAiPairSatisfied &&
-    !isAvatarUploadPending;
+    customAiPairSatisfied;
 
   // Derive the single, deterministic reason the action is disabled from the
   // same gate outputs that feed canSubmit — no policy is recomputed here.
@@ -470,7 +465,6 @@ export function AgentDefinitionDialog({
   // when the form can be submitted (transient Saving/Uploading states aside).
   const submitBlockReason = personaSubmitBlock({
     isPending,
-    isAvatarUploadPending,
     displayNameEmpty: displayName.trim().length === 0,
     isCreateMode,
     runtimeChosen: runtime.trim().length > 0,
@@ -514,11 +508,11 @@ export function AgentDefinitionDialog({
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const {
     isCustom: isModelCustom,
-    isRelayMesh,
+    isSharedCompute,
     options: modelOptions,
     selectValue: modelSelectValue,
     showCustomInput: showCustomModelInput,
-  } = relayMeshModelPickerState({
+  } = sharedComputeModelPickerState({
     discoveredOptions: discoveredModelOptions,
     fallbackOptions: staticModelOptions,
     knownOptions: discoveredModelOptions ?? runtimeModelOptions,
@@ -598,17 +592,18 @@ export function AgentDefinitionDialog({
   ];
   const modelDropdownOptions: PersonaDropdownOption[] =
     buildModelDropdownOptions({
-      allowCustom: !isRelayMesh,
+      allowCustom: !isSharedCompute,
       globalModel: undefined,
       loading: modelDiscoveryLoading && discoveredModelOptions === null,
       loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
       options: modelOptions,
     })
       .filter(
-        (option) => isRelayMesh || option.value !== AUTO_MODEL_DROPDOWN_VALUE,
+        (option) =>
+          isSharedCompute || option.value !== AUTO_MODEL_DROPDOWN_VALUE,
       )
       .map((option) =>
-        isRelayMesh && option.value === AUTO_MODEL_DROPDOWN_VALUE
+        isSharedCompute && option.value === AUTO_MODEL_DROPDOWN_VALUE
           ? { ...option, label: "Automatic" }
           : option,
       );
@@ -693,17 +688,17 @@ export function AgentDefinitionDialog({
   function handleProviderDropdownChange(nextValue: string) {
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-    if (nextProvider === "relay-mesh" && runtime !== "buzz-agent") {
+    if (nextProvider === "shared-compute" && runtime !== "buzz-agent") {
       handleRuntimeDropdownChange("buzz-agent");
     }
     const nextSelection = selectionOnProviderDropdownChange(selection, {
-      runtime: nextProvider === "relay-mesh" ? "buzz-agent" : runtime,
+      runtime: nextProvider === "shared-compute" ? "buzz-agent" : runtime,
       nextValue,
       clearModelWhenApiKeyMissing: true,
     });
     applySelection({
       ...nextSelection,
-      model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
+      model: nextProvider === "shared-compute" ? "auto" : nextSelection.model,
     });
   }
 
@@ -720,7 +715,7 @@ export function AgentDefinitionDialog({
   return (
     <Dialog
       onOpenChange={(nextOpen) => {
-        if (!nextOpen && (isPending || isAvatarUploadPending)) return;
+        if (!nextOpen && isPending) return;
         handleOpenChange(nextOpen);
       }}
       open={open}
@@ -748,7 +743,7 @@ export function AgentDefinitionDialog({
 
             <div className="flex items-center gap-2">
               <Button
-                disabled={isPending || isAvatarUploadPending}
+                disabled={isPending}
                 onClick={() => handleOpenChange(false)}
                 type="button"
                 variant="outline"
@@ -761,11 +756,7 @@ export function AgentDefinitionDialog({
                 form="persona-dialog-form"
                 type="submit"
               >
-                {isPending
-                  ? "Saving..."
-                  : isAvatarUploadPending
-                    ? "Uploading..."
-                    : submitLabel}
+                {isPending ? "Saving..." : submitLabel}
               </Button>
             </div>
           </div>
@@ -778,10 +769,9 @@ export function AgentDefinitionDialog({
         >
           <AgentCreationPreview
             avatarUrl={previewAvatarUrl}
-            disabled={isPending || isAvatarUploadPending}
+            disabled={isPending}
             label={previewLabel}
             onClearAvatar={() => setAvatarUrl("")}
-            onUploadPendingChange={setIsAvatarUploadPending}
             onSelectAvatar={setAvatarUrl}
           />
 
@@ -942,7 +932,7 @@ export function AgentDefinitionDialog({
                   modelSelectValue={modelSelectValue}
                   onCustomModelChange={setModel}
                   showSharedComputeAutoHint={
-                    isRelayMesh &&
+                    isSharedCompute &&
                     modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE
                   }
                   onModelValueChange={handleModelDropdownChange}

@@ -1,16 +1,12 @@
 /**
  * Pure classification of a markdown media URL: whether it should render as a
- * video, and whether it can be downloaded — two related but independent
- * questions.
+ * video.
  *
- * `isVideoMedia` decides the render path (video player vs. image block).
- * `isRelayDownloadable` decides download eligibility, which is separate: an
- * off-relay video still renders as a video and can be Copy-Link'd, it just
- * can't be downloaded (the Rust `validate_download_url` SSRF gate accepts only
- * relay `/media/` origins, so offering Download for an external URL would only
- * produce an error).
+ * `isVideoMedia` decides the render path (video player vs. image block). Kept
+ * DOM-free so the branch logic is unit-testable without a webview.
  *
- * Kept DOM-free so the branch logic is unit-testable without a webview.
+ * Media download eligibility was removed in the native cutover — there is no
+ * remote media transport, so no Download action is offered for any media URL.
  */
 
 /** Legacy video extensions, used only when an imeta MIME type is absent. */
@@ -45,33 +41,4 @@ export function isVideoMedia(src: string, imetaMime?: string): boolean {
   return (
     ext !== undefined && (VIDEO_EXTENSIONS as readonly string[]).includes(ext)
   );
-}
-
-/**
- * Whether `src` is a relay-hosted `/media/` URL on `relayOrigin`.
- *
- * This mirrors the Rust `validate_download_url` origin+path check for UX
- * purposes only — the Rust gate remains the authoritative SSRF boundary.
- *
- * Fails closed when the relay origin has not resolved yet (`relayOrigin`
- * absent): an unresolved origin means we can't distinguish a relay `/media/`
- * URL from an off-relay one, so we do NOT offer Download (offering it for an
- * off-relay URL would only produce an error, and the Rust gate would reject
- * it anyway). Callers must read `relayOrigin` from a reactive source
- * (`useRelayOrigin`) so eligibility recomputes — and Download appears for a
- * genuine relay URL — the moment the origin resolves.
- */
-export function isRelayDownloadable(
-  src: string,
-  relayOrigin?: string,
-): boolean {
-  if (!relayOrigin) return false;
-  let parsed: URL;
-  try {
-    parsed = new URL(src);
-  } catch {
-    return false;
-  }
-  if (!parsed.pathname.startsWith("/media/")) return false;
-  return parsed.origin === relayOrigin;
 }

@@ -513,7 +513,7 @@ export function AgentConfigFields({
       env_vars: nextEnvVars,
       provider: nextProvider,
       model:
-        nextProvider === "relay-mesh"
+        nextProvider === "shared-compute"
           ? config.model || "auto"
           : autoSelectModelOnProviderChange && providerChanged
             ? null
@@ -528,7 +528,8 @@ export function AgentConfigFields({
   function handleModelChange(value: string) {
     onConfigChange({
       ...config,
-      model: config.provider === "relay-mesh" ? value || "auto" : value || null,
+      model:
+        config.provider === "shared-compute" ? value || "auto" : value || null,
     });
   }
 
@@ -554,7 +555,7 @@ export function AgentConfigFields({
       }
     }
     if (selectedRuntimeId !== "buzz-agent") {
-      hidden.add("relay-mesh");
+      hidden.add("shared-compute");
     }
     return hidden;
   }, [bakedEnvKeys, selectedRuntimeId]);

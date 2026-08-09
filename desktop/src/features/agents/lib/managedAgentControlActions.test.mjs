@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startManagedAgentWithRules } from "./managedAgentControlActions.ts";
+import {
+  getManagedAgentPrimaryActionLabel,
+  startManagedAgentWithRules,
+  stopManagedAgentWithRules,
+} from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
   return {
     pubkey: "deadbeef".repeat(8),
     name: "Mesh Agent",
     personaId: null,
-    relayUrl: "ws://localhost:3000",
     acpCommand: "buzz-acp",
     agentCommand: "goose",
     agentArgs: [],
@@ -38,7 +41,7 @@ function agent(overrides = {}) {
   };
 }
 
-test("relay-mesh agents delegate start to the backend preflight", async () => {
+test("shared-compute agents delegate start to the backend preflight", async () => {
   const meshAgent = agent({
     envVars: {
       BUZZ_AGENT_PROVIDER: "openai",
@@ -76,4 +79,94 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+// ── Primary action label: provider agents expose no stop action ─────────────
+// A provider (remote) agent has no native undeploy API. An already-active one
+// must surface NO primary action (undefined) so the UI omits the control
+// instead of rendering a button that can only error.
+
+test("an active provider agent exposes no primary action (no stop button)", () => {
+  for (const status of ["running", "deployed"]) {
+    assert.equal(
+      getManagedAgentPrimaryActionLabel(
+        agent({
+          status,
+          backend: { type: "provider", id: "prov-1", config: {} },
+        }),
+      ),
+      undefined,
+      `provider agent with status ${status} must have no primary action`,
+    );
+  }
+});
+
+test("an inactive provider agent offers Deploy, never Stop/Respawn", () => {
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(
+      agent({
+        status: "stopped",
+        backend: { type: "provider", id: "prov-1", config: {} },
+      }),
+    ),
+    "Deploy",
+  );
+});
+
+test("an active local agent offers Stop; a stopped local agent offers Respawn", () => {
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(agent({ status: "running" })),
+    "Stop",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(agent({ status: "stopped" })),
+    "Respawn",
+  );
+});
+
+// ── stopManagedAgentWithRules ───────────────────────────────────────────────
+
+test("stopping a provider agent is refused visibly, with no stop dispatched", async () => {
+  let stops = 0;
+  await assert.rejects(
+    stopManagedAgentWithRules({
+      agent: agent({
+        status: "running",
+        backend: { type: "provider", id: "prov-1", config: {} },
+      }),
+      stopManagedAgent: async () => {
+        stops++;
+      },
+    }),
+    /cannot be stopped/,
+  );
+  assert.equal(
+    stops,
+    0,
+    "no native stop must be dispatched for a provider agent",
+  );
+});
+
+test("stopping a local agent delegates the pubkey to the registered stop call", async () => {
+  const local = agent({ status: "running" });
+  let stoppedPubkey = null;
+  await stopManagedAgentWithRules({
+    agent: local,
+    stopManagedAgent: async (pubkey) => {
+      stoppedPubkey = pubkey;
+    },
+  });
+  assert.equal(stoppedPubkey, local.pubkey);
+});
+
+test("stop failures propagate rather than reporting false success", async () => {
+  await assert.rejects(
+    stopManagedAgentWithRules({
+      agent: agent({ status: "running" }),
+      stopManagedAgent: async () => {
+        throw new Error("process already exited");
+      },
+    }),
+    /process already exited/,
+  );
 });

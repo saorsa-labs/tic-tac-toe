@@ -1,7 +1,7 @@
 import emojiData from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
 import * as React from "react";
-import { Link2, Pencil, Plus, UploadCloud } from "lucide-react";
+import { Link2, Pencil, Plus } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
@@ -26,7 +26,6 @@ import {
   useEmojiMartThemeVars,
 } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorPanel";
-import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
@@ -36,12 +35,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/shared/ui/popover";
-import { Spinner } from "@/shared/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
-
-function isAvatarFileDrag(event: React.DragEvent<HTMLElement>) {
-  return Array.from(event.dataTransfer.types).includes("Files");
-}
 
 const AVATAR_APPLY_MOTION_TRANSITION = {
   duration: 0.14,
@@ -60,7 +54,6 @@ export function AgentCreationPreview({
   hideEditControl = false,
   label,
   onClearAvatar,
-  onUploadPendingChange,
   onSelectAvatar,
 }: {
   avatarUrl: string | null;
@@ -71,10 +64,8 @@ export function AgentCreationPreview({
   hideEditControl?: boolean;
   label: string;
   onClearAvatar?: () => void;
-  onUploadPendingChange?: (isPending: boolean) => void;
   onSelectAvatar: (avatarUrl: string) => void;
 }) {
-  const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = React.useState(false);
   const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
   const [activeTab, setActiveTab] = React.useState<AvatarTab>("image");
@@ -94,28 +85,11 @@ export function AgentCreationPreview({
   const [customValue, setCustomValue] = React.useState(DEFAULT_CUSTOM_VALUE);
   const [isCustomColorPickerOpen, setIsCustomColorPickerOpen] =
     React.useState(false);
-  const [isPopoverDragOver, setIsPopoverDragOver] = React.useState(false);
   const [squishKey, setSquishKey] = React.useState(0);
-  const avatarDragDepthRef = React.useRef(0);
-  const popoverDragDepthRef = React.useRef(0);
   const shouldReduceMotion = useReducedMotion();
   const emojiPickerContainerRef = React.useRef<HTMLDivElement | null>(null);
   const emojiMartThemeVars = useEmojiMartThemeVars();
   const { burstEmoji } = useEmojiBurst();
-  const {
-    inputRef: avatarUploadInputRef,
-    isUploading,
-    errorMessage: uploadErrorMessage,
-    clearError: clearUploadError,
-    openPicker: openUploadPicker,
-    uploadFile: uploadAvatarFile,
-    handleFileChange: handleAvatarUploadFileChange,
-  } = useAvatarUpload({
-    onUploadSuccess: (url) => {
-      onSelectAvatar(url);
-      setIsAvatarMenuOpen(false);
-    },
-  });
 
   useEmojiMartStyles(
     emojiPickerContainerRef,
@@ -127,19 +101,10 @@ export function AgentCreationPreview({
     [customHue, customSaturation, customValue],
   );
 
-  React.useEffect(() => {
-    onUploadPendingChange?.(isUploading);
-    return () => {
-      onUploadPendingChange?.(false);
-    };
-  }, [isUploading, onUploadPendingChange]);
-
   // Sync emoji state from avatarUrl when the popover opens
   React.useEffect(() => {
     if (isAvatarMenuOpen) {
       setAvatarUrlDraft("");
-      setIsPopoverDragOver(false);
-      popoverDragDepthRef.current = 0;
 
       const parsed = parseEmojiAvatarDataUrl(avatarUrl ?? "");
       if (parsed) {
@@ -182,7 +147,6 @@ export function AgentCreationPreview({
     if (nextUrl.length === 0) {
       return;
     }
-    clearUploadError();
     onSelectAvatar(nextUrl);
     setIsAvatarMenuOpen(false);
   }
@@ -236,143 +200,6 @@ export function AgentCreationPreview({
     ? { duration: 0 }
     : AVATAR_APPLY_MOTION_TRANSITION;
 
-  // Outer avatar drag — only active when popover is closed
-  const handleAvatarDragEnter = React.useCallback(
-    (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (disabled || isAvatarMenuOpen || !isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      avatarDragDepthRef.current += 1;
-      event.dataTransfer.dropEffect = "copy";
-      setIsDragOverAvatar(true);
-    },
-    [disabled, isAvatarMenuOpen],
-  );
-
-  const handleAvatarDragOver = React.useCallback(
-    (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (disabled || isAvatarMenuOpen || !isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = "copy";
-      setIsDragOverAvatar(true);
-    },
-    [disabled, isAvatarMenuOpen],
-  );
-
-  const handleAvatarDragLeave = React.useCallback(
-    (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (isAvatarMenuOpen || !isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      avatarDragDepthRef.current = Math.max(0, avatarDragDepthRef.current - 1);
-      if (avatarDragDepthRef.current === 0) {
-        setIsDragOverAvatar(false);
-      }
-    },
-    [isAvatarMenuOpen],
-  );
-
-  const handleAvatarDrop = React.useCallback(
-    (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (isAvatarMenuOpen || !isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      avatarDragDepthRef.current = 0;
-      setIsDragOverAvatar(false);
-
-      const file = event.dataTransfer.files[0];
-      if (!file || disabled || isUploading) {
-        return;
-      }
-
-      clearUploadError();
-      void uploadAvatarFile(file);
-    },
-    [
-      clearUploadError,
-      disabled,
-      isAvatarMenuOpen,
-      isUploading,
-      uploadAvatarFile,
-    ],
-  );
-
-  // Popover-level drag — one big drop zone for the entire popover
-  const handlePopoverDragEnter = React.useCallback(
-    (event: React.DragEvent<HTMLElement>) => {
-      if (disabled || !isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      popoverDragDepthRef.current += 1;
-      event.dataTransfer.dropEffect = "copy";
-      setIsPopoverDragOver(true);
-      setActiveTab("image");
-    },
-    [disabled],
-  );
-
-  const handlePopoverDragOver = React.useCallback(
-    (event: React.DragEvent<HTMLElement>) => {
-      if (disabled || !isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = "copy";
-    },
-    [disabled],
-  );
-
-  const handlePopoverDragLeave = React.useCallback(
-    (event: React.DragEvent<HTMLElement>) => {
-      if (!isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      popoverDragDepthRef.current = Math.max(
-        0,
-        popoverDragDepthRef.current - 1,
-      );
-      if (popoverDragDepthRef.current === 0) {
-        setIsPopoverDragOver(false);
-      }
-    },
-    [],
-  );
-
-  const handlePopoverDrop = React.useCallback(
-    (event: React.DragEvent<HTMLElement>) => {
-      if (!isAvatarFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      popoverDragDepthRef.current = 0;
-      setIsPopoverDragOver(false);
-
-      const file = event.dataTransfer.files[0];
-      if (!file || disabled || isUploading) {
-        return;
-      }
-
-      clearUploadError();
-      void uploadAvatarFile(file);
-    },
-    [clearUploadError, disabled, isUploading, uploadAvatarFile],
-  );
-
   const isCustomColorPickerVisible =
     isCustomColorPickerOpen && selectedEmoji !== null;
 
@@ -383,17 +210,9 @@ export function AgentCreationPreview({
       side="bottom"
       sideOffset={8}
     >
-      {/* Single drop zone covering the entire popover */}
       <fieldset
         aria-label="Avatar picker"
-        className={cn(
-          "relative m-0 rounded-lg border-2 border-transparent p-0 transition-[border-color,background-color] duration-150",
-          isPopoverDragOver && "border-dashed border-primary bg-primary/5",
-        )}
-        onDragEnter={handlePopoverDragEnter}
-        onDragLeave={handlePopoverDragLeave}
-        onDragOver={handlePopoverDragOver}
-        onDrop={handlePopoverDrop}
+        className="relative m-0 rounded-lg border-2 border-transparent p-0 transition-[border-color,background-color] duration-150"
       >
         <Tabs
           className="w-full"
@@ -429,29 +248,6 @@ export function AgentCreationPreview({
 
         {activeTab === "image" ? (
           <div className="grid gap-2.5">
-            {/* Click to browse zone */}
-            <button
-              className="relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60"
-              disabled={disabled || isUploading}
-              onClick={() => {
-                clearUploadError();
-                openUploadPicker();
-              }}
-              type="button"
-            >
-              {isUploading ? (
-                <Spinner
-                  aria-hidden
-                  className="h-5 w-5 border-2 text-muted-foreground"
-                />
-              ) : (
-                <UploadCloud className="h-5 w-5 text-muted-foreground" />
-              )}
-              <span className="text-xs font-medium text-muted-foreground">
-                {isUploading ? "Uploading..." : "Drop or browse"}
-              </span>
-            </button>
-
             {/* URL input */}
             <div className="flex h-10 items-center gap-2.5 rounded-lg bg-muted px-3">
               <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
@@ -459,7 +255,7 @@ export function AgentCreationPreview({
                 autoCapitalize="none"
                 autoCorrect="off"
                 className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground/50"
-                disabled={disabled || isUploading}
+                disabled={disabled}
                 onChange={(event) => setAvatarUrlDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
@@ -484,7 +280,7 @@ export function AgentCreationPreview({
                   >
                     <Button
                       className="h-6 px-2 text-2xs"
-                      disabled={disabled || isUploading}
+                      disabled={disabled}
                       onClick={() => applyAvatarUrl()}
                       size="xs"
                       type="button"
@@ -496,16 +292,10 @@ export function AgentCreationPreview({
               </AnimatePresence>
             </div>
 
-            {uploadErrorMessage ? (
-              <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
-                {uploadErrorMessage}
-              </p>
-            ) : null}
-
             {hasAvatar && onClearAvatar ? (
               <button
                 className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
-                disabled={disabled || isUploading}
+                disabled={disabled}
                 onClick={() => {
                   onClearAvatar();
                   setIsAvatarMenuOpen(false);
@@ -684,25 +474,8 @@ export function AgentCreationPreview({
     <div className="mx-auto w-full max-w-[220px] lg:sticky lg:top-0">
       <fieldset
         aria-label="Agent avatar preview"
-        className={cn(
-          "group/avatar-preview relative m-0 flex min-h-[190px] min-w-0 flex-col items-center justify-center gap-3 rounded-xl border border-transparent p-0 transition-[background-color,border-color,box-shadow] duration-150",
-          isDragOverAvatar &&
-            !isAvatarMenuOpen &&
-            "border-dashed border-primary/70 bg-primary/5 ring-2 ring-primary/15",
-        )}
-        onDragEnter={handleAvatarDragEnter}
-        onDragLeave={handleAvatarDragLeave}
-        onDragOver={handleAvatarDragOver}
-        onDrop={handleAvatarDrop}
+        className="group/avatar-preview relative m-0 flex min-h-[190px] min-w-0 flex-col items-center justify-center gap-3 rounded-xl border border-transparent p-0 transition-[background-color,border-color,box-shadow] duration-150"
       >
-        <input
-          accept="image/gif,image/jpeg,image/png,image/webp"
-          className="hidden"
-          onChange={handleAvatarUploadFileChange}
-          ref={avatarUploadInputRef}
-          type="file"
-        />
-
         <Popover open={isAvatarMenuOpen} onOpenChange={setIsAvatarMenuOpen}>
           <PopoverAnchor asChild>
             <div className="relative h-36 w-36">
@@ -713,18 +486,11 @@ export function AgentCreationPreview({
                       <button
                         aria-label="Edit avatar"
                         className="flex h-9 w-9 items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,scale] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100"
-                        disabled={disabled || isUploading}
+                        disabled={disabled}
                         title="Edit avatar"
                         type="button"
                       >
-                        {isUploading ? (
-                          <Spinner
-                            aria-label="Uploading avatar"
-                            className="h-4 w-4 border-2"
-                          />
-                        ) : (
-                          <Pencil className="h-4 w-4" />
-                        )}
+                        <Pencil className="h-4 w-4" />
                       </button>
                     </PopoverTrigger>
                   }
@@ -761,12 +527,7 @@ export function AgentCreationPreview({
                   ) : (
                     <ProfileAvatar
                       avatarUrl={avatarUrl}
-                      className={cn(
-                        "h-full w-full text-4xl transition-shadow duration-150",
-                        isDragOverAvatar &&
-                          !isAvatarMenuOpen &&
-                          "ring-2 ring-primary/30",
-                      )}
+                      className="h-full w-full text-4xl transition-shadow duration-150"
                       label={label}
                     />
                   )}
@@ -775,24 +536,12 @@ export function AgentCreationPreview({
                 <PopoverTrigger asChild>
                   <button
                     aria-label="Add avatar"
-                    className={cn(
-                      "flex h-36 w-36 items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow,scale] duration-150 ease-out hover:scale-[1.02] hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
-                      isDragOverAvatar &&
-                        !isAvatarMenuOpen &&
-                        "border-primary/70 bg-primary/5 ring-2 ring-primary/15",
-                    )}
-                    disabled={disabled || isUploading}
+                    className="flex h-36 w-36 items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow,scale] duration-150 ease-out hover:scale-[1.02] hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100"
+                    disabled={disabled}
                     title="Add avatar"
                     type="button"
                   >
-                    {isUploading ? (
-                      <Spinner
-                        aria-label="Uploading avatar"
-                        className="h-4 w-4 border-2"
-                      />
-                    ) : (
-                      <Plus aria-hidden="true" className="h-14 w-14" />
-                    )}
+                    <Plus aria-hidden="true" className="h-14 w-14" />
                   </button>
                 </PopoverTrigger>
               )}
@@ -800,12 +549,6 @@ export function AgentCreationPreview({
           </PopoverAnchor>
           {avatarMenuContent}
         </Popover>
-
-        {uploadErrorMessage ? (
-          <p className="max-w-full rounded-md bg-background/95 px-2 py-1 text-center text-xs text-destructive shadow-xs">
-            {uploadErrorMessage}
-          </p>
-        ) : null}
       </fieldset>
     </div>
   );

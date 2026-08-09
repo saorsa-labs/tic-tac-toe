@@ -11,6 +11,7 @@ import {
 } from "@/features/messages/lib/useDrafts";
 import {
   useDraftRootStatus,
+  type DraftRootRef,
   type RootStatus,
 } from "@/features/messages/lib/useDraftRootStatus";
 import {
@@ -130,12 +131,12 @@ export function getDraftPreview(draft: DraftState): string {
 
 function resolveDraftSources({
   channels,
-  currentPubkey,
+  currentAgentId,
   drafts,
   profiles,
 }: {
   channels: Channel[] | undefined;
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   drafts: DraftListEntry[];
   profiles: UserProfileLookup | undefined;
 }): Map<string, DraftSource> {
@@ -149,7 +150,7 @@ function resolveDraftSources({
     sources.set(entry.key, {
       channel: channel ?? null,
       label: channel
-        ? resolveChannelDisplayLabel(channel, currentPubkey, profiles)
+        ? resolveChannelDisplayLabel(channel, currentAgentId, profiles)
         : UNKNOWN_CHANNEL_LABEL,
     });
   }
@@ -513,24 +514,36 @@ export function useActiveDraftCount(
 
 export function useDraftViewItems(enabled: boolean): DraftViewItem[] {
   const identityQuery = useIdentityQuery();
-  const currentPubkey = identityQuery.data?.pubkey;
+  const currentAgentId = identityQuery.data?.agentId;
   const channelsQuery = useChannelsQuery();
 
   useDraftsSnapshot();
   const drafts = getActiveDraftEntries().filter(isVisibleDraft);
 
-  const threadRootIds = React.useMemo(() => {
-    const ids = new Set<string>();
+  const channelsById = React.useMemo(
+    () =>
+      new Map(
+        (channelsQuery.data ?? []).map((channel) => [channel.id, channel]),
+      ),
+    [channelsQuery.data],
+  );
+
+  const draftRootRefs = React.useMemo<DraftRootRef[]>(() => {
+    const refs: DraftRootRef[] = [];
+    const seen = new Set<string>();
     for (const entry of drafts) {
       const rootId = getThreadRootId(entry.key);
-      if (rootId) {
-        ids.add(rootId);
-      }
+      if (!rootId || seen.has(rootId)) continue;
+      seen.add(rootId);
+      refs.push({
+        rootId,
+        channel: channelsById.get(entry.draft.channelId) ?? null,
+      });
     }
-    return [...ids];
-  }, [drafts]);
+    return refs;
+  }, [drafts, channelsById]);
 
-  const rootStatusMap = useDraftRootStatus(threadRootIds, enabled);
+  const rootStatusMap = useDraftRootStatus(draftRootRefs, enabled);
 
   const profilePubkeys = React.useMemo(
     () => [
@@ -553,11 +566,11 @@ export function useDraftViewItems(enabled: boolean): DraftViewItem[] {
     () =>
       resolveDraftSources({
         channels: channelsQuery.data,
-        currentPubkey,
+        currentAgentId,
         drafts,
         profiles,
       }),
-    [channelsQuery.data, currentPubkey, drafts, profiles],
+    [channelsQuery.data, currentAgentId, drafts, profiles],
   );
 
   return drafts.map((entry) => {

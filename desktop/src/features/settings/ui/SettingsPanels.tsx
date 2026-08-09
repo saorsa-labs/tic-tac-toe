@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  Archive,
   BellRing,
   Bot,
   Check,
@@ -12,12 +11,8 @@ import {
   Keyboard,
   LayoutTemplate,
   LockKeyhole,
-  MessagesSquare,
   MonitorCog,
   Moon,
-  ShieldAlert,
-  Smartphone,
-  Smile,
   Sun,
   SunMoon,
   UserRound,
@@ -29,8 +24,6 @@ import type {
 } from "@/features/notifications/hooks";
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
-import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
-import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
 import {
   setThreadViewMode,
   useThreadViewMode,
@@ -73,13 +66,10 @@ import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
-import { MobilePairingCard } from "./MobilePairingCard";
-import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { ActiveAgentCommunitiesSettingsCard } from "./ActiveAgentCommunitiesSettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
-import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
@@ -94,12 +84,7 @@ export type SettingsSection =
   | "compute"
   | "appearance"
   | "shortcuts"
-  | "hosted-communities"
   | "community-members"
-  | "moderation"
-  | "custom-emoji"
-  | "local-archive"
-  | "mobile"
   | "updates";
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
@@ -113,12 +98,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "compute",
   "appearance",
   "shortcuts",
-  "hosted-communities",
   "community-members",
-  "moderation",
-  "custom-emoji",
-  "local-archive",
-  "mobile",
   "updates",
 ];
 
@@ -138,7 +118,7 @@ export type SettingsSectionDescriptor = {
 };
 
 export type SettingsPanelProps = {
-  currentPubkey?: string;
+  currentAgentId?: string;
   fallbackDisplayName?: string;
   isUpdatingDesktopNotifications: boolean;
   notificationErrorMessage: string | null;
@@ -196,35 +176,9 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     icon: Keyboard,
   },
   {
-    value: "hosted-communities",
-    label: "Hosted communities",
-    icon: MessagesSquare,
-  },
-  {
     value: "community-members",
     label: "Community access",
     icon: LockKeyhole,
-  },
-  {
-    value: "moderation",
-    label: "Moderation",
-    icon: ShieldAlert,
-  },
-  {
-    value: "custom-emoji",
-    label: "Custom emoji",
-    icon: Smile,
-    featureGate: "custom-emoji",
-  },
-  {
-    value: "local-archive",
-    label: "Local archive",
-    icon: Archive,
-  },
-  {
-    value: "mobile",
-    label: "Mobile",
-    icon: Smartphone,
   },
   {
     value: "updates",
@@ -787,7 +741,7 @@ export function renderSettingsSection(
     case "profile":
       return (
         <ProfileSettingsCard
-          currentPubkey={props.currentPubkey}
+          currentAgentId={props.currentAgentId}
           fallbackDisplayName={props.fallbackDisplayName}
         />
       );
@@ -827,20 +781,10 @@ export function renderSettingsSection(
       return <ThemeSettingsCard />;
     case "shortcuts":
       return <KeyboardShortcutsCard />;
-    case "hosted-communities":
-      return <HostedCommunitiesSettingsCard />;
     case "community-members":
       return (
-        <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
+        <CommunityMembersSettingsCard currentAgentId={props.currentAgentId} />
       );
-    case "moderation":
-      return <ModerationQueueCard />;
-    case "custom-emoji":
-      return <CustomEmojiSettingsCard />;
-    case "local-archive":
-      return <LocalArchiveSettingsCard />;
-    case "mobile":
-      return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":
       return <UpdateChecker />;
     default: {

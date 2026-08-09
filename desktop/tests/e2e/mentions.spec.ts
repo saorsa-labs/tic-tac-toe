@@ -7,6 +7,9 @@ import {
 } from "../helpers/bridge";
 
 const MOCK_VIEWER_PUBKEY = "deadbeef".repeat(8);
+// M2 identity: the mock viewer's displayed name is its four speakable words
+// (derived from agentId), never a Nostr key. See e2eBridge MOCK_IDENTITY_WORDS.
+const MOCK_IDENTITY_DISPLAY_NAME = "bodily example dismiss galaxy";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -1587,7 +1590,7 @@ test("keyboard navigation selects mention with Enter", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("@bo");
+  await input.fill("@bob");
 
   const dropdown = autocomplete(page);
   await expect(dropdown.getByText("bob")).toBeVisible();
@@ -1645,17 +1648,18 @@ test("clicking author name opens user profile panel", async ({ page }) => {
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  // The seed message in general is from the mock identity (npub1mock...)
+  // The seed message in general is from the mock viewer, whose displayed
+  // name is its four-word AgentId identity.
   const firstMessage = page.getByTestId("message-row").first();
   const authorButton = firstMessage.locator("button", {
-    hasText: "npub1mock...",
+    hasText: MOCK_IDENTITY_DISPLAY_NAME,
   });
   await authorButton.click();
 
   // Click now opens the full profile panel instead of the popover
   const panel = page.getByTestId("user-profile-panel");
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText("deadbeef");
+  await expect(panel).toContainText(MOCK_IDENTITY_DISPLAY_NAME);
 });
 
 test("hovering avatar opens popover, clicking opens profile panel", async ({
@@ -2026,7 +2030,9 @@ test("profile popover wave sends a direct message for a human profile", async ({
   await expect(page.getByText("Sending")).toHaveCount(0, { timeout: 4_000 });
   await waitForTimelineSettled(page);
   await expect(waveAttachment).toContainText("👋");
-  await expect(waveAttachment).toContainText("npub1mock... waved at you.");
+  await expect(waveAttachment).toContainText(
+    `${MOCK_IDENTITY_DISPLAY_NAME} waved at you.`,
+  );
   await expect(waveAttachment).toContainText("Start a huddle to talk to them.");
   await expect(
     waveAttachment.getByRole("button", { name: "Start huddle" }),
@@ -2038,7 +2044,9 @@ test("profile popover wave sends a direct message for a human profile", async ({
       expect.objectContaining({
         command: "send_channel_message",
         payload: expect.objectContaining({
-          content: expect.stringContaining("npub1mock... waved at you."),
+          content: expect.stringContaining(
+            `${MOCK_IDENTITY_DISPLAY_NAME} waved at you.`,
+          ),
         }),
       }),
     ]),

@@ -20,7 +20,6 @@ use crate::{
         load_managed_agents, load_personas, load_teams, load_teams_readonly, save_managed_agents,
         save_personas, save_teams, AgentDefinition, ManagedAgentRecord, TeamRecord,
     },
-    relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
 
@@ -254,13 +253,9 @@ pub struct EncodedTeamSnapshotPayload {
 struct MintedMember {
     definition: AgentDefinition,
     record: ManagedAgentRecord,
-    agent_keys: nostr::Keys,
     pubkey: String,
-    auth_tag: Option<String>,
     display_name: String,
-    effective_avatar: Option<String>,
 }
-
 fn build_team_export_snapshot(
     team: &TeamRecord,
     personas: &[AgentDefinition],
@@ -331,44 +326,13 @@ async fn materialize_team_snapshot_bytes(
         (team, personas, records)
     };
 
-    // Fetch memory for each member that has a live instance, outside the lock.
-    let mut memory_entries_by_persona: std::collections::HashMap<
+    // Memory fetch removed: the relay engram read had no native contract. The
+    // per-persona entry map stays empty; build_team_export_snapshot still
+    // records the requested memory_level per member, but with no entries.
+    let memory_entries_by_persona: std::collections::HashMap<
         String,
         Vec<AgentSnapshotMemoryEntry>,
     > = std::collections::HashMap::new();
-
-    if effective_memory_level != MemoryLevel::None {
-        for persona_id in &team.persona_ids {
-            let instance = records.iter().find(|r| {
-                r.team_id.as_deref() == Some(&team.id)
-                    && r.persona_id.as_deref() == Some(persona_id.as_str())
-            });
-            if let Some(instance) = instance {
-                let listing = crate::commands::engrams::get_agent_memory(
-                    instance.pubkey.clone(),
-                    app.clone(),
-                    state.clone(),
-                )
-                .await?;
-                let mut entries = Vec::new();
-                if let Some(core) = listing.core {
-                    entries.push(AgentSnapshotMemoryEntry {
-                        slug: core.slug,
-                        body: core.body,
-                    });
-                }
-                if effective_memory_level == MemoryLevel::Everything {
-                    for mem in listing.memories {
-                        entries.push(AgentSnapshotMemoryEntry {
-                            slug: mem.slug,
-                            body: mem.body,
-                        });
-                    }
-                }
-                memory_entries_by_persona.insert(persona_id.clone(), entries);
-            }
-        }
-    }
 
     let snapshot = build_team_export_snapshot(
         &team,
@@ -487,13 +451,11 @@ pub async fn preview_team_snapshot_import(
 ///      surfacing rollback failures alongside the original error. This makes
 ///      the store phase all-or-none for ordinary application errors; a process
 ///      crash between atomic file commits is NOT covered.
-///   4. Profile sync — for each member, call `sync_managed_agent_profile`.
-///      Best-effort; errors are collected per member.
-///   5. Memory restore — for each member with non-empty snapshot memory,
-///      publish each entry as a `kind:30174` engram event. Best-effort.
+///   4. Result assembly — per-member import outcome. Relay profile sync and
+///      engram upload were removed (no native relay contract).
 ///
-/// Importing the same file twice yields two distinct teams with different
-/// agent keypairs (same as individual agent import).
+/// Importing the same file twice yields two distinct teams whose managed-agent
+/// records receive different opaque storage identifiers.
 #[tauri::command]
 pub async fn confirm_team_snapshot_import(
     input: TeamSnapshotImportConfirm,
@@ -509,13 +471,8 @@ pub async fn confirm_team_snapshot_import(
     let persona_ids: Vec<String> = definitions.iter().map(|d| d.id.clone()).collect();
     let imported_team = build_import_team(&snapshot, persona_ids.clone(), &now)?;
 
-    // ── Phase 2: mint keys + auth tags (sync, outside lock) ─────────────────
-    // All mints must succeed before we enter the store. If any fails, zero writes.
-    let owner_pubkey_hex = {
-        let keys = state.signing_keys()?;
-        keys.public_key().to_hex()
-    };
-
+    // ── Phase 2: allocate opaque storage ids (sync, outside lock) ───────────
+    // All allocations complete before we enter the store. If any fails, zero writes.
     let mut minted: Vec<MintedMember> = Vec::with_capacity(snapshot.members.len());
     for (member, definition) in snapshot.members.iter().zip(definitions) {
         let display_name = definition.display_name.clone();
@@ -523,28 +480,11 @@ pub async fn confirm_team_snapshot_import(
         let respond_to_wire = definition.respond_to.clone();
         let minted_parallelism = definition.parallelism;
 
-        let (agent_keys, private_key_nsec, pubkey, auth_tag) = {
-            let owner_keys = state.signing_keys()?;
-            let agent_keys = nostr::Keys::generate();
-            let pubkey = agent_keys.public_key().to_hex();
-            let private_key_nsec = {
-                use nostr::ToBech32;
-                agent_keys
-                    .secret_key()
-                    .to_bech32()
-                    .map_err(|e| format!("failed to encode agent private key: {e}"))?
-            };
-            // NIP-OA auth tag: bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
-            let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
-                .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
-            let compat_agent = nostr::PublicKey::from_hex(&pubkey)
-                .map_err(|e| format!("failed to bridge agent pubkey: {e}"))?;
-            let auth_tag = Some(
-                buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
-                    .map_err(|e| format!("failed to compute NIP-OA auth tag: {e}"))?,
-            );
-            (agent_keys, private_key_nsec, pubkey, auth_tag)
-        };
+        let pubkey = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
 
         // Build the ManagedAgentRecord for this member.
         let record = ManagedAgentRecord {
@@ -553,9 +493,6 @@ pub async fn confirm_team_snapshot_import(
             display_name: None,
             slug: None,
             persona_id: Some(definition.id.clone()),
-            private_key_nsec: private_key_nsec.clone(),
-            auth_tag: auth_tag.clone(),
-            relay_url: String::new(),
             avatar_url: effective_avatar_url.clone(),
             acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
@@ -604,7 +541,6 @@ pub async fn confirm_team_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: definition.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
-            relay_mesh: None,
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),
         };
@@ -612,11 +548,8 @@ pub async fn confirm_team_snapshot_import(
         minted.push(MintedMember {
             definition,
             record,
-            agent_keys,
             pubkey,
-            auth_tag,
             display_name,
-            effective_avatar: effective_avatar_url,
         });
     }
 
@@ -661,19 +594,10 @@ pub async fn confirm_team_snapshot_import(
         // aborts cleanly — zero writes have occurred.
         let mut teams = load_teams_readonly(&teams_store_path)?;
 
-        // Collect minted pubkeys for keyring cleanup on rollback.
-        let minted_pubkeys: Vec<&str> = minted.iter().map(|m| m.pubkey.as_str()).collect();
-
-        // Restore the agent store to pre-import state and clean minted keyring
-        // entries. Returns the original error, extended with rollback details.
+        // Restore the agent store to its pre-import state on rollback.
+        // Returns the original error, extended with rollback details.
         let rollback_agents = |original_err: String| -> String {
             let mut errors = vec![original_err];
-            // Clean minted keyring entries.
-            for pubkey in &minted_pubkeys {
-                if let Err(e) = crate::managed_agents::storage::try_delete_agent_key(pubkey) {
-                    errors.push(format!("keyring cleanup {pubkey}: {e}"));
-                }
-            }
             // Restore agent store file.
             let restore = match &agents_store_snapshot {
                 Some(bytes) => crate::managed_agents::storage::atomic_write_json_restricted(
@@ -688,11 +612,7 @@ pub async fn confirm_team_snapshot_import(
             if let Err(e) = restore {
                 errors.push(format!("agent store restore: {e}"));
             }
-            if errors.len() == 1 {
-                errors.into_iter().next().unwrap()
-            } else {
-                errors.join("; ")
-            }
+            errors.join("; ")
         };
 
         // Write all definitions.
@@ -736,13 +656,6 @@ pub async fn confirm_team_snapshot_import(
         }
 
         // All writes committed — safe to update in-memory state.
-        for m in &minted {
-            crate::commands::personas::retain_persona_pending(&app, &state, &m.definition);
-        }
-        for m in &minted {
-            retain_agent_pending(&app, &state, &m.record);
-        }
-        crate::commands::teams::retain_team_pending(&app, &state, &imported_team);
 
         crate::managed_agents::try_regenerate_nest(&app);
         let _ = app.emit("agents-data-changed", ());
@@ -750,199 +663,29 @@ pub async fn confirm_team_snapshot_import(
         imported_team
     };
 
-    // ── Phase 4 & 5: profile sync + memory restore (async, outside lock) ────
-    let relay_ws = relay_ws_url_with_override(&state);
-    let mut member_results: Vec<TeamSnapshotImportMemberResult> = Vec::with_capacity(minted.len());
-
-    for (m, snap_member) in minted.iter().zip(snapshot.members.iter()) {
-        let relay_url = effective_agent_relay_url(&m.record.relay_url, &relay_ws);
-
-        // Phase 4: profile sync (best-effort).
-        let profile_sync_error = sync_managed_agent_profile(
-            &state,
-            &relay_url,
-            &m.agent_keys,
-            &m.display_name,
-            m.effective_avatar.as_deref(),
-            m.auth_tag.as_deref(),
-        )
-        .await
-        .err();
-
-        // Phase 5: memory restore (best-effort).
-        let memory_total = snap_member.memory.entries.len();
-        let mut memory_written = 0usize;
-        let mut memory_errors: Vec<String> = Vec::new();
-
-        if memory_total > 0 {
-            let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)
-                .map_err(|e| format!("failed to parse owner pubkey: {e}"))?;
-            let base_ts = nostr::Timestamp::now().as_secs();
-
-            for (idx, entry) in snap_member.memory.entries.iter().enumerate() {
-                let body = if entry.slug == buzz_core_pkg::engram::CORE_SLUG {
-                    buzz_core_pkg::engram::Body::Core {
-                        profile: entry.body.clone(),
-                    }
-                } else {
-                    buzz_core_pkg::engram::Body::Memory {
-                        slug: entry.slug.clone(),
-                        value: Some(entry.body.clone()),
-                    }
-                };
-
-                let created_at = base_ts + idx as u64;
-                match buzz_core_pkg::engram::build_event(
-                    &m.agent_keys,
-                    &owner_pubkey,
-                    &body,
-                    created_at,
-                ) {
-                    Ok(event) => {
-                        use nostr::JsonUtil;
-                        let event_json = event.as_json().into_bytes();
-                        let url =
-                            format!("{}/events", crate::relay::relay_http_base_url(&relay_url));
-                        match submit_engram_event(
-                            &state,
-                            &m.agent_keys,
-                            &event_json,
-                            &url,
-                            m.auth_tag.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(()) => memory_written += 1,
-                            Err(e) => memory_errors.push(format!("slug {:?}: {e}", entry.slug)),
-                        }
-                    }
-                    Err(e) => {
-                        memory_errors.push(format!("slug {:?}: build failed: {e}", entry.slug));
-                    }
-                }
-            }
-        }
-
-        member_results.push(TeamSnapshotImportMemberResult {
+    // ── Phase 4: assemble per-member results ────────────────────────────────
+    // Relay profile sync + engram upload were removed (no native relay
+    // contract). memory_total still reports the snapshot's entry count; with
+    // no upload path, memory_written is always 0.
+    let member_results: Vec<TeamSnapshotImportMemberResult> = minted
+        .iter()
+        .zip(snapshot.members.iter())
+        .map(|(m, snap_member)| TeamSnapshotImportMemberResult {
             display_name: m.display_name.clone(),
             pubkey: m.pubkey.clone(),
             persona_id: m.definition.id.clone(),
-            memory_written,
-            memory_total,
-            memory_errors,
-            profile_sync_error,
-        });
-    }
+            memory_written: 0,
+            memory_total: snap_member.memory.entries.len(),
+            memory_errors: Vec::new(),
+            profile_sync_error: None,
+        })
+        .collect();
 
     Ok(TeamSnapshotImportResult {
         team,
         persona_ids,
         members: member_results,
     })
-}
-
-/// Inline retention for the managed-agent kind:30177 event — mirrors
-/// `commands::personas::snapshot::import::retain_agent_pending`.
-fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {
-    use crate::managed_agents::{
-        agent_events::{agent_event_content, build_agent_event},
-        managed_agents_base_dir,
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-    };
-    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
-    use nostr::JsonUtil;
-
-    let result = (|| -> Result<(), String> {
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
-        let content = serde_json::to_string(&agent_event_content(record))
-            .map_err(|e| format!("failed to serialize agent content: {e}"))?;
-        let (owner_pubkey, event) = {
-            let keys = state.signing_keys()?;
-            let owner_pubkey = keys.public_key().to_hex();
-            let existing =
-                get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
-            if existing.as_ref().is_some_and(|row| row.content == content) {
-                return Ok(());
-            }
-            let event = build_agent_event(record)?
-                .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("failed to sign agent event: {e}"))?;
-            (owner_pubkey, event)
-        };
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_MANAGED_AGENT,
-                pubkey: owner_pubkey,
-                d_tag: record.pubkey.clone(),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-snapshot-import retain-agent: {e}");
-    }
-}
-
-/// POST a pre-built signed engram event to the relay, authenticating as the
-/// new agent. Mirrors the same helper in `snapshot::import`.
-async fn submit_engram_event(
-    state: &AppState,
-    agent_keys: &nostr::Keys,
-    event_json: &[u8],
-    url: &str,
-    auth_tag: Option<&str>,
-) -> Result<(), String> {
-    use crate::relay::build_nip98_auth_header_for_keys;
-    use reqwest::Method;
-
-    // Wait before signing: the relay enforces NIP-98 freshness (±60s) and the
-    // gate may hold for up to MAX_HINT_SECONDS (300s). Building auth before the
-    // wait produces a stale `created_at` that the relay will reject.
-    crate::relay_admission::wait_for_rate_limit().await;
-    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, url, event_json)?;
-    let mut request = state
-        .http_client
-        .post(url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json");
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-    let response = request
-        .body(event_json.to_vec())
-        .send()
-        .await
-        .map_err(|e| crate::relay::classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        let msg = crate::relay::relay_error_message(response).await;
-        return Err(format!("relay rejected engram: {msg}"));
-    }
-
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("failed to read relay response: {e}"))?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("relay response not JSON: {e}"))?;
-    let accepted = parsed
-        .get("accepted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !accepted {
-        let message = parsed
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        return Err(format!("relay rejected engram: {message}"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

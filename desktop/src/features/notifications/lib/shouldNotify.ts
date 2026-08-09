@@ -6,12 +6,12 @@ import {
 
 export function hasMentionForEvent(
   event: RelayEvent,
-  currentPubkey: string,
+  currentAgentId: string,
 ): boolean {
   return (
-    currentPubkey.length > 0 &&
+    currentAgentId.length > 0 &&
     event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
+      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentAgentId,
     )
   );
 }
@@ -27,7 +27,7 @@ export type NotifyOptions = {
 
 export function shouldNotifyForEvent(
   event: RelayEvent,
-  currentPubkey: string,
+  currentAgentId: string,
   options: NotifyOptions,
 ): boolean {
   const {
@@ -44,7 +44,7 @@ export function shouldNotifyForEvent(
     return true;
   }
 
-  if (hasMentionForEvent(event, currentPubkey)) {
+  if (hasMentionForEvent(event, currentAgentId)) {
     return true;
   }
 
@@ -77,12 +77,12 @@ export function shouldNotifyForEvent(
 
 export function isHighPriorityEventForUser(
   event: RelayEvent,
-  currentPubkey: string,
+  currentAgentId: string,
 ): boolean {
   if (
-    currentPubkey.length > 0 &&
+    currentAgentId.length > 0 &&
     event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
+      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentAgentId,
     )
   ) {
     return true;

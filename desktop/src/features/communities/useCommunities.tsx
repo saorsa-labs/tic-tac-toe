@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -10,15 +11,15 @@ import type { ReactNode } from "react";
 
 import type { Community } from "./types";
 import {
+  leaveNativeCommunity,
+  listNativeCommunities,
+} from "./nativeCommunityApi";
+import { x0xUpdateGroup } from "@/shared/api/tauriNativeX0x";
+import {
   clearCommunityStorage,
   loadActiveCommunityId,
-  loadCommunities,
   saveActiveCommunityId,
-  saveCommunities,
 } from "./communityStorage";
-import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
-import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
-import { removeMessageSnapshotsForRelay } from "@/features/messages/lib/messageSnapshot";
 import { clearSavedCommunitySnapshot } from "@/features/agents/activeAgentTurnsStore";
 import {
   clearCommunityDestinations,
@@ -28,109 +29,67 @@ import {
 export type UpdateCommunityResult =
   | { kind: "updated"; requiresReinit: boolean }
   | { kind: "unchanged" }
-  | { kind: "duplicate-relay" }
   | { kind: "not-found" };
 
-/**
- * Pure decision logic for updateCommunity — determines the outcome from a
- * synchronous snapshot of communities without side effects.  Extracted so the
- * 5-case result matrix is unit-testable outside React.
- */
 export function resolveCommunityUpdateResult(
   communities: Community[],
   activeId: string | null,
   id: string,
-  updates: Partial<
-    Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
-  >,
+  updates: Partial<Pick<Community, "name" | "reposDir">>,
 ): UpdateCommunityResult {
-  const current = communities.find((w) => w.id === id);
+  const current = communities.find((community) => community.id === id);
   if (!current) return { kind: "not-found" };
-
-  if (
-    updates.relayUrl !== undefined &&
-    updates.relayUrl !== current.relayUrl &&
-    communities.some((w) => w.id !== id && w.relayUrl === updates.relayUrl)
-  ) {
-    return { kind: "duplicate-relay" };
-  }
 
   const hasChange =
     (updates.name !== undefined && updates.name !== current.name) ||
-    (updates.relayUrl !== undefined && updates.relayUrl !== current.relayUrl) ||
-    (updates.token !== undefined && updates.token !== current.token) ||
-    (updates.pubkey !== undefined && updates.pubkey !== current.pubkey) ||
     (updates.reposDir !== undefined && updates.reposDir !== current.reposDir);
-
   if (!hasChange) return { kind: "unchanged" };
 
-  const isActive = id === activeId;
-  const backendFieldsChanged =
-    isActive &&
-    ((updates.relayUrl !== undefined &&
-      updates.relayUrl !== current.relayUrl) ||
-      (updates.token !== undefined && updates.token !== current.token) ||
-      (updates.reposDir !== undefined &&
-        updates.reposDir !== current.reposDir));
-
-  return { kind: "updated", requiresReinit: backendFieldsChanged };
+  return {
+    kind: "updated",
+    requiresReinit:
+      id === activeId &&
+      updates.reposDir !== undefined &&
+      updates.reposDir !== current.reposDir,
+  };
 }
 
-/**
- * Permute `communities` so that its order matches `orderedIds`.
- *
- * - Communities whose id appears in `orderedIds` are placed first, in the
- *   order given by `orderedIds`.
- * - Communities not mentioned in `orderedIds` (e.g. added after the drag
- *   completed) are appended at the end in their original relative order.
- *
- * Pure and side-effect-free — extracted so it can be unit-tested without
- * a DOM or React.
- */
 export function applyCommunitiesOrder(
   communities: Community[],
   orderedIds: string[],
 ): Community[] {
-  const byId = new Map(communities.map((c) => [c.id, c]));
+  const byId = new Map(
+    communities.map((community) => [community.id, community]),
+  );
   const seen = new Set<string>();
   const reordered: Community[] = [];
 
   for (const id of orderedIds) {
-    const c = byId.get(id);
-    if (c && !seen.has(id)) {
-      reordered.push(c);
+    const community = byId.get(id);
+    if (community && !seen.has(id)) {
+      reordered.push(community);
       seen.add(id);
     }
   }
-
-  for (const c of communities) {
-    if (!seen.has(c.id)) {
-      reordered.push(c);
-    }
+  for (const community of communities) {
+    if (!seen.has(community.id)) reordered.push(community);
   }
-
   return reordered;
 }
 
 export type UseCommunitiesReturn = {
   communities: Community[];
   activeCommunity: Community | null;
-  /** Counter bumped when the active community's config changes (relayUrl/token). */
   reinitKey: number;
-  /** Add a community, deduplicating by relayUrl. Returns the final ID in the list. */
   addCommunity: (community: Community) => string;
   clearCommunities: () => void;
   removeCommunity: (id: string) => void;
   switchCommunity: (id: string) => void;
-  /** Force the active community to re-init (e.g. after a deep-link reconnect). */
   reconnectCommunity: () => void;
   updateCommunity: (
     id: string,
-    updates: Partial<
-      Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
-    >,
-  ) => UpdateCommunityResult;
-  /** Persist a new display order for the rail. IDs not in orderedIds keep their relative position at the end. */
+    updates: Partial<Pick<Community, "name" | "reposDir">>,
+  ) => Promise<UpdateCommunityResult>;
   reorderCommunities: (orderedIds: string[]) => void;
 };
 
@@ -146,16 +105,15 @@ export function CommunitiesProvider({ children }: { children: ReactNode }) {
 }
 
 export function useCommunities(): UseCommunitiesReturn {
-  const ctx = useContext(CommunitiesContext);
-  if (!ctx) {
+  const context = useContext(CommunitiesContext);
+  if (!context) {
     throw new Error("useCommunities must be used within a CommunitiesProvider");
   }
-  return ctx;
+  return context;
 }
 
 function useCommunitiesInternal(): UseCommunitiesReturn {
-  const [communities, setCommunitiesState] =
-    useState<Community[]>(loadCommunities);
+  const [communities, setCommunities] = useState<Community[]>([]);
   const [activeId, setActiveId] = useState<string | null>(
     loadActiveCommunityId,
   );
@@ -163,35 +121,52 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
 
+  useEffect(() => {
+    let cancelled = false;
+    void listNativeCommunities()
+      .then((groups) => {
+        if (cancelled) return;
+        setCommunities(groups);
+        const preferredId = loadActiveCommunityId();
+        if (
+          groups.length > 0 &&
+          !groups.some((group) => group.id === preferredId)
+        ) {
+          saveActiveCommunityId(groups[0].id);
+          setActiveId(groups[0].id);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setCommunities([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const activeCommunity = useMemo(
-    () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
+    () =>
+      communities.find((community) => community.id === activeId) ??
+      communities[0] ??
+      null,
     [communities, activeId],
   );
 
   const addCommunity = useCallback((community: Community): string => {
     const existing = communitiesRef.current.find(
-      (w) => w.relayUrl === community.relayUrl,
+      (candidate) => candidate.groupId === community.groupId,
     );
     const resolvedId = existing?.id ?? community.id;
-    setCommunitiesState((prev) => {
-      const dup = prev.find((w) => w.relayUrl === community.relayUrl);
-      let next: Community[];
-      if (dup) {
-        next = prev.map((w) =>
-          w.id === dup.id
-            ? {
-                ...w,
-                name: community.name || w.name,
-                token: community.token ?? w.token,
-                pubkey: community.pubkey ?? w.pubkey,
-              }
-            : w,
-        );
-      } else {
-        next = [...prev, community];
-      }
-      saveCommunities(next);
-      return next;
+    setCommunities((current) => {
+      const duplicate = current.find(
+        (candidate) => candidate.groupId === community.groupId,
+      );
+      if (!duplicate) return [...current, community];
+      return current.map((candidate) =>
+        candidate.id === duplicate.id
+          ? { ...candidate, ...community }
+          : candidate,
+      );
     });
     return resolvedId;
   }, []);
@@ -199,45 +174,34 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   const clearCommunities = useCallback(() => {
     clearCommunityStorage();
     clearCommunityDestinations();
-    setCommunitiesState([]);
+    setCommunities([]);
     setActiveId(null);
   }, []);
 
   const removeCommunity = useCallback(
     (id: string) => {
-      // GC self-profile caches for the removed community's relay. Mirror the
-      // updater guard (length > 1) so we only GC when removal will actually
-      // proceed. Runs outside the updater — updaters can execute twice under
-      // React StrictMode.
-      if (communities.length > 1) {
-        const removed = communities.find((w) => w.id === id);
-        if (removed) {
-          removeSelfProfileCachesForRelay(removed.relayUrl);
-          removeChannelSnapshotForRelay(removed.relayUrl);
-          removeMessageSnapshotsForRelay(removed.relayUrl);
+      const target = communitiesRef.current.find(
+        (community) => community.id === id,
+      );
+      if (!target) return;
+      void leaveNativeCommunity(target.groupId)
+        .then(() => listNativeCommunities())
+        .then((groups) => {
+          setCommunities(groups);
           clearSavedCommunitySnapshot(id);
           removeCommunityDestination(id);
-        }
-      }
-
-      setCommunitiesState((prev) => {
-        // Never allow removing the last community
-        if (prev.length <= 1) {
-          return prev;
-        }
-        const next = prev.filter((w) => w.id !== id);
-        saveCommunities(next);
-
-        // If removing the active community, switch to first remaining
-        if (activeId === id && next.length > 0) {
-          saveActiveCommunityId(next[0].id);
-          setActiveId(next[0].id);
-        }
-
-        return next;
-      });
+          if (activeId === id) {
+            const nextId = groups[0]?.id ?? null;
+            if (nextId) saveActiveCommunityId(nextId);
+            else clearCommunityStorage();
+            setActiveId(nextId);
+          }
+        })
+        .catch(() => {
+          void listNativeCommunities().then(setCommunities);
+        });
     },
-    [activeId, communities],
+    [activeId],
   );
 
   const switchCommunity = useCallback(
@@ -250,48 +214,42 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   );
 
   const reconnectCommunity = useCallback(() => {
-    setReinitKey((k) => k + 1);
+    setReinitKey((value) => value + 1);
   }, []);
 
   const updateCommunity = useCallback(
-    (
+    async (
       id: string,
-      updates: Partial<
-        Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
-      >,
-    ): UpdateCommunityResult => {
+      updates: Partial<Pick<Community, "name" | "reposDir">>,
+    ): Promise<UpdateCommunityResult> => {
       const result = resolveCommunityUpdateResult(
         communitiesRef.current,
         activeId,
         id,
         updates,
       );
+      if (result.kind !== "updated") return result;
 
-      if (result.kind === "updated") {
-        setCommunitiesState((prev) => {
-          const next = prev.map((w) =>
-            w.id === id ? { ...w, ...updates } : w,
-          );
-          saveCommunities(next);
-          return next;
-        });
-
-        if (result.requiresReinit) {
-          setReinitKey((k) => k + 1);
-        }
+      const current = communitiesRef.current.find(
+        (community) => community.id === id,
+      );
+      if (!current) return { kind: "not-found" };
+      if (updates.name !== undefined && updates.name !== current.name) {
+        await x0xUpdateGroup({ groupId: current.groupId, name: updates.name });
       }
-
+      setCommunities((items) =>
+        items.map((community) =>
+          community.id === id ? { ...community, ...updates } : community,
+        ),
+      );
+      if (result.requiresReinit) setReinitKey((value) => value + 1);
       return result;
     },
     [activeId],
   );
 
   const reorderCommunities = useCallback((orderedIds: string[]) => {
-    setCommunitiesState((prev) => {
-      const next = applyCommunitiesOrder(prev, orderedIds);
-      saveCommunities(next);
-      return next;
-    });
+    setCommunities((current) => applyCommunitiesOrder(current, orderedIds));
   }, []);
 
   return {

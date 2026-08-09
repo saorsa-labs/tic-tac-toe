@@ -1,62 +1,31 @@
+// Modified from block/buzz @ 710ed9ff — see FORK.md (native x0xd data layer)
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
 mod app_state;
-mod archive;
-mod builderlab;
 mod commands;
+mod company_template;
 mod deep_link;
-mod event_sync;
-mod events;
-mod huddle;
+mod local_stack;
 mod managed_agents;
-mod media_proxy;
-#[cfg(feature = "mesh-llm")]
-mod mesh_llm;
-#[cfg(not(feature = "mesh-llm"))]
-mod mesh_llm_stubs;
 mod migration;
-#[cfg(test)]
-mod model_tests;
 mod models;
-mod native_websocket;
-mod nostr_bind;
-pub mod nostr_convert;
 mod prevent_sleep;
-mod ptt_shortcut;
-mod relay;
-mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod symphony;
+mod symphony_client;
 mod templates;
 mod util;
-use app_state::{build_app_state, resolve_persisted_identity, AppState};
-use builderlab::*;
+mod x0x_client;
+use app_state::{resolve_persisted_identity, try_build_app_state, AppState};
 use commands::*;
-use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
-    take_pending_community_deep_link, PendingCommunityDeepLinks,
-};
-use huddle::audio_output::{
-    get_audio_output_device, list_audio_output_devices, set_audio_output_device,
-};
-use huddle::reconnect::reconnect_huddle_audio;
-use huddle::{
-    add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
-    end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
-    join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
-    set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
-};
+use deep_link::handle_deep_link_url;
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest,
+    put_managed_agent_runtime_lifecycle, restart_managed_agent_runtime,
+    start_managed_agent_runtime, stop_managed_agent_runtime, try_regenerate_nest,
 };
-#[cfg(not(feature = "mesh-llm"))]
-use mesh_llm_stubs::*;
-#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
-use shutdown::{is_restart_request, shut_down_app};
+use shutdown::shut_down_app;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -135,33 +104,13 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // mesh-llm's async chains (model download, node start/join) overflow
-    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
-    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
-    // stacks for this reason; give Tauri's command runtime the same headroom
-    // before anything else touches tauri::async_runtime.
-    #[cfg(feature = "mesh-llm")]
-    match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(crate::mesh_llm::MESH_WORKER_STACK_SIZE)
-        .build()
-    {
-        Ok(runtime) => {
-            tauri::async_runtime::set(runtime.handle().clone());
-            // Keep the runtime alive for the process lifetime; dropping it
-            // would shut down the workers Tauri now depends on.
-            std::mem::forget(runtime);
-            eprintln!(
-                "buzz-mesh: installed tokio runtime with {} MiB worker stacks",
-                crate::mesh_llm::MESH_WORKER_STACK_SIZE / (1024 * 1024)
-            );
-        }
+    let app_state = match try_build_app_state() {
+        Ok(state) => state,
         Err(error) => {
-            // Fall back to Tauri's default runtime: the app still works,
-            // only deep mesh-llm futures are at risk of stack overflow.
-            eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
+            eprintln!("buzz-desktop: failed to initialize HTTP clients: {error}");
+            return;
         }
-    }
+    };
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -169,7 +118,7 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }
-            // Forward any deep link URLs from the duplicate launch.
+            // Forward application message links from the duplicate launch.
             for arg in &argv {
                 if arg.starts_with("buzz://") {
                     handle_deep_link_url(app, arg);
@@ -236,100 +185,8 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(native_websocket::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
-
-    // The global-shortcut plugin is omitted from test builds: linking it into
-    // the lib-test binary makes it fail to load on Windows
-    // (STATUS_ENTRYPOINT_NOT_FOUND) before any test runs.
-    #[cfg(not(test))]
-    let builder = builder.plugin({
-        use tauri_plugin_global_shortcut::ShortcutState;
-
-        // Generation counter for the release delay task. Incremented on
-        // every press — a delayed release only fires if the generation
-        // hasn't changed (i.e. no new press happened during the delay).
-        // This prevents press→release→press within 200 ms from having
-        // the first release clobber the second press.
-        let ptt_press_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(move |app, _shortcut, event| {
-                let state = match app.try_state::<AppState>() {
-                    Some(s) => s,
-                    None => return,
-                };
-
-                // Only act if a huddle is active and mode is PTT.
-                let (is_ptt_mode, is_active) = match state.huddle_state.lock() {
-                    Ok(hs) => (
-                        hs.voice_input_mode == huddle::VoiceInputMode::PushToTalk,
-                        matches!(
-                            hs.phase,
-                            huddle::HuddlePhase::Connected | huddle::HuddlePhase::Active
-                        ),
-                    ),
-                    Err(_) => return,
-                };
-
-                if !is_ptt_mode || !is_active {
-                    return;
-                }
-
-                match event.state {
-                    ShortcutState::Pressed => {
-                        // Bump generation — invalidates any pending release delay.
-                        ptt_press_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
-
-                        if let Ok(hs) = state.huddle_state.lock() {
-                            hs.ptt_active
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            // Only cancel TTS if it's actually playing — avoids
-                            // a stale cancel flag that drops the next queued message.
-                            if hs.tts_active.load(std::sync::atomic::Ordering::Acquire) {
-                                hs.tts_cancel
-                                    .store(true, std::sync::atomic::Ordering::Release);
-                            }
-                        }
-                        // Emit ptt-state=true to the frontend.
-                        // The React side plays the press audio cue on this event
-                        // (Web Audio API via HuddleContext). Rust-side rodio audio
-                        // was considered but rejected: the rodio OutputStream must
-                        // outlive the handler and sharing it across the shortcut
-                        // closure adds lifecycle complexity for marginal gain.
-                        // The React implementation is sufficient and simpler.
-                        let _ = app.emit("ptt-state", true);
-                    }
-                    ShortcutState::Released => {
-                        // Capture generation at release time.
-                        let gen_at_release =
-                            ptt_press_gen.load(std::sync::atomic::Ordering::Acquire);
-                        let gen_arc = Arc::clone(&ptt_press_gen);
-                        let app_handle = app.clone();
-                        // 200 ms release delay — captures the tail of the utterance.
-                        // Only applies if no new press happened during the delay.
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            // Check generation — if it changed, a new press arrived.
-                            if gen_arc.load(std::sync::atomic::Ordering::Acquire) != gen_at_release
-                            {
-                                return; // Superseded by a new press.
-                            }
-                            if let Some(state) = app_handle.try_state::<AppState>() {
-                                if let Ok(hs) = state.huddle_state.lock() {
-                                    hs.ptt_active
-                                        .store(false, std::sync::atomic::Ordering::Release);
-                                }
-                            }
-                            // Emit ptt-state=false — React plays the release audio cue.
-                            let _ = app_handle.emit("ptt-state", false);
-                        });
-                    }
-                }
-            })
-            .build()
-    });
 
     // Register the updater only in configured release builds; omit it locally.
     #[cfg(buzz_updater_enabled)]
@@ -343,19 +200,8 @@ pub fn run() {
     let builder = builder;
 
     let app = builder
-        .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
-            let app = ctx.app_handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let response = media_proxy::handle_buzz_media(&app, &request).await;
-                responder.respond(response);
-            });
-        })
-        .manage(build_app_state())
+        .manage(app_state)
         .manage(ClipboardState::new())
-        .manage(PendingCommunityDeepLinks::default())
-        .manage(BuilderlabSession::default())
-        .manage(BuilderlabLogin::default())
-        .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
 
@@ -418,16 +264,6 @@ pub fn run() {
                 .load(std::sync::atomic::Ordering::Acquire);
             let recovery_mode = identity_lost || keyring_locked;
 
-            // Snapshot owner keys after identity resolution; the best-effort
-            // event reconcile itself runs off the synchronous setup path below.
-            let owner_keys = match state.keys.lock() {
-                Ok(k) => k.clone(),
-                Err(e) => {
-                    eprintln!("buzz-desktop: fatal: owner keys lock poisoned: {e}");
-                    std::process::exit(1);
-                }
-            };
-
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
             // set but no source_version). Must run before
@@ -438,40 +274,22 @@ pub fn run() {
                 eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
             }
 
-            // Store the AppHandle so huddle commands can emit `huddle-state-changed`
-            // events via `huddle::emit_huddle_state` without threading the handle
-            // through every call site.
-            if let Ok(mut guard) = state.app_handle.lock() {
-                *guard = Some(app_handle.clone());
-            }
+            // Spawn or attach to the named local x0xd instance. The desktop
+            // communicates with its authenticated REST/WS API directly.
+            // Skipped in identity-recovery mode to keep recovery boot fast.
+            if !recovery_mode {
+                crate::local_stack::bring_up_local_stack(&app_handle);
 
-            // Bring up the runtime-owned shared-compute coordinator before
-            // saved agents are restored. Its lifetime is tied to the app, not
-            // a UI mount; it publishes discovery and reconciles membership for
-            // MeshLLM's native admission and transport.
-            #[cfg(feature = "mesh-llm")]
-            {
-                // Route mesh-llm's download progress (model weights, runtime)
-                // onto Tauri events so the UI can render real progress.
-                crate::mesh_llm::install_progress_sink(&app_handle);
-                let mesh_app = app_handle.clone();
+                // Company boot reconciliation: deterministically resume any
+                // incomplete provisioning and rebind the single newest
+                // non-cancelled Company instance to the supervised symphony
+                // daemon. Best-effort + async — never blocks launch; errors are
+                // recorded to stderr and surfaced via symphony_supervision_status.
+                let reconcile_handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    crate::mesh_llm::start_coordinator(mesh_app).await;
+                    crate::commands::reconcile_companies(&reconcile_handle).await;
                 });
             }
-
-            // Start the localhost media streaming proxy. Uses the shared HTTP
-            // client so WARP tunnelling applies. The port is stored in AppState
-            // and exposed to the frontend via the `get_media_proxy_port` command.
-            let proxy_client = state.http_client.clone();
-            let proxy_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let port = media_proxy::spawn_media_proxy(proxy_client, proxy_handle.clone()).await;
-                let state = proxy_handle.state::<AppState>();
-                state
-                    .media_proxy_port
-                    .store(port, std::sync::atomic::Ordering::Relaxed);
-            });
 
             // Create the Buzz nest (~/.buzz or ~/.buzz-dev for dev builds) before
             // agents are restored, so default_agent_workdir() resolves to the
@@ -532,20 +350,6 @@ pub fn run() {
 
             try_regenerate_nest(&app_handle);
 
-            // Sync team-dir edits and reconcile persona/team/agent events after
-            // setup can continue. It is best-effort retention backfill, unlike
-            // identity resolution above, so JSON/SQLite/signing work must not
-            // hold the boot path hostage. Skipped in recovery mode — the owner
-            // key is ephemeral.
-            if !recovery_mode {
-                event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
-            }
-
-            if let Some(mgr) = huddle::models::global_model_manager() {
-                mgr.start_stt_download(state.http_client.clone());
-                mgr.start_tts_download(state.http_client.clone());
-            }
-
             // Handle deep link URLs received while the app is running (macOS)
             // and on cold start. The single-instance plugin handles forwarding
             // from duplicate launches on Windows/Linux.
@@ -560,12 +364,11 @@ pub fn run() {
                 });
             }
 
-            // Defer launch-time agent restoration until `apply_workspace` has
-            // installed the active workspace relay and identity. Starting here
-            // would race React initialization and send agents whose saved record
-            // has no relay override to the localhost fallback. Preserve the
-            // boot-time repos and identity recovery safety gates by only marking
-            // restoration pending when both allow it.
+            // Defer launch-time agent restoration until the frontend binds the
+            // daemon's active named group. Starting here would race native
+            // identity/group initialization. Preserve boot-time repository and
+            // identity recovery gates by marking restoration pending only when
+            // both allow it.
             if restore_agents && !recovery_mode {
                 state
                     .managed_agent_restore_pending
@@ -611,66 +414,13 @@ pub fn run() {
                 }
             });
 
-            // Drain events the retention store flagged `pending_sync` (UI
-            // create/edit, delete tombstones, launch reconcile) to the relay.
-            // One loop is the sole publisher for persona, team, and managed-
-            // agent writers; a relay-unreachable tick leaves rows pending for
-            // the next sweep.
-            // Skipped in recovery mode — flushing under an ephemeral key would
-            // publish events attributed to an identity the user doesn't own.
-            if !recovery_mode {
-                let flush_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    use std::time::Duration;
-                    use tauri::Manager;
-                    let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
-                        .map(|d| d.join("retention.db"))
-                    else {
-                        eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
-                        return;
-                    };
-                    loop {
-                        let state = flush_handle.state::<AppState>();
-                        if let Err(e) =
-                            managed_agents::persona_events::flush_pending_events(&db_path, &state)
-                                .await
-                        {
-                            eprintln!("buzz-desktop: event-flush: {e}");
-                        }
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                });
-            }
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            take_pending_community_deep_link,
-            acknowledge_pending_community_deep_link,
-            start_builderlab_login,
-            cancel_builderlab_login,
-            get_builderlab_auth,
-            clear_builderlab_auth,
-            get_builderlab_nostr_identity,
-            bind_builderlab_nostr_identity,
-            delete_builderlab_nostr_identity,
-            list_builderlab_communities,
-            check_builderlab_community_name,
-            create_builderlab_community,
-            archive_builderlab_community,
-            unarchive_builderlab_community,
-            transfer_builderlab_community,
             title_bar_double_click,
             get_identity,
-            get_nsec,
-            import_identity,
-            persist_current_identity,
-            get_profile,
-            update_profile,
-            update_profile_at_relay,
-            get_user_profile,
-            get_users_batch,
-            get_user_notes,
+            get_recovery_state,
+            recover_lost_identity,
             get_git_identity,
             get_project_repo_snapshot,
             get_project_repo_diff,
@@ -683,21 +433,11 @@ pub fn run() {
             delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
-            sign_project_pull_request_review_request,
-            publish_project_pull_request_merged_status,
             merge_project_pull_request,
             open_project_terminal,
             open_project_merge_recovery_terminal,
-            search_users,
-            get_presence,
             get_os_idle_seconds,
-            get_default_relay_url,
-            auto_connect_default_relay_enabled,
-            get_legacy_workspace_storage,
             is_shared_identity,
-            get_relay_ws_url,
-            get_relay_http_url,
-            get_media_proxy_port,
             fetch_link_preview_title,
             discover_acp_auth_methods,
             discover_acp_providers,
@@ -705,79 +445,16 @@ pub fn run() {
             install_acp_runtime,
             connect_acp_runtime,
             discover_managed_agent_prereqs,
-            sign_event,
-            sign_nostr_identity_binding,
             sign_out,
-            decrypt_observer_event,
-            build_observer_control_event,
-            create_auth_event,
-            nip44_encrypt_to_self,
-            nip44_decrypt_from_self,
-            get_channels,
-            create_channel,
-            ensure_starter_channels,
-            open_dm,
-            hide_dm,
-            get_channel_details,
-            get_channel_members,
-            update_channel,
-            set_channel_topic,
-            set_channel_purpose,
-            archive_channel,
-            unarchive_channel,
-            delete_channel,
-            add_channel_members,
-            remove_channel_member,
-            change_channel_member_role,
-            join_channel,
-            leave_channel,
-            get_canvas,
-            set_canvas,
-            get_feed,
-            search_messages,
-            send_channel_message,
-            send_managed_agent_channel_message,
-            has_managed_agent_channel_message_marker,
-            get_forum_posts,
-            get_forum_thread,
-            get_thread_replies,
-            get_channel_window,
-            get_channel_messages_before,
-            edit_message,
-            delete_message,
-            add_reaction,
-            remove_reaction,
-            get_event,
+            get_managed_agent_native_identity,
             show_native_notification,
-            upload_media,
-            pick_and_upload_media,
-            pick_and_upload_image,
-            upload_media_bytes,
-            download_image,
             save_png_data_url,
-            download_file,
-            fetch_media_bytes,
-            copy_image_to_clipboard,
             copy_text_to_clipboard,
-            fetch_snapshot_bytes,
-            relay_requires_membership,
-            list_relay_members,
-            get_my_relay_membership,
-            add_relay_member,
-            remove_relay_member,
-            change_relay_member_role,
-            archive_identity,
-            unarchive_identity,
-            list_archived_identities,
-            get_relay_self,
-            resolve_oa_owner,
-            list_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
             restart_managed_agent_runtime,
-            reconcile_managed_agent_runtimes,
             put_managed_agent_runtime_lifecycle,
             create_managed_agent,
             start_managed_agent,
@@ -796,11 +473,6 @@ pub fn run() {
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
-            mesh_start_node,
-            mesh_stop_node,
-            mesh_node_status,
-            mesh_installed_models,
-            mesh_model_catalog,
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
@@ -809,7 +481,6 @@ pub fn run() {
             update_persona,
             delete_persona,
             set_persona_active,
-            reconcile_inbound_persona_event,
             list_channel_templates,
             create_channel_template,
             update_channel_template,
@@ -827,76 +498,84 @@ pub fn run() {
             encode_team_snapshot_for_send,
             preview_team_snapshot_import,
             confirm_team_snapshot_import,
-            get_channel_workflows,
-            get_channels_workflows,
-            get_workflow,
-            create_workflow,
-            update_workflow,
-            delete_workflow,
-            get_workflow_runs,
-            get_run_approvals,
-            trigger_workflow,
-            grant_approval,
-            deny_approval,
-            publish_note,
-            get_contact_list,
-            set_contact_list,
-            get_notes_timeline,
-            get_global_notes,
-            get_note,
-            get_note_reactions,
-            get_liked_notes,
-            start_huddle,
-            join_huddle,
-            leave_huddle,
-            end_huddle,
-            get_huddle_state,
-            push_audio_pcm,
-            reconnect_huddle_audio,
-            start_stt_pipeline,
-            set_huddle_transcription_enabled,
-            download_voice_models,
-            get_model_status,
-            set_tts_enabled,
-            speak_agent_message,
-            add_agent_to_huddle,
-            check_pipeline_hotstart,
-            confirm_huddle_active,
             perform_sidebar_default_haptic,
-            get_huddle_agent_pubkeys,
-            set_voice_input_mode,
-            get_voice_input_mode,
-            list_audio_output_devices,
-            set_audio_output_device,
-            get_audio_output_device,
-            start_pairing,
-            confirm_pairing_sas,
-            cancel_pairing,
-            apply_workspace,
             validate_repos_dir,
-            get_active_workspace,
-            fetch_workspace_icon,
+            x0x_history_list,
+            x0x_history_search,
+            x0x_history_get,
+            x0x_publish,
+            x0x_send_group_message,
+            x0x_send_direct_message,
+            x0x_subscribe_live,
+            x0x_close_live,
+            x0x_close_all_live,
+            x0x_get_active_group_id,
+            x0x_set_active_group_id,
+            x0x_list_groups,
+            x0x_get_group,
+            x0x_get_group_members,
+            x0x_create_group,
+            x0x_add_group_member,
+            x0x_set_group_member_role,
+            x0x_remove_group_member,
+            x0x_ban_group_member,
+            x0x_unban_group_member,
+            x0x_leave_group,
+            x0x_update_group,
+            x0x_list_contacts,
+            x0x_add_contact,
+            x0x_remove_contact,
+            x0x_set_group_display_name,
+            x0x_get_presence,
+            x0x_list_task_lists,
+            x0x_create_task_list,
+            x0x_list_tasks,
+            x0x_add_task,
+            x0x_update_task,
+            x0x_list_stores,
+            x0x_create_store,
+            x0x_join_store,
+            x0x_list_store_keys,
+            x0x_get_store_value,
+            x0x_put_store_value,
+            x0x_delete_store_value,
+            x0x_get_agent_card,
+            x0x_import_agent_card,
+            symphony_supervision_status,
+            start_symphony,
+            stop_symphony,
+            symphony_tasks,
+            symphony_task,
+            symphony_status,
+            symphony_workers,
+            symphony_approvals_pending,
+            symphony_approve,
+            symphony_deny,
+            symphony_create_issue,
+            symphony_claim,
+            symphony_handoff,
+            symphony_proofs,
+            symphony_proof,
+            symphony_routes,
+            symphony_subscribe_events,
+            list_company_templates,
+            instantiate_company_template,
+            resume_company_instance,
+            cancel_company_run,
+            list_company_instances,
             set_prevent_sleep_active,
-            get_agent_memory,
-            relay_reconnect_hook,
-            relay_reconnect_hook_configured,
-            observer_archive_default_enabled,
-            agent_metric_archive_default_enabled,
-            archive::archive_events,
-            archive::create_save_subscription,
-            archive::merge_save_subscription_kinds,
-            archive::remove_save_subscription_kind,
-            archive::list_save_subscriptions,
-            archive::delete_save_subscription,
-            archive::read_archived_events,
-            archive::read_archived_observer_events_for_channel,
-            archive::index_observer_channel_id,
-            archive::read_unindexed_observer_rows,
             is_auto_update_supported,
             set_window_vibrancy,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .build(tauri::generate_context!());
+
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to build tauri application: {error}");
+            return;
+        }
+    };
 
     let shutdown_done = Arc::new(AtomicBool::new(false));
 
@@ -904,30 +583,13 @@ pub fn run() {
     shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
 
     let run_shutdown_done = Arc::clone(&shutdown_done);
-    let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {
-        RunEvent::ExitRequested { code, .. } => {
-            if is_restart_request(code) {
-                restart_requested.store(true, Ordering::SeqCst);
-            }
+        RunEvent::ExitRequested { .. } => {
             shut_down_app(app_handle, &run_shutdown_done);
         }
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
-
-            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-            if restart_requested.load(Ordering::SeqCst) {
-                relaunch_after_mesh_shutdown(app_handle);
-            }
-
-            // AppKit terminates through libc exit(), which runs C++ static
-            // destructors. The embedded ggml/Metal runtime currently aborts in
-            // that destructor phase even after its node has stopped cleanly.
-            // End the process only after Buzz and Mesh shutdown above, while
-            // deliberately skipping those native global destructors.
-            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-            hard_exit_after_mesh_shutdown();
         }
         _ => {}
     });

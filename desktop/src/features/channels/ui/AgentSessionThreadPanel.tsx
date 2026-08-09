@@ -139,11 +139,11 @@ export function AgentSessionThreadPanel({
   const { fetchOlderArchived, hasOlderArchived } =
     useLoadArchivedObserverEvents(
       // Archive history must load regardless of live status — an idle agent's
-      // channel should still show its archived observer history. Enable whenever
-      // there is a resolved sessionChannelId (the hook's owner_p guard handles
-      // the case where no save subscription exists).
-      Boolean(sessionChannelId),
+      // channel should still show its cold-loaded observer history. Enable
+      // whenever there is a resolved sessionChannelId + a known agent.
+      Boolean(sessionChannelId) && Boolean(agent?.pubkey),
       sessionChannelId ?? null,
+      agent?.pubkey,
     );
 
   useLoadOlderOnScroll({

@@ -5,7 +5,7 @@ import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import { SettingsView } from "@/features/settings/ui/SettingsView";
 
 type SettingsScreenProps = {
-  currentPubkey?: string;
+  currentAgentId?: string;
   fallbackDisplayName?: string;
   isUpdatingDesktopNotifications: boolean;
   notificationErrorMessage: string | null;
@@ -23,7 +23,7 @@ type SettingsScreenProps = {
 };
 
 export function SettingsScreen({
-  currentPubkey,
+  currentAgentId,
   fallbackDisplayName,
   isUpdatingDesktopNotifications,
   notificationErrorMessage,
@@ -41,7 +41,7 @@ export function SettingsScreen({
 }: SettingsScreenProps) {
   return (
     <SettingsView
-      currentPubkey={currentPubkey}
+      currentAgentId={currentAgentId}
       fallbackDisplayName={fallbackDisplayName}
       isUpdatingDesktopNotifications={isUpdatingDesktopNotifications}
       notificationErrorMessage={notificationErrorMessage}

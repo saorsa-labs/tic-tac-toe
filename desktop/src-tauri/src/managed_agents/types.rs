@@ -88,9 +88,6 @@ impl AgentDefinition {
             pubkey: String::new(),
             name: self.display_name.clone(),
             persona_id: None,
-            private_key_nsec: String::new(),
-            auth_tag: None,
-            relay_url: String::new(),
             avatar_url: self.avatar_url,
             acp_command: DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
@@ -135,7 +132,6 @@ impl AgentDefinition {
             definition_respond_to: self.respond_to,
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
-            relay_mesh: None,
         }
     }
 }
@@ -173,21 +169,6 @@ impl ManagedAgentRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayAgentInfo {
-    pub pubkey: String,
-    pub name: String,
-    pub agent_type: String,
-    pub channels: Vec<String>,
-    #[serde(default)]
-    pub channel_ids: Vec<String>,
-    pub capabilities: Vec<String>,
-    pub status: String,
-    #[serde(default)]
-    pub respond_to: Option<RespondTo>,
-    #[serde(default)]
-    pub respond_to_allowlist: Vec<String>,
-}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,
@@ -197,25 +178,6 @@ pub struct ManagedAgentRecord {
     /// Team this instance was deployed from. Resolves runtime team instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
-    /// nsec private key. Held in memory but persisted to the OS keyring (keyed
-    /// by `pubkey`) rather than serialized to `managed-agents.json`. The
-    /// storage layer blanks this before writing JSON once the key is safely in
-    /// the keyring, and re-hydrates it from the keyring on load.
-    ///
-    /// It is only serialized inline (the `0o600` JSON fallback) when the
-    /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
-    /// the normal keyring-backed case. `default` also lets an old build parse a
-    /// store whose inline key was already migrated out and blanked.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub private_key_nsec: String,
-    /// NIP-OA auth tag JSON. Computed at agent creation time.
-    ///
-    /// Pre-existing agents created before NIP-OA will have `None` here.
-    /// This is intentional — they continue to work without attestation.
-    /// Re-attestation requires agent recreation (v2 migration scope).
-    #[serde(default)]
-    pub auth_tag: Option<String>,
-    pub relay_url: String,
     /// Avatar URL resolved at creation time (user-supplied input, else the
     /// command-based fallback). Persisted so startup reconciliation compares
     /// against what was actually published rather than re-deriving it from
@@ -386,38 +348,7 @@ pub struct ManagedAgentRecord {
     pub definition_respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_parallelism: Option<u32>,
-    /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
-    /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
-    /// the served model id to route to. `None` is a normal agent.
-    ///
-    /// This is the source of truth for "is this a mesh agent + which model" —
-    /// replacing the old practice of sniffing it back out of `env_vars`
-    /// (`relay_mesh_config`). Spawn-time env vars are *derived from* this, not
-    /// the other way around. `#[serde(default)]` so pre-existing saved records
-    /// deserialize as `None` and are resolved via the env-var fallback until
-    /// they are rewritten with this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay_mesh: Option<RelayMeshConfig>,
 }
-
-/// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
-///
-/// Feature-independent on purpose: the field is always present in the record
-/// schema so saved agents round-trip identically whether or not the `mesh-llm`
-/// feature is compiled in.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayMeshConfig {
-    /// The served model id this agent routes to (e.g. "Qwen3").
-    ///
-    /// `alias` because this struct crosses two boundaries with different
-    /// casing conventions: the TS create request sends camelCase
-    /// (`relayMesh: { modelRef }` — `rename_all` on the request does not
-    /// recurse into nested structs), while persisted records use snake_case.
-    /// Serialization stays `model_ref` so saved records are stable.
-    #[serde(alias = "modelRef")]
-    pub model_ref: String,
-}
-
 #[derive(Debug)]
 pub struct ManagedAgentProcess {
     pub child: Child,
@@ -457,7 +388,6 @@ pub struct ManagedAgentSummary {
     pub name: String,
     pub persona_id: Option<String>,
     pub team_id: Option<String>,
-    pub relay_url: String,
     pub acp_command: String,
     pub agent_command: String,
     /// Mirrors `ManagedAgentRecord.agent_command_override`: `Some` when the user
@@ -521,7 +451,6 @@ pub struct ManagedAgentSummary {
 #[derive(Debug, Serialize)]
 pub struct CreateManagedAgentResponse {
     pub agent: ManagedAgentSummary,
-    pub private_key_nsec: String,
     pub profile_sync_error: Option<String>,
     pub spawn_error: Option<String>,
 }

@@ -1,21 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import { relayClient } from "@/shared/api/relayClient";
-import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
-import {
-  applyCommunity,
-  autoConnectDefaultRelayEnabled,
-  getDefaultRelayUrl,
-} from "@/shared/api/tauri";
-import { getIdentity } from "@/shared/api/tauriIdentity";
-import { getOverrides } from "@/shared/features";
-import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
-import {
-  clearAllDrafts,
-  initDraftStore,
-} from "@/features/messages/lib/useDrafts";
-import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
+import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
 import {
   resetActiveAgentTurnsStore,
   saveActiveAgentTurnsForCommunity,
@@ -24,22 +10,16 @@ import {
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
-import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
-import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
-import {
-  initFirstCommunity,
-  shouldAutoConnectDefaultRelay,
-} from "./communityStorage";
 import type { Community } from "./types";
+import { bindNativeGroup } from "./nativeCommunityApi";
 
 /**
  * Tear down all community-scoped module singletons so the new
- * community starts with a clean slate. Hook-managed singletons
- * (e.g. ChannelMuteSyncManager, ChannelSectionSyncManager) are
- * destroyed via effect cleanup and do not need entries here.
+ * community starts with a clean slate. Hook-managed subscriptions are
+ * torn down via their own effect cleanup and do not need entries here.
  * See AGENTS.md "Community Switching" for the full contract.
  */
 function resetCommunityState({
@@ -47,20 +27,14 @@ function resetCommunityState({
 }: {
   resetAvatarState: boolean;
 }): void {
-  relayClient.disconnect();
-  resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
   if (resetAvatarState) {
-    resetAvatarProfileSync();
     resetAvatarPresentations();
   }
-  resetSidebarRelayConnectionCardState();
-  resetMediaCaches();
   resetVideoPlayerState();
-  resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
 }
@@ -70,7 +44,7 @@ type CommunityInitResult =
   | {
       isReady: false;
       needsSetup: true;
-      defaultRelayUrl: string;
+      defaultRelayUrl?: string;
     }
   | { isReady: false; needsSetup: false; appliedKey: string | null }
   | { isReady: false; needsSetup: false; appliedKey: null; error: string };
@@ -101,65 +75,22 @@ export function useCommunityInit(
   // Track the previously-applied community ID so we can save its turn state
   // before resetting when the user switches to a different community.
   const prevCommunityIdRef = useRef<string | null>(null);
-  // Deferred avatar work owns the relay captured when it was queued. A
-  // same-relay reconnect during onboarding must not cancel that work, while an
-  // actual relay boundary must clear both the queue and its presentation probe.
-  const appliedRelayUrlRef = useRef<string | null>(null);
+  // Track the daemon group whose local presentation state is active.
+  const appliedGroupIdRef = useRef<string | null>(null);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: name-only changes do not rebind the daemon group
   useEffect(() => {
     let cancelled = false;
 
     async function init() {
       if (!activeCommunity) {
-        try {
-          const defaultRelayUrl = await getDefaultRelayUrl();
-          const autoConnectDefaultRelay =
-            await autoConnectDefaultRelayEnabled();
-
-          // Internal builds explicitly opt into treating their reviewed default
-          // relay as the first community. Public builds retain community
-          // selection even when BUZZ_RELAY_URL is overridden at runtime.
-          if (
-            isSharedIdentity ||
-            (autoConnectDefaultRelay &&
-              shouldAutoConnectDefaultRelay(defaultRelayUrl))
-          ) {
-            const identity = await getIdentity();
-            if (cancelled) return;
-            const community = initFirstCommunity(
-              defaultRelayUrl,
-              identity.pubkey,
-            );
-            if (community && !cancelled) {
-              window.location.reload();
-              return;
-            }
-            if (!cancelled) {
-              setResult({
-                isReady: false,
-                needsSetup: true,
-                defaultRelayUrl,
-              });
-            }
-            return;
-          }
-
-          if (!cancelled) {
-            setResult({
-              isReady: false,
-              needsSetup: true,
-              defaultRelayUrl,
-            });
-          }
-        } catch {
-          if (!cancelled) {
-            setResult({
-              isReady: false,
-              needsSetup: true,
-              defaultRelayUrl: "ws://localhost:3000",
-            });
-          }
+        // M3 cutover: the packaged app has no default relay URL to resolve.
+        // The user adds a native x0x community through the setup dialog.
+        if (!cancelled) {
+          setResult({
+            isReady: false,
+            needsSetup: true,
+          });
         }
         return;
       }
@@ -188,40 +119,15 @@ export function useCommunityInit(
         }
         resetCommunityState({
           resetAvatarState:
-            appliedRelayUrlRef.current !== activeCommunity.relayUrl,
+            appliedGroupIdRef.current !== activeCommunity.groupId,
         });
       }
       hasInitializedRef.current = true;
-      appliedRelayUrlRef.current = activeCommunity.relayUrl;
+      appliedGroupIdRef.current = activeCommunity.groupId;
 
-      // Apply community config to the Tauri backend.
-      //
-      // Note: we deliberately do NOT pass an nsec here. The persisted
-      // `identity.key` file (resolved at startup by `resolve_persisted_identity`,
-      // and updated atomically by `import_identity`) is the single source of
-      // truth for the active key. Older builds stored the nsec in localStorage
-      // and re-applied it on every reload, which silently overwrote any
-      // imported key. `loadCommunities()` strips lingering `nsec` fields from
-      // legacy entries; this site refuses to apply one even if present.
       try {
-        await applyCommunity(
-          activeCommunity.relayUrl,
-          undefined,
-          activeCommunity.token,
-          activeCommunity.reposDir,
-          getOverrides().agentManagedProfiles === true,
-        );
+        await bindNativeGroup(activeCommunity.groupId);
       } catch (error) {
-        // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
-        // it as non-fatal (relay/keys apply, bad value not persisted, REPOS
-        // falls back to a real dir, a `repos-dir-error` toast surfaces it) and
-        // returns Ok, so the app boots into a working state where the user can
-        // fix the value in community settings. This catch now only fires on a
-        // genuine relay/key apply failure (e.g. an invalid nsec or a poisoned
-        // lock). For those, marking the community ready would render
-        // community-scoped UI against a backend that never applied — park on
-        // the loading gate (isReady:false, no appliedKey) instead.
-        console.error("Failed to apply community to backend:", error);
         if (!cancelled) {
           setResult({
             isReady: false,
@@ -230,36 +136,13 @@ export function useCommunityInit(
             error:
               error instanceof Error
                 ? error.message
-                : "Failed to apply community configuration",
+                : "Failed to activate native workspace",
           });
         }
         return;
       }
-
       if (!cancelled) {
-        // Refresh relay-derived media state only after the backend has installed
-        // this community's relay override. On cold launch, mediaUrl.ts may have
-        // eagerly cached the default relay origin before applyCommunity ran;
-        // leaving that stale value makes authenticated relay media look external
-        // and bypass the localhost proxy.
-        resetMediaCaches();
-
-        try {
-          const identity = await getIdentity();
-          if (cancelled) return;
-          initDraftStore(identity.pubkey, activeCommunity.relayUrl);
-        } catch (err) {
-          if (cancelled) return;
-          console.error(
-            "[useCommunityInit] getIdentity failed, draft store uninitialized:",
-            err,
-          );
-        }
-        // Restore any turn state saved for this community (a prior A→B round-
-        // trip). This runs after applyCommunity succeeds and before the app
-        // renders so components see the restored timers on first render.
         restoreActiveAgentTurnsForCommunity(activeCommunity.id);
-        // Prime the ref so the NEXT switch saves this community's state.
         prevCommunityIdRef.current = activeCommunity.id;
         setResult({
           isReady: true,
@@ -267,6 +150,7 @@ export function useCommunityInit(
           appliedKey: communityKey,
         });
       }
+      return;
     }
 
     void init();
@@ -276,8 +160,7 @@ export function useCommunityInit(
     };
   }, [
     activeCommunity?.id,
-    activeCommunity?.relayUrl,
-    activeCommunity?.token,
+    activeCommunity?.groupId,
     activeCommunity?.reposDir,
     isSharedIdentity,
     communityKey,

@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
-import { passThroughBackupStep } from "../helpers/onboarding";
 
 function runtime(
   id: "buzz-agent" | "claude" | "codex" | "goose",
@@ -38,8 +37,7 @@ function runtime(
 async function navigateToSetupPage(
   page: Parameters<typeof installMockBridge>[0],
 ) {
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
-  await passThroughBackupStep(page);
+  await page.getByRole("button", { name: "Get started" }).click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 }
 

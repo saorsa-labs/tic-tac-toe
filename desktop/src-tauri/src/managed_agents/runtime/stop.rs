@@ -20,13 +20,13 @@ pub(crate) fn managed_agent_runtime_keys<T>(
 }
 
 #[cfg(test)]
-pub(crate) fn managed_agent_runtime_relay_urls<T>(
+pub(crate) fn managed_agent_runtime_group_ids<T>(
     runtimes: &HashMap<ManagedAgentRuntimeKey, T>,
     pubkey: &str,
 ) -> Vec<String> {
     managed_agent_runtime_keys(runtimes, pubkey)
         .into_iter()
-        .map(|key| key.relay_url)
+        .map(|key| key.group_id)
         .collect()
 }
 
@@ -79,7 +79,7 @@ fn stop_managed_agent_pair(
         ) {
             eprintln!(
                 "buzz-desktop: failed to append stop marker for {} on {}: {error}",
-                record.pubkey, key.relay_url
+                record.pubkey, key.group_id
             );
         }
         Ok(())
@@ -163,7 +163,7 @@ pub fn stop_managed_agent_process(
     let mut errors = Vec::new();
     for key in keys {
         if let Err(error) = stop_managed_agent_pair(app, record, runtimes, &key) {
-            errors.push(format!("{}: {error}", key.relay_url));
+            errors.push(format!("{}: {error}", key.group_id));
         }
     }
 
@@ -174,6 +174,9 @@ pub fn stop_managed_agent_process(
     record.last_error = None;
     record.last_error_code = None;
     super::super::remove_agent_pid_file(app, &record.pubkey);
+    // Release this agent's dedicated x0xd child identity. Dropping the handle
+    // reaps the child process; identity/data dir persist for a re-provision.
+    crate::managed_agents::agent_identity::shutdown_managed_agent_child(&record.pubkey);
 
     if errors.is_empty() {
         Ok(())
@@ -190,44 +193,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_preserving_restart_targets_exact_original_relays() {
+    fn pair_preserving_restart_targets_exact_original_groups() {
         let agent = "aa".repeat(32);
         let other = "bb".repeat(32);
-        let first = ManagedAgentRuntimeKey::new(&agent, "wss://one.example").unwrap();
-        let second = ManagedAgentRuntimeKey::new(&agent, "wss://two.example").unwrap();
-        let unrelated = ManagedAgentRuntimeKey::new(other, "wss://fallback.example").unwrap();
+        let first = ManagedAgentRuntimeKey::new(&agent, "group-one").unwrap();
+        let second = ManagedAgentRuntimeKey::new(&agent, "group-two").unwrap();
+        let unrelated = ManagedAgentRuntimeKey::new(other, "group-fallback").unwrap();
         let runtimes = HashMap::from([(first, ()), (second, ()), (unrelated, ())]);
 
-        let mut relays = managed_agent_runtime_relay_urls(&runtimes, &agent);
-        relays.sort();
+        let mut groups = managed_agent_runtime_group_ids(&runtimes, &agent);
+        groups.sort();
         assert_eq!(
-            relays,
-            vec![
-                "wss://one.example".to_string(),
-                "wss://two.example".to_string()
-            ]
+            groups,
+            vec!["group-one".to_string(), "group-two".to_string()]
         );
     }
 
     #[test]
     fn pair_scoped_selection_targets_only_the_exact_pair() {
         // stop_managed_agent_workspace_pair resolves one key and removes only
-        // that map entry: the same agent's pair on another relay and other
+        // that map entry: the same agent's pair in another group and other
         // agents' pairs must survive a pair-scoped stop.
         let agent = "aa".repeat(32);
         let other = "bb".repeat(32);
-        let viewed = ManagedAgentRuntimeKey::new(&agent, "wss://one.example").unwrap();
-        let elsewhere = ManagedAgentRuntimeKey::new(&agent, "wss://two.example").unwrap();
-        let unrelated = ManagedAgentRuntimeKey::new(other, "wss://one.example").unwrap();
+        let viewed = ManagedAgentRuntimeKey::new(&agent, "group-one").unwrap();
+        let elsewhere = ManagedAgentRuntimeKey::new(&agent, "group-two").unwrap();
+        let unrelated = ManagedAgentRuntimeKey::new(other, "group-one").unwrap();
         let mut runtimes = HashMap::from([
             (viewed.clone(), ()),
             (elsewhere.clone(), ()),
             (unrelated.clone(), ()),
         ]);
 
-        // Non-canonical spelling of the viewed workspace relay resolves to
-        // the same canonical key that spawn stamped.
-        let resolved = ManagedAgentRuntimeKey::new(&agent, "WSS://One.Example:443/").unwrap();
+        // The viewed group id resolves to the exact key spawn stamped.
+        let resolved = ManagedAgentRuntimeKey::new(&agent, "group-one").unwrap();
         assert_eq!(resolved, viewed);
         assert!(runtimes.remove(&resolved).is_some());
         assert!(runtimes.contains_key(&elsewhere));
@@ -238,13 +237,13 @@ mod tests {
     fn agent_wide_selection_drains_every_pair_only_for_that_agent() {
         let agent = "aa".repeat(32);
         let other = "bb".repeat(32);
-        let first = ManagedAgentRuntimeKey::new(&agent, "wss://one.example").unwrap();
-        let second = ManagedAgentRuntimeKey::new(&agent, "wss://two.example").unwrap();
-        let unrelated = ManagedAgentRuntimeKey::new(other, "wss://one.example").unwrap();
+        let first = ManagedAgentRuntimeKey::new(&agent, "group-one").unwrap();
+        let second = ManagedAgentRuntimeKey::new(&agent, "group-two").unwrap();
+        let unrelated = ManagedAgentRuntimeKey::new(other, "group-one").unwrap();
         let runtimes = HashMap::from([(first.clone(), ()), (second.clone(), ()), (unrelated, ())]);
 
         let mut selected = managed_agent_runtime_keys(&runtimes, &agent);
-        selected.sort_by(|left, right| left.relay_url.cmp(&right.relay_url));
+        selected.sort_by(|left, right| left.group_id.cmp(&right.group_id));
         assert_eq!(selected, vec![first, second]);
     }
 }

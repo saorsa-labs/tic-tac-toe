@@ -129,7 +129,7 @@ export function AgentsScreen() {
           {profilePanelTarget ? (
             <UserProfilePanel
               canResetWidth={threadPanelWidth.canReset}
-              currentPubkey={identityQuery.data?.pubkey}
+              currentAgentId={identityQuery.data?.agentId}
               onClose={handleCloseProfilePanel}
               onOpenDm={handleOpenDm}
               onOpenProfile={handleOpenProfilePanel}

@@ -91,7 +91,7 @@ export function profilePanelTabFromSearch(value: unknown): ProfilePanelTab {
 export type UserProfilePanelProps = {
   callerChannelId?: string | null;
   canResetWidth?: boolean;
-  currentPubkey?: string;
+  currentAgentId?: string;
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
   onClose: () => void;
@@ -237,16 +237,16 @@ export function resolveProfileDisplayName({
 
 export function resolveOwnerHandle(
   profile: Profile | undefined,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
 ) {
-  if (currentPubkey === undefined) {
+  if (currentAgentId === undefined) {
     return null;
   }
 
   return (
     profile?.nip05Handle?.trim() ||
     profile?.displayName?.trim() ||
-    truncatePubkey(currentPubkey)
+    truncatePubkey(currentAgentId)
   );
 }
 

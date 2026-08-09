@@ -17,7 +17,7 @@ import {
   channelsQueryKey,
   useRemoveChannelMemberMutation,
 } from "@/features/channels/hooks";
-import { removeChannelMember } from "@/shared/api/tauri";
+import { removeChannelMember } from "@/shared/api/tauriChannels";
 import type {
   ChannelMember,
   ManagedAgent,
@@ -28,29 +28,24 @@ type UseMembersSidebarActionsOptions = {
   channelId: string | null;
   controllableManagedBots: readonly ManagedAgent[];
   removableManagedBots: readonly ManagedAgent[];
-  currentPubkey?: string;
+  currentAgentId?: string;
   onOpenChange: (open: boolean) => void;
-  /** Active community relay. When set, local-agent lifecycle actions are
-   * scoped to this agent+community pair instead of the whole agent. */
-  relayUrl?: string;
+  /** Active native group. Local-agent lifecycle actions are scoped to this
+   * agent+group pair instead of the whole agent. */
+  groupId?: string;
 };
 
 type BulkAgentActionResult = {
   cancelled?: boolean;
 };
 
-const EMPTY_AGENT_CONTEXT = {
-  channels: [],
-  relayAgents: [],
-} as const;
-
 export function useMembersSidebarActions({
   channelId,
   controllableManagedBots,
   removableManagedBots,
-  currentPubkey,
+  currentAgentId,
   onOpenChange,
-  relayUrl,
+  groupId,
 }: UseMembersSidebarActionsOptions) {
   const queryClient = useQueryClient();
   const removeMemberMutation = useRemoveChannelMemberMutation(channelId);
@@ -148,14 +143,16 @@ export function useMembersSidebarActions({
     try {
       // Local agents run one harness per agent+community pair. Scope the
       // action to the active community so stopping the agent here never
-      // touches its runtimes in other communities. Provider agents keep the
-      // agent-wide deploy/!shutdown flow below.
-      if (agent.backend.type === "local" && relayUrl) {
+      // touches its runtimes in other communities. Provider (remote) agents
+      // have no native undeploy, so stopManagedAgentWithRules refuses their
+      // stop — and the primary-action control is hidden for an already-
+      // deployed provider (see getManagedAgentPrimaryActionLabel).
+      if (agent.backend.type === "local" && groupId) {
         const action = managedAgentPairAction(runtime);
         await runtimeActionMutation.mutateAsync({
           action,
           pubkey: agent.pubkey,
-          relayUrl,
+          groupId,
         });
         setActionNoticeMessage(
           action === "stop"
@@ -170,15 +167,9 @@ export function useMembersSidebarActions({
       if (isManagedAgentActive(agent)) {
         await stopManagedAgentWithRules({
           agent,
-          ...EMPTY_AGENT_CONTEXT,
-          preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
         });
-        setActionNoticeMessage(
-          agent.backend.type === "provider"
-            ? `Shutdown command sent to ${agent.name}.`
-            : `Stopped ${agent.name}.`,
-        );
+        setActionNoticeMessage(`Stopped ${agent.name}.`);
         return;
       }
 
@@ -219,19 +210,13 @@ export function useMembersSidebarActions({
       action: (agent) =>
         stopManagedAgentWithRules({
           agent,
-          ...EMPTY_AGENT_CONTEXT,
-          preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
         }),
       actionKey: "bulk-stop",
       agents: stoppableManagedBots,
       failureMessage: "Failed to stop agent.",
       successMessage: (count) =>
-        `Stopped or requested shutdown for ${formatCountLabel(
-          count,
-          "agent",
-          "agents",
-        )}.`,
+        `Stopped ${formatCountLabel(count, "agent", "agents")}.`,
     });
   }
 
@@ -257,7 +242,7 @@ export function useMembersSidebarActions({
       void removeMemberMutation
         .mutateAsync(member.pubkey)
         .then(() => {
-          if (member.pubkey === currentPubkey) {
+          if (member.pubkey === currentAgentId) {
             onOpenChange(false);
           }
         })
@@ -270,7 +255,7 @@ export function useMembersSidebarActions({
           setActiveActionKey(null);
         });
     },
-    [clearActionFeedback, currentPubkey, onOpenChange, removeMemberMutation],
+    [clearActionFeedback, currentAgentId, onOpenChange, removeMemberMutation],
   );
 
   async function removeManagedBotMembership(pubkey: string) {

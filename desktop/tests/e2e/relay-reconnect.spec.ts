@@ -100,21 +100,36 @@ test("failed initial relay dial retries automatically", async ({ page }) => {
   });
   await page.goto("/");
 
+  // The relay state seam is registered by the app once the relay client boots,
+  // which lands after the initial navigation resolves. expect.poll propagates a
+  // thrown error from the first sample instead of retrying it, so probing the
+  // value before the seam exists flakes as "Relay state seam is not installed".
+  // Wait on that seam-ready boundary before reading it; waiting (not catching a
+  // missing seam as a successful retry) keeps the assertion honest — a seam
+  // that is genuinely never installed still times out and fails here.
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+        }
+      ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ === "function",
+    { timeout: 10_000 },
+  );
+
   // App-shell preconnect owns a keep-alive request. The first native dial is
   // rejected before a socket ID exists; the session must still enter its
   // backoff loop and recover without a click, query, or reload.
   await expect
     .poll(
       () =>
-        page.evaluate(() => {
-          const getState = (
+        page.evaluate(() =>
+          (
             window as Window & {
-              __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+              __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__: () => string;
             }
-          ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__;
-          if (!getState) throw new Error("Relay state seam is not installed.");
-          return getState();
-        }),
+          ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__(),
+        ),
       { timeout: 10_000 },
     )
     .toBe("connected");

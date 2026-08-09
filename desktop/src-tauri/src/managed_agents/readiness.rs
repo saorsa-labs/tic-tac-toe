@@ -135,11 +135,6 @@ pub(crate) fn resolve_effective_agent_env(
     );
     env.extend(user_env);
 
-    // Buzz shared compute is a native Buzz provider. Translate it to buzz-agent's
-    // OpenAI-compatible transport only in the effective runtime environment.
-    #[cfg(feature = "mesh-llm")]
-    super::apply_relay_mesh_env(&mut env, effective_provider, effective_model);
-
     EffectiveAgentEnv {
         env,
         config_file_path: runtime.and_then(|r| r.config_file_path),
@@ -1294,9 +1289,6 @@ mod tests {
             pubkey: "test-pubkey".to_string(),
             name: "test-agent".to_string(),
             persona_id: None,
-            private_key_nsec: String::new(),
-            auth_tag: None,
-            relay_url: String::new(),
             avatar_url: None,
             acp_command: "buzz-acp".to_string(),
             agent_command: "buzz-agent".to_string(),
@@ -1341,7 +1333,6 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
-            relay_mesh: None,
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");

@@ -181,7 +181,7 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
             "provider": "databricks",
             "env_vars": {
                 "OPENAI_API_KEY": "record-key",
-                "BUZZ_PRIVATE_KEY": "must-not-leak"
+                "BUZZ_API_TOKEN": "must-not-leak"
             },
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
@@ -209,7 +209,7 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
         config.env.get("OPENAI_API_KEY").map(String::as_str),
         Some("record-key")
     );
-    assert!(!config.env.contains_key("BUZZ_PRIVATE_KEY"));
+    assert!(!config.env.contains_key("BUZZ_API_TOKEN"));
 }
 
 // ---------------------------------------------------------------------------

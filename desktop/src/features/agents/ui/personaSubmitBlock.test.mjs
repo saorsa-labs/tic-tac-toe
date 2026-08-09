@@ -7,7 +7,6 @@ import { personaSubmitBlock } from "./personaSubmitBlock.ts";
 function submittable(overrides = {}) {
   return {
     isPending: false,
-    isAvatarUploadPending: false,
     displayNameEmpty: false,
     isCreateMode: true,
     runtimeChosen: true,
@@ -146,15 +145,11 @@ test("precedence: a missing name outranks incomplete AI defaults", () => {
   );
 });
 
-test("in-flight save/upload shows no reason (the button label communicates it)", () => {
+test("in-flight save shows no reason (the button label communicates it)", () => {
   assert.equal(
     personaSubmitBlock(
       submittable({ isPending: true, displayNameEmpty: true }),
     ),
-    null,
-  );
-  assert.equal(
-    personaSubmitBlock(submittable({ isAvatarUploadPending: true })),
     null,
   );
 });

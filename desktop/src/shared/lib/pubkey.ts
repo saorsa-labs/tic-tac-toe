@@ -9,13 +9,14 @@ export function normalizePubkey(pubkey: string): string {
 }
 
 /**
- * The ONE canonical compact display form for a pubkey: `abcd1234…wxyz`.
+ * The ONE canonical compact display form for a relay pubkey: `abcd1234…wxyz`.
  *
- * A truncated pubkey is a recognition aid, never an identity proof — vanity
- * grinders forge short prefixes cheaply. Surfaces where the user makes a
- * trust decision must show the full npub (see `<PubKey variant="full">`).
- * Do not hand-roll `pubkey.slice(…)` display forms; `check-pubkey-truncation`
- * fails the build if one sneaks in outside this module.
+ * A truncated relay pubkey is a recognition aid for internal/member fallback
+ * naming, never an identity proof. The x0x displayed identity is the AgentId +
+ * four speakable words (see `<AgentIdentity>`); this helper is retained for
+ * internal relay-pubkey fallbacks and accessibility labels only. Do not
+ * hand-roll `pubkey.slice(…)` display forms; `check-pubkey-truncation` fails
+ * the build if one sneaks in outside this module.
  */
 export function truncatePubkey(pubkey: string): string {
   if (pubkey.length <= 12) {

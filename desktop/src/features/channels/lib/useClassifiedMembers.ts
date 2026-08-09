@@ -12,7 +12,7 @@ import { compareMembersByRole } from "./memberUtils";
 
 export function useClassifiedMembers(
   members: ChannelMember[],
-  currentPubkey?: string,
+  currentAgentId?: string,
 ) {
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -71,7 +71,7 @@ export function useClassifiedMembers(
 
     const sort = (list: ChannelMember[]) =>
       [...list].sort((left, right) =>
-        compareMembersByRole(left, right, currentPubkey),
+        compareMembersByRole(left, right, currentAgentId),
       );
 
     return {
@@ -79,7 +79,7 @@ export function useClassifiedMembers(
       bots: sort(botList),
       archived: sort(archivedList),
     };
-  }, [currentPubkey, isArchived, isBot, members]);
+  }, [currentAgentId, isArchived, isBot, members]);
 
   return {
     people,

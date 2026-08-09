@@ -2,50 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  ReadStateManager,
   applyRemoteContextTimestamp,
   resolveEffectiveTimestamp,
   splitContextsIntoBudgetedSlots,
   trimContextsToBudget,
 } from "./readStateManager.ts";
-
-// ── ReadStateManager integration helpers ─────────────────────────────────────
-// Provide browser globals required by ReadStateManager (localStorage,
-// window.setTimeout/clearTimeout). Each test that uses ReadStateManager
-// constructs a fresh in-memory store so tests are isolated.
-
-function makeLocalStorage() {
-  const store = new Map();
-  return {
-    getItem: (key) => store.get(key) ?? null,
-    setItem: (key, value) => store.set(key, value),
-    removeItem: (key) => store.delete(key),
-  };
-}
-
-// Install browser globals required by ReadStateManager. window.localStorage is
-// replaced per-test for isolation; the bare `localStorage` global proxies to it.
-{
-  const ls = makeLocalStorage();
-  if (typeof globalThis.window === "undefined") {
-    globalThis.window = {
-      localStorage: ls,
-      clearTimeout: (id) => clearTimeout(id),
-      setTimeout: (fn, ms) => setTimeout(fn, ms),
-    };
-  } else {
-    globalThis.window.localStorage = ls;
-    if (!globalThis.window.clearTimeout) {
-      globalThis.window.clearTimeout = (id) => clearTimeout(id);
-      globalThis.window.setTimeout = (fn, ms) => setTimeout(fn, ms);
-    }
-  }
-  // Ensure bare `localStorage` always proxies to window.localStorage.
-  Object.defineProperty(globalThis, "localStorage", {
-    get: () => globalThis.window.localStorage,
-    configurable: true,
-  });
-}
 
 const threadKey = `thread:${"a".repeat(64)}`;
 const channelKey = "channel-1";
@@ -509,71 +470,4 @@ test("splitContextsIntoBudgetedSlots_threadMsgTrimmedWhenPrimarySlotOverBudget",
   // Slot 0 must fit within budget.
   const size = blobSize(CLIENT_ID, result.slots[0]);
   assert.ok(size <= budget, `slot 0 size ${size} exceeds budget ${budget}`);
-});
-
-// ── ReadStateManager.publish — no-op suppression in split mode ────────────────
-
-// Verify that publishSplitSlots returns early (no relay writes) when the
-// union of all slot contexts is identical to lastPublishedContexts.
-//
-// Strategy: construct a ReadStateManager with enough channel keys to force
-// split mode, then mock publishOneSlot (private, accessed via bracket notation)
-// to avoid tauri calls while still simulating its effect on lastPublishedContexts.
-// Call publish() twice with the same effectiveState and assert that
-// publishOneSlot is called only on the first publish (no-op on the second).
-test("publishSplitSlots_noopSuppression_skipsWhenUnchanged", async () => {
-  // Isolate localStorage so slot IDs don't leak between tests.
-  globalThis.window.localStorage = makeLocalStorage();
-
-  const fakeRelay = {
-    fetchEvents: async () => [],
-    publishEvent: async () => {},
-    subscribeLive: () => () => {},
-  };
-
-  const pubkey = "b".repeat(64);
-  const mgr = new ReadStateManager(pubkey, fakeRelay);
-
-  // Add enough channel keys to exceed the 32KB single-slot budget.
-  // Each key is ~70 bytes in the blob; 700 keys ≈ 49KB > 32KB.
-  const ts = 1_000_000;
-  for (let i = 0; i < 700; i++) {
-    const channelId = `channel-${i.toString().padStart(64, "0")}`;
-    mgr.markContextRead(channelId, ts);
-  }
-
-  // Confirm split mode: currentContexts() must return null.
-  assert.equal(
-    mgr.currentContexts(),
-    null,
-    "precondition: 700 channel keys must exceed single-slot budget",
-  );
-
-  // Replace publishOneSlot with a stub that records calls and simulates the
-  // lastPublishedContexts merge (the only side-effect the no-op check depends
-  // on). This avoids tauri (nip44EncryptToSelf / signRelayEvent) while keeping
-  // the suppression logic under test.
-  let publishOneSlotCallCount = 0;
-  mgr.publishOneSlot = async (_slotId, contexts) => {
-    publishOneSlotCallCount++;
-    for (const [key, tsVal] of Object.entries(contexts)) {
-      mgr.lastPublishedContexts[key] = tsVal;
-    }
-  };
-
-  // First publish: contexts differ from lastPublishedContexts ({}) → must publish.
-  await mgr.publish();
-  const callsAfterFirst = publishOneSlotCallCount;
-  assert.ok(callsAfterFirst > 0, "first publish must call publishOneSlot");
-
-  // Second publish with identical effectiveState: union equals lastPublishedContexts
-  // → no-op suppression must fire → publishOneSlot must NOT be called again.
-  await mgr.publish();
-  assert.equal(
-    publishOneSlotCallCount,
-    callsAfterFirst,
-    "second publish with unchanged state must not call publishOneSlot (no-op suppression)",
-  );
-
-  mgr.destroy();
 });

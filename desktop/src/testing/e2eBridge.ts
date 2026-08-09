@@ -1,11 +1,6 @@
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import { decode } from "nostr-tools/nip19";
-import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 
-import { relayClient } from "@/shared/api/relayClient";
-import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
@@ -53,7 +48,6 @@ import type {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type TestIdentity = {
-  privateKey: string;
   pubkey: string;
   username: string;
 };
@@ -135,34 +129,6 @@ type E2eConfig = {
   mock?: {
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
-    /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
-    builderlabAuth?: {
-      email?: string;
-      name?: string;
-      expiresAt: string;
-    } | null;
-    /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
-    builderlabLoginDelayMs?: number;
-    /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
-    builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
-    /** Structured error returned when onboarding tries to bind the local identity. */
-    builderlabBindError?: { code?: string; message?: string };
-    /** Communities owned by the mocked Builderlab account. */
-    builderlabCommunities?: Array<{
-      id?: string;
-      name?: string;
-      slug?: string;
-      normalized_host?: string;
-      archived_at?: string | null;
-    }>;
-    /** Override the community returned after hosted creation. */
-    builderlabCreatedCommunity?: {
-      id?: string;
-      name?: string;
-      slug?: string;
-      normalized_host?: string;
-      archived_at?: string | null;
-    };
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     /** Catalog returned after a successful mocked install. */
     acpRuntimesCatalogAfterInstall?: RawAcpRuntimeCatalogEntry[];
@@ -250,8 +216,6 @@ type E2eConfig = {
     autoUpdateSupported?: boolean;
     /** Reject `plugin:opener|open_url` to exercise browser-return fallback UI. */
     openerError?: string;
-    /** Delay binding signatures so specs can exercise request supersession. */
-    nostrBindSignDelayMs?: number;
     /** Reject successive mock WebSocket connect attempts, then resume. */
     websocketConnectErrors?: string[];
     stallWebsocketSends?: boolean;
@@ -300,44 +264,9 @@ type E2eConfig = {
      */
     snapshotFetchError?: string;
     uploadDescriptors?: RawBlobDescriptor[];
-    // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
-    // snake_case wire shape the Rust backend returns so tests can drive the
-    // LocalArchiveSettingsCard without a real SQLite database.
-    observerArchiveDefaultEnabled?: boolean;
-    /**
-     * Delay (ms) applied to `observer_archive_default_enabled` so E2E tests
-     * can observe the pending-reconciliation state (toggle disabled, no
-     * archive-manager `list_save_subscriptions` call) before the policy
-     * resolves. 0/undefined = instant.
-     */
-    observerArchiveDefaultEnabledDelayMs?: number;
-    /**
-     * When set, `observer_archive_default_enabled` throws with this message
-     * instead of resolving — drives the fail-closed `.catch()` path in
-     * `useObserverArchiveReconciliation` / `LocalArchiveSettingsCard`.
-     */
-    observerArchiveDefaultEnabledError?: string;
-    agentMetricArchiveDefaultEnabled?: boolean;
-    saveSubscriptions?: Array<{
-      scope_type: string;
-      scope_value: string;
-      kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
-    }>;
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
-    // Pending community deep links (buzz://join / buzz://connect / buzz://add-community) seeded into
-    // the mocked Rust-side queue. Mirrors the real queue's semantics:
-    // `take_pending_community_deep_link` peeks the head and
-    // `acknowledge_pending_community_deep_link` removes by id. Drives the
-    // pending-invite gate and deep-link drain path in tests.
-    pendingCommunityDeepLinks?: Array<{
-      id: string;
-      kind: "connect" | "join" | "add-community";
-      relayUrl: string;
-      code?: string | null;
-      name?: string | null;
-    }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -368,17 +297,6 @@ type E2eConfig = {
      *  autosave behaviour while a request is in flight. 0/undefined = instant.
      *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
     setGlobalAgentConfigDelayMs?: number;
-    /**
-     * When set, `get_nsec` throws with this message instead of returning the
-     * mock nsec string. Use `nsecErrors` for sequenced failure/success.
-     */
-    nsecError?: string;
-    /**
-     * Sequenced results for `get_nsec`. Each element is either a string
-     * (error message) or null (success — returns the default mock nsec).
-     * Call N uses results[N]; when exhausted the last entry repeats.
-     */
-    nsecErrors?: (string | null)[];
     /**
      * The `restarted_count` returned by `set_global_agent_config`. Defaults to
      * 0 (no agents restarted). Set to a positive integer to drive the
@@ -722,7 +640,6 @@ type RawManagedAgent = {
 
 type RawCreateManagedAgentResponse = {
   agent: RawManagedAgent;
-  private_key_nsec: string;
   profile_sync_error: string | null;
   spawn_error: string | null;
 };
@@ -793,7 +710,6 @@ type RawTeam = {
 };
 
 type MockManagedAgent = RawManagedAgent & {
-  private_key_nsec: string;
   log_lines: string[];
 };
 
@@ -1037,8 +953,6 @@ declare global {
       can_pull: boolean;
       pull_block_reason: string | null;
     };
-    __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
-    __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
@@ -1165,14 +1079,12 @@ const REACTION_TARGET_CONTENT = "React to me with a custom emoji";
 // id so it is a valid reaction target and never collides with the regular
 // REACTION_TARGET_EVENT_ID.
 const SYSTEM_REACTION_TARGET_EVENT_ID = "e".repeat(64);
-const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
+const MOCK_IDENTITY_WORDS = ["bodily", "example", "dismiss", "galaxy"];
 const DEFAULT_MOCK_IDENTITY = {
-  pubkey: "deadbeef".repeat(8),
-  display_name: "npub1mock...",
+  agent_id: "dd6530452610619d468e4e82be82107e86384365c58efa6e3018d7762c7368da",
+  identity_words: MOCK_IDENTITY_WORDS,
 };
 const DEFAULT_REAL_IDENTITY = {
-  privateKey:
-    "3dbaebadb5dfd777ff25149ee230d907a15a9e1294b40b830661e65bb42f6c03",
   pubkey: "e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34",
   username: "tyler",
 } satisfies TestIdentity;
@@ -1193,7 +1105,7 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 // path that `mira` (profile-only) and managed-agent fixtures cover.
 const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
-const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
+const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.agent_id;
 const STARTER_GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const STARTER_WELCOME_CHANNEL_ID = "5f0b1b3c-2a37-5366-9b8c-31a4b21d8e77";
 const STARTER_GENERAL_CHANNEL_NAME = "general";
@@ -1204,7 +1116,7 @@ const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
 // load (module re-evaluation), so tests start in a clean state.
 let mockIdentityLostCleared = false;
 // Same pattern for `mock.identityLocked`.
-let mockIdentityLockedCleared = false;
+const mockIdentityLockedCleared = false;
 
 // ── get_event defer/release seam ────────────────────────────────────────────
 // When `window.__BUZZ_E2E_DEFER_GET_EVENT__` is set to a target event ID,
@@ -1222,7 +1134,7 @@ type DeferredGetEvent = {
 let deferredGetEventQueue: DeferredGetEvent[] = [];
 
 const mockDisplayNames = new Map<string, string>([
-  [MOCK_IDENTITY_PUBKEY, DEFAULT_MOCK_IDENTITY.display_name],
+  [MOCK_IDENTITY_PUBKEY, MOCK_IDENTITY_WORDS.join(" ")],
   [ALICE_PUBKEY, "alice"],
   [BOB_PUBKEY, "bob"],
   [CHARLIE_PUBKEY, "charlie"],
@@ -1254,7 +1166,7 @@ function toRawChannel(
   channel: MockChannel,
   config?: E2eConfig,
 ): RawChannelWithMembership {
-  const currentPubkey = getMockMemberPubkey(config).toLowerCase();
+  const currentAgentId = getMockMemberPubkey(config).toLowerCase();
 
   return {
     id: channel.id,
@@ -1273,7 +1185,7 @@ function toRawChannel(
     ttl_seconds: channel.ttl_seconds ?? null,
     ttl_deadline: channel.ttl_deadline ?? null,
     is_member: channel.members.some(
-      (member) => member.pubkey.toLowerCase() === currentPubkey,
+      (member) => member.pubkey.toLowerCase() === currentAgentId,
     ),
   };
 }
@@ -1394,7 +1306,7 @@ function findMockDmByParticipantPubkeys(pubkeys: string[]) {
 function getMockIdentity() {
   return {
     pubkey: MOCK_IDENTITY_PUBKEY,
-    displayName: DEFAULT_MOCK_IDENTITY.display_name,
+    displayName: MOCK_IDENTITY_WORDS.join(" "),
   };
 }
 
@@ -1979,7 +1891,6 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
     respond_to_allowlist: seed.respondToAllowlist ?? [],
-    private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
       "profile created; harness not started",
@@ -2728,28 +2639,6 @@ const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
 
-// Mutable `save_subscriptions` table mirror — TEST-ONLY.
-//
-// Cloned from `activeConfig.mock.saveSubscriptions` at install time, then
-// mutated by `create_save_subscription` / `delete_save_subscription` /
-// `merge_save_subscription_kinds` / `remove_save_subscription_kind` exactly
-// as the real SQLite-backed Rust commands would (see `archive/store.rs`).
-// This lets E2E specs drive the fresh-internal-repair path (start from `[]`,
-// reconcile, observe a kind-24200 row appear) and OSS toggle ON/OFF, neither
-// of which an immutable seed can represent.
-type MockSaveSubscriptionRow = {
-  scope_type: string;
-  scope_value: string;
-  kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
-};
-let mockSaveSubscriptions: MockSaveSubscriptionRow[] = [];
-
-function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
-  mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
-    ...s,
-  }));
-}
-
 // Mesh-compute mock state — TEST-ONLY.
 //
 // This entire module (e2eBridge.ts) is loaded only when `window.__BUZZ_E2E__`
@@ -3055,7 +2944,7 @@ const mockProfiles = new Map<string, RawProfile>([
     MOCK_IDENTITY_PUBKEY,
     {
       pubkey: MOCK_IDENTITY_PUBKEY,
-      display_name: DEFAULT_MOCK_IDENTITY.display_name,
+      display_name: MOCK_IDENTITY_WORDS.join(" "),
       avatar_url: null,
       about: null,
       nip05_handle: null,
@@ -3160,79 +3049,6 @@ function getConfig(): E2eConfig | undefined {
   return window.__BUZZ_E2E__;
 }
 
-function readStoredIdentityOverride(): TestIdentity | undefined {
-  try {
-    const rawValue = window.localStorage.getItem(
-      E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
-    );
-    if (!rawValue) {
-      return undefined;
-    }
-
-    const parsed = JSON.parse(rawValue);
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      typeof parsed.privateKey !== "string" ||
-      typeof parsed.pubkey !== "string" ||
-      typeof parsed.username !== "string"
-    ) {
-      return undefined;
-    }
-
-    return {
-      privateKey: parsed.privateKey,
-      pubkey: parsed.pubkey,
-      username: parsed.username,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function writeStoredIdentityOverride(identity: TestIdentity) {
-  window.localStorage.setItem(
-    E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
-    JSON.stringify(identity),
-  );
-}
-
-function importMockIdentity(nsec: string) {
-  const decoded = decode(nsec.trim());
-  if (decoded.type !== "nsec") {
-    throw new Error("Invalid Nostr private key.");
-  }
-
-  const privateKey = bytesToHex(decoded.data);
-  const pubkey = getPublicKey(decoded.data);
-  const username = mockDisplayNames.get(pubkey) ?? "";
-  const identity = {
-    privateKey,
-    pubkey,
-    username,
-  };
-  writeStoredIdentityOverride(identity);
-  if (!mockProfiles.has(pubkey)) {
-    mockProfiles.set(pubkey, {
-      pubkey,
-      display_name: username || null,
-      avatar_url: null,
-      about: null,
-      nip05_handle: null,
-      owner_pubkey: null,
-      // A non-empty username means this identity is registered in
-      // mockDisplayNames — it has a real mock relay profile (kind:0).
-      // A truly new identity (no username) has no event yet.
-      has_profile_event: username.length > 0,
-    });
-  }
-
-  return {
-    pubkey,
-    display_name: username,
-  };
-}
-
 function isRelayMode(config: E2eConfig | undefined): boolean {
   return config?.mode === "relay";
 }
@@ -3254,7 +3070,7 @@ function getIdentity(config: E2eConfig | undefined): TestIdentity | undefined {
 }
 
 function getActiveIdentity(config: E2eConfig | undefined) {
-  return readStoredIdentityOverride() ?? getIdentity(config);
+  return getIdentity(config);
 }
 
 function ensureMockProfile(config: E2eConfig | undefined): RawProfile {
@@ -3458,7 +3274,7 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
       ? [
           {
             id: "mock-general-welcome",
-            pubkey: DEFAULT_MOCK_IDENTITY.pubkey,
+            pubkey: DEFAULT_MOCK_IDENTITY.agent_id,
             created_at: Math.floor(Date.now() / 1000) - 120,
             kind: 9,
             tags: [["h", channelId]],
@@ -3781,28 +3597,6 @@ function hasMockLiveSubscription(channelId: string, kind?: number) {
   return false;
 }
 
-/**
- * True iff a live REQ subscription is open with an `#p` filter containing
- * `ownerPubkey` and a `kinds` filter containing `kind`. Used to assert the
- * observer-archive reconciliation gate actually opens an owner-scoped live
- * filter (not just that `list_save_subscriptions` was called) once the
- * gate resolves.
- */
-function hasMockOwnerKindSubscription(ownerPubkey: string, kind: number) {
-  for (const socket of mockSockets.values()) {
-    for (const subscription of socket.subscriptions.values()) {
-      if (
-        subscription.ownerPubkeys.includes(ownerPubkey) &&
-        (subscription.kinds?.includes(kind) ?? false)
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
 function recordMockMessage(channelId: string, event: RelayEvent) {
   const history = getMockMessageStore(channelId);
   history.push(event);
@@ -3818,25 +3612,6 @@ function recordMockMessage(channelId: string, event: RelayEvent) {
 
 function resetMockUserStatuses() {
   mockUserStatuses.length = 0;
-}
-
-// Mocked Rust-side pending deep-link queue (see desktop/src-tauri/src/deep_link.rs).
-let mockPendingCommunityDeepLinks: Array<{
-  id: string;
-  kind: string;
-  relayUrl: string;
-  code: string | null;
-  name: string | null;
-}> = [];
-
-function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
-  mockPendingCommunityDeepLinks = (
-    config?.mock?.pendingCommunityDeepLinks ?? []
-  ).map((pending) => ({
-    ...pending,
-    code: pending.code ?? null,
-    name: pending.name ?? null,
-  }));
 }
 
 function recordMockUserStatus(event: RelayEvent) {
@@ -3891,7 +3666,7 @@ function emitMockChannelMessage(
     const tags = buildTopLevelMessageTags(
       channelId,
       mentionPubkeys,
-      pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
+      pubkey ?? DEFAULT_MOCK_IDENTITY.agent_id,
     );
     if (extraTags) tags.push(...extraTags);
     const event = createMockEvent(
@@ -3917,7 +3692,7 @@ function emitMockChannelMessage(
         rootEventId: null,
       };
   const rootEventId = parentThread.rootEventId ?? parentEventId;
-  const authorPubkey = pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey;
+  const authorPubkey = pubkey ?? DEFAULT_MOCK_IDENTITY.agent_id;
   const tags = buildReplyMessageTags(
     channelId,
     authorPubkey,
@@ -4412,7 +4187,7 @@ function buildMockChannelThreadSummary(
   const lastReplyAt = Math.max(...replies.map((event) => event.created_at));
   return {
     id: `mock-window-summary-${root.id}`,
-    pubkey: DEFAULT_MOCK_IDENTITY.pubkey,
+    pubkey: DEFAULT_MOCK_IDENTITY.agent_id,
     created_at: Math.floor(Date.now() / 1000),
     kind: KIND_CHANNEL_THREAD_SUMMARY,
     tags: [
@@ -4451,7 +4226,7 @@ function buildMockChannelWindowBounds(
   const boundsKey = `${args.channelId.toLowerCase()}:${suffix}`;
   return {
     id: `mock-window-bounds-${boundsKey}`,
-    pubkey: DEFAULT_MOCK_IDENTITY.pubkey,
+    pubkey: DEFAULT_MOCK_IDENTITY.agent_id,
     created_at: Math.floor(Date.now() / 1000),
     kind: KIND_CHANNEL_WINDOW_BOUNDS,
     tags: [["d", boundsKey]],
@@ -4590,7 +4365,7 @@ async function handleGetChannelWindow(
 function getMockUserNotes(pubkey: string): RawUserNote[] {
   const now = Math.floor(Date.now() / 1000);
 
-  if (pubkey === DEFAULT_MOCK_IDENTITY.pubkey) {
+  if (pubkey === DEFAULT_MOCK_IDENTITY.agent_id) {
     // Two named notes plus generated filler so the Pulse feed overflows the
     // viewport — required to exercise windowed scroll + sticky-composer offset.
     const named: RawUserNote[] = [
@@ -4689,7 +4464,7 @@ async function handleGetGlobalNotes(
   config: E2eConfig | undefined,
 ): Promise<RawUserNotesResponse> {
   const notes = [
-    ...getMockUserNotes(DEFAULT_MOCK_IDENTITY.pubkey),
+    ...getMockUserNotes(DEFAULT_MOCK_IDENTITY.agent_id),
     ...getMockUserNotes(ALICE_PUBKEY),
   ]
     .filter((note) => (args?.before ? note.created_at < args.before : true))
@@ -4731,7 +4506,7 @@ function handleGetNote(args: { noteId?: string }) {
   const noteId = args.noteId;
   return (
     [
-      ...getMockUserNotes(DEFAULT_MOCK_IDENTITY.pubkey),
+      ...getMockUserNotes(DEFAULT_MOCK_IDENTITY.agent_id),
       ...getMockUserNotes(ALICE_PUBKEY),
     ].find((note) => note.id === noteId) ?? null
   );
@@ -5011,7 +4786,7 @@ function createMockEvent(
   kind: number,
   content: string,
   tags: string[][],
-  pubkey = DEFAULT_MOCK_IDENTITY.pubkey,
+  pubkey = DEFAULT_MOCK_IDENTITY.agent_id,
   createdAt = Math.floor(Date.now() / 1000),
   id = crypto.randomUUID().replace(/-/g, ""),
 ): RelayEvent {
@@ -5035,16 +4810,12 @@ async function signWithIdentity(
     tags: string[][];
   },
 ) {
-  const secretKey = hexToBytes(identity.privateKey);
-
-  return finalizeEvent(
-    {
-      kind: template.kind,
-      content: template.content,
-      tags: template.tags,
-      created_at: template.createdAt ?? Math.floor(Date.now() / 1000),
-    },
-    secretKey,
+  return createMockEvent(
+    template.kind,
+    template.content,
+    template.tags,
+    identity.pubkey,
+    template.createdAt ?? Math.floor(Date.now() / 1000),
   );
 }
 
@@ -5646,12 +5417,12 @@ async function handleEnsureStarterChannels(
     throw new Error(starterChannelError);
   }
 
-  const currentPubkey = getMockMemberPubkey(config);
+  const currentAgentId = getMockMemberPubkey(config);
   const ensureMember = (channel: MockChannel) => {
     if (
       channel.members.some(
         (member) =>
-          normalizePubkey(member.pubkey) === normalizePubkey(currentPubkey),
+          normalizePubkey(member.pubkey) === normalizePubkey(currentAgentId),
       )
     ) {
       return;
@@ -5793,10 +5564,10 @@ async function handleOpenDm(
     throw new Error("Select at least one person to start a DM.");
   }
 
-  const currentPubkey = getMockMemberPubkey(config).toLowerCase();
+  const currentAgentId = getMockMemberPubkey(config).toLowerCase();
   const participantPubkeys = normalizeParticipantPubkeys([
-    currentPubkey,
-    ...normalizedPubkeys.filter((pubkey) => pubkey !== currentPubkey),
+    currentAgentId,
+    ...normalizedPubkeys.filter((pubkey) => pubkey !== currentAgentId),
   ]);
   const existingChannel = findMockDmByParticipantPubkeys(participantPubkeys);
   if (existingChannel) {
@@ -6420,9 +6191,9 @@ async function handleJoinChannel(
     }
 
     const channel = getMockChannel(args.channelId);
-    const currentPubkey = getMockMemberPubkey(config);
+    const currentAgentId = getMockMemberPubkey(config);
 
-    if (channel.members.some((member) => member.pubkey === currentPubkey)) {
+    if (channel.members.some((member) => member.pubkey === currentAgentId)) {
       return;
     }
 
@@ -6448,10 +6219,10 @@ async function handleLeaveChannel(
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);
-    const currentPubkey = getMockMemberPubkey(config);
+    const currentAgentId = getMockMemberPubkey(config);
 
     channel.members = channel.members.filter(
-      (member) => member.pubkey !== currentPubkey,
+      (member) => member.pubkey !== currentAgentId,
     );
     syncMockChannel(channel);
     touchMockChannel(channel);
@@ -6490,9 +6261,9 @@ async function handleGetFeed(
     const includeType = (type: string) =>
       wantedTypes.length === 0 || wantedTypes.includes(type);
 
-    const currentPubkey = getMockMemberPubkey(config).toLowerCase();
+    const currentAgentId = getMockMemberPubkey(config).toLowerCase();
     const defaultFeed: RawHomeFeedResponse["feed"] =
-      currentPubkey === ALICE_PUBKEY
+      currentAgentId === ALICE_PUBKEY
         ? {
             mentions: [
               {
@@ -6566,7 +6337,7 @@ async function handleGetFeed(
               },
             ],
           }
-        : currentPubkey === DEFAULT_REAL_IDENTITY.pubkey.toLowerCase()
+        : currentAgentId === DEFAULT_REAL_IDENTITY.pubkey.toLowerCase()
           ? {
               mentions: [
                 {
@@ -6641,7 +6412,7 @@ async function handleGetFeed(
                   channel_name: "general",
                   tags: [
                     ["e", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
-                    ["p", currentPubkey],
+                    ["p", currentAgentId],
                   ],
                   category: "mention" as const,
                 },
@@ -6658,7 +6429,7 @@ async function handleGetFeed(
                   channel_name: "agents",
                   tags: [
                     ["e", "94a444a4-c0a3-5966-ab05-530c6ddc2301"],
-                    ["p", currentPubkey],
+                    ["p", currentAgentId],
                   ],
                   category: "needs_action" as const,
                 },
@@ -6667,7 +6438,7 @@ async function handleGetFeed(
                 {
                   id: "mock-feed-self-activity",
                   kind: 9,
-                  pubkey: currentPubkey,
+                  pubkey: currentAgentId,
                   content: "I posted a note about the launch checklist.",
                   created_at: now - 25 * 60,
                   channel_id: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
@@ -7015,9 +6786,6 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
-
-// Per-page get_nsec call counter for sequenced error testing.
-let nsecCallCount = 0;
 
 // Per-page confirm_team_snapshot_import call counter for sequenced error testing.
 let teamSnapshotConfirmCallCount = 0;
@@ -7573,7 +7341,6 @@ async function handleCreateManagedAgent(
     backend_agent_id: null,
     respond_to: mintRespondTo,
     respond_to_allowlist: [...mintRespondToAllowlist],
-    private_key_nsec: `nsec1mock${pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${mintParallelism}`,
       args.input.systemPrompt?.trim()
@@ -7607,7 +7374,6 @@ async function handleCreateManagedAgent(
 
   return {
     agent: cloneManagedAgent(managedAgent),
-    private_key_nsec: managedAgent.private_key_nsec,
     profile_sync_error: null,
     spawn_error: null,
   };
@@ -7673,8 +7439,8 @@ function handleManagedAgentRuntimeAction(
   };
 }
 
-function isRelayMeshManagedAgent(agent: MockManagedAgent): boolean {
-  return agent.backend.type === "local" && agent.provider === "relay-mesh";
+function isSharedComputeManagedAgent(agent: MockManagedAgent): boolean {
+  return agent.backend.type === "local" && agent.provider === "shared-compute";
 }
 
 async function handleStartManagedAgent(
@@ -7689,10 +7455,9 @@ async function handleStartManagedAgent(
   }
 
   const agent = getMockManagedAgent(args.pubkey);
-  if (isRelayMeshManagedAgent(agent)) {
-    // Model the backend start preflight (ensure_relay_mesh_for_record): a
-    // saved relay-mesh agent re-resolves a live serve target for its model
-    // and only fails when no peer currently serves it.
+  if (isSharedComputeManagedAgent(agent)) {
+    // A saved shared-compute agent re-resolves a live serve target for its
+    // model and fails only when no peer currently serves it.
     const modelId = agent.model ?? "auto";
     const hasLiveTarget =
       mockMeshState.admitted &&
@@ -7862,7 +7627,7 @@ async function handleSearchMessages(
         event_id: "mock-general-welcome",
         content: "Welcome to #general",
         kind: 9,
-        pubkey: DEFAULT_MOCK_IDENTITY.pubkey,
+        pubkey: DEFAULT_MOCK_IDENTITY.agent_id,
         channel_id: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
         channel_name: "general",
         created_at: now - 60,
@@ -8815,7 +8580,7 @@ function sendToMockSocket(args: {
     }
 
     if (isMockProjectScopedEvent(event)) {
-      if (event.pubkey !== DEFAULT_MOCK_IDENTITY.pubkey) {
+      if (event.pubkey !== DEFAULT_MOCK_IDENTITY.agent_id) {
         sendWsText(socket.handler, [
           "OK",
           event.id,
@@ -8902,8 +8667,6 @@ export function maybeInstallE2eTauriMocks() {
   resetMockWorkflows();
   resetMockMesh();
   resetMockUserStatuses();
-  resetMockSaveSubscriptions(config);
-  resetMockPendingCommunityDeepLinks(config);
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
   window.__BUZZ_E2E_COMMANDS__ = [];
@@ -8962,10 +8725,6 @@ export function maybeInstallE2eTauriMocks() {
 
     return hasMockLiveSubscription(channel.id, kind);
   };
-  window.__BUZZ_E2E_HAS_MOCK_OWNER_KIND_SUBSCRIPTION__ = ({
-    ownerPubkey,
-    kind,
-  }) => hasMockOwnerKindSubscription(ownerPubkey, kind);
   window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
     const category = item.category === "mention" ? "mentions" : item.category;
     mockFeedOverrides[category].unshift(item);
@@ -9059,20 +8818,6 @@ export function maybeInstallE2eTauriMocks() {
     emitMockLiveEvent(GLOBAL_MOCK_SUBSCRIPTION, event);
     return event;
   };
-  window.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ = (state) => {
-    // Directly emit a connection state change on the relay client singleton,
-    // for tests that need to drive degraded relay UI without waiting for the
-    // real auth-timeout + reconnect-debounce cycle (~10 s). Reaches the
-    // TS-private emitter via a cast so the production class carries no
-    // test-only seam.
-    (
-      relayClient as unknown as {
-        connectionStateEmitter: { set: (s: ConnectionState) => void };
-      }
-    ).connectionStateEmitter.set(state);
-  };
-  window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ = () =>
-    relayClient.getConnectionState();
 
   window.__BUZZ_E2E_SEED_MOCK_REMINDERS__ = (reminders) => {
     mockReminderEvents.length = 0;
@@ -9148,6 +8893,37 @@ export function maybeInstallE2eTauriMocks() {
     deviceId: state === "running" ? "mock-endpoint-id" : null,
     deviceName: state === "running" ? "Mock desktop" : null,
   });
+  const listMockNativeGroups = () => {
+    const raw = window.localStorage.getItem("buzz-communities");
+    if (!raw) return [];
+    try {
+      const communities = JSON.parse(raw) as Array<{
+        id?: unknown;
+        name?: unknown;
+      }>;
+      return communities.flatMap((community) => {
+        if (
+          typeof community.id !== "string" ||
+          typeof community.name !== "string"
+        ) {
+          return [];
+        }
+        return [
+          {
+            groupId: community.id,
+            name: community.name,
+            description: "",
+            memberCount: mockRelayMembers.length,
+          },
+        ];
+      });
+    } catch {
+      return [];
+    }
+  };
+  let activeNativeGroupId =
+    window.localStorage.getItem("buzz-active-community-id") ?? "";
+
   const handleMockCommand = async (command: string, payload: unknown) => {
     const activeConfig = getConfig();
     const identity = getActiveIdentity(activeConfig);
@@ -9166,62 +8942,6 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
-      case "get_builderlab_auth":
-        return activeConfig?.mock?.builderlabAuth ?? null;
-      case "start_builderlab_login": {
-        const delayMs = activeConfig?.mock?.builderlabLoginDelayMs ?? 0;
-        if (delayMs > 0)
-          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-        const nextAuth = activeConfig?.mock?.builderlabAuth ?? {
-          email: "owner@example.com",
-          expiresAt: "2099-01-01T00:00:00Z",
-        };
-        if (activeConfig?.mock) activeConfig.mock.builderlabAuth = nextAuth;
-        return nextAuth;
-      }
-      case "cancel_builderlab_login":
-        return null;
-      case "clear_builderlab_auth":
-        if (activeConfig?.mock) activeConfig.mock.builderlabAuth = null;
-        return null;
-      case "get_builderlab_nostr_identity":
-        return activeConfig?.mock?.builderlabIdentity
-          ? { identity: activeConfig.mock.builderlabIdentity }
-          : { error: { code: "missing_mapping", setup_needed: true } };
-      case "bind_builderlab_nostr_identity": {
-        if (activeConfig?.mock?.builderlabBindError)
-          return { error: activeConfig.mock.builderlabBindError };
-        const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
-        const nextIdentity = {
-          pubkey_hex: activeIdentity.pubkey,
-          npub: `npub1${activeIdentity.pubkey}`,
-        };
-        if (activeConfig?.mock)
-          activeConfig.mock.builderlabIdentity = nextIdentity;
-        return { identity: nextIdentity };
-      }
-      case "delete_builderlab_nostr_identity":
-        if (activeConfig?.mock) activeConfig.mock.builderlabIdentity = null;
-        return {};
-      case "list_builderlab_communities":
-        return {
-          communities: activeConfig?.mock?.builderlabCommunities ?? [],
-        };
-      case "check_builderlab_community_name":
-        return {
-          available: true,
-          normalized_host: `${(payload as { name?: string })?.name ?? "community"}.communities.buzz.xyz`,
-        };
-      case "create_builderlab_community": {
-        const name = (payload as { name?: string })?.name ?? "community";
-        return {
-          community: activeConfig?.mock?.builderlabCreatedCommunity ?? {
-            id: `hosted-${name}`,
-            name,
-            normalized_host: `${name}.communities.buzz.xyz`,
-          },
-        };
-      }
       case "mesh_installed_models":
         return mockMeshState.models;
       case "mesh_node_status":
@@ -9238,95 +8958,145 @@ export function maybeInstallE2eTauriMocks() {
         mockMeshState.nodeState = "off";
         mockMeshState.nodeMode = null;
         return meshNodeStatus("off", null);
+      case "x0x_list_groups":
+        return { groups: listMockNativeGroups() };
+      case "x0x_get_active_group_id":
+        return activeNativeGroupId;
+      case "x0x_set_active_group_id": {
+        const groupId = (payload as { groupId?: unknown } | null)?.groupId;
+        if (typeof groupId !== "string" || !groupId.trim()) {
+          throw new Error("Cannot activate an empty mock native group id.");
+        }
+        activeNativeGroupId = groupId;
+        window.localStorage.setItem("buzz-active-community-id", groupId);
+        return;
+      }
+      case "symphony_supervision_status":
+        return {
+          running: true,
+          base_url: "http://127.0.0.1:43123",
+          owned: true,
+        };
+      case "symphony_tasks":
+        return [];
+      case "symphony_workers":
+        return { workers: [], view_epoch: 1 };
+      case "symphony_subscribe_events":
+        return;
+      case "list_company_templates":
+        return [
+          {
+            id: "software-dev-and-sales",
+            name: "Software Dev & Sales",
+            description: "Engineering and Sales with an All-Hands group.",
+            groups: [
+              {
+                id: "engineering",
+                name: "Engineering",
+                kind: "private_secure",
+              },
+              { id: "sales", name: "Sales", kind: "private_secure" },
+              { id: "all-hands", name: "All-Hands", kind: "public_open" },
+            ],
+            agents: [
+              {
+                role: "staff-engineer",
+                group_id: "engineering",
+                runtime: "codex",
+                model: null,
+              },
+              {
+                role: "account-executive",
+                group_id: "sales",
+                runtime: "claude",
+                model: null,
+              },
+            ],
+            is_builtin: true,
+          },
+        ];
+      case "instantiate_company_template":
+        return {
+          instance_id: "e2e-native-company",
+          run_id: "run-e2e-company",
+          // ManifestStatus serde snake_case. A run was issued and the attempt
+          // is terminal-complete, so the UI opens the run detail rather than
+          // treating the result as resumable.
+          status: "complete",
+          groups: [
+            { id: "engineering", name: "Engineering", kind: "private_secure" },
+            { id: "sales", name: "Sales", kind: "private_secure" },
+            { id: "all-hands", name: "All-Hands", kind: "public_open" },
+          ],
+          agents: [
+            {
+              agent_id: "a".repeat(64),
+              role: "staff-engineer",
+              group_id: "engineering",
+            },
+          ],
+          workflow_md:
+            "# WORKFLOW.md\nBacklog → Claims → Runs → Handoffs → Proofs",
+          errors: [],
+        };
+      case "symphony_task":
+        return {
+          id: "run-e2e-company",
+          identifier: "COMPANY-1",
+          title: "Provision native company",
+          state: "blocked",
+          labels: ["company"],
+          claim_by: null,
+        };
+      case "symphony_approvals_pending":
+        return [
+          {
+            issue_id: "run-e2e-company",
+            title: "Approve managed-agent dispatch",
+            state: "pending",
+            content_hash: "e2e-content-hash",
+            signer_agent_id: "b".repeat(64),
+          },
+        ];
+      case "symphony_proofs":
+        return { proofs: [] };
+      case "symphony_approve":
+      case "symphony_deny":
+      case "cancel_company_run":
+        return;
       case "get_identity": {
+        if (identity) {
+          return {
+            agent_id: identity.pubkey,
+            identity_words: MOCK_IDENTITY_WORDS,
+          };
+        }
+        return { ...DEFAULT_MOCK_IDENTITY };
+      }
+      case "get_recovery_state": {
+        // Mirrors the daemon's always-succeeds recovery probe (no daemon
+        // dependency). Drives the lost/locked/reset-failed recovery screens.
         const isLost =
           !mockIdentityLostCleared && activeConfig?.mock?.identityLost === true;
         const isLocked =
           !mockIdentityLockedCleared &&
           activeConfig?.mock?.identityLocked === true;
-        if (identity) {
-          return {
-            pubkey: identity.pubkey,
-            display_name: identity.username,
-            lost: false,
-            locked: false,
-          };
-        }
-
-        return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
-      }
-      case "sign_nostr_identity_binding": {
-        const request = payload as {
-          challengeId: string;
-          expiresAt: string;
-          nonce: string;
-          origin: string;
-          verificationCode: string;
-        };
-        const signDelayMs = activeConfig?.mock?.nostrBindSignDelayMs ?? 0;
-        if (signDelayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, signDelayMs));
-        }
-        const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
-        return JSON.stringify({
-          id: "e2e-signed-nostr-binding",
-          pubkey: activeIdentity.pubkey,
-          created_at: 0,
-          kind: 24243,
-          tags: [
-            ["challenge_id", request.challengeId],
-            ["nonce", request.nonce],
-            ["verification_code", request.verificationCode],
-            ["origin", request.origin],
-            ["expires_at", request.expiresAt],
-          ],
-          content: "",
-          sig: "e2e-signed-nostr-binding",
-        });
+        return { lost: isLost, locked: isLocked, reset_failed: false };
       }
       case "sign_out":
         // Production wipes local state and restarts the app. In the browser
         // harness there is nothing to wipe; resolving is enough — specs
         // assert invocation via __BUZZ_E2E_COMMANDS__ and the pending UI.
         return;
-      case "get_nsec": {
-        const nsecSequence = activeConfig?.mock?.nsecErrors;
-        if (nsecSequence && nsecSequence.length > 0) {
-          const idx = Math.min(nsecCallCount, nsecSequence.length - 1);
-          nsecCallCount++;
-          const entry = nsecSequence[idx];
-          if (entry !== null) {
-            throw new Error(entry);
-          }
-          return "nsec1mock000000000000000000000000000000000000000000000000000000";
-        }
-        const nsecError = activeConfig?.mock?.nsecError;
-        if (nsecError) {
-          throw new Error(nsecError);
-        }
-        return "nsec1mock000000000000000000000000000000000000000000000000000000";
-      }
       case "persist_current_identity": {
-        // Persist the ephemeral key: clears only the lost flag. The locked flag
-        // is cleared only by import_identity; production rejects
-        // persist_current_identity when the identity is in the locked state.
+        // Persist the ephemeral key: clears only the lost flag.
         mockIdentityLostCleared = true;
-        const currentPubkey = identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey;
-        const currentDisplayName =
-          identity?.username ?? DEFAULT_MOCK_IDENTITY.display_name;
+        const agentId = identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.agent_id;
         return {
-          pubkey: currentPubkey,
-          display_name: currentDisplayName,
-          lost: false,
-          locked: false,
+          agent_id: agentId,
+          identity_words: MOCK_IDENTITY_WORDS,
         };
       }
-      case "import_identity":
-        mockIdentityLostCleared = true;
-        mockIdentityLockedCleared = true;
-        return importMockIdentity(
-          (payload as { nsec?: string } | null)?.nsec ?? "",
-        );
       case "validate_repos_dir":
         // The browser harness has no host filesystem to validate. Treat the
         // seeded empty/default path as valid so Add Community can continue to
@@ -9829,20 +9599,6 @@ export function maybeInstallE2eTauriMocks() {
           activeWorkspaceId: null,
           onboardingCompletions: [],
         };
-      case "take_pending_community_deep_link":
-        // Mirrors the Rust queue: peek the head; acknowledge removes it.
-        return mockPendingCommunityDeepLinks[0] ?? null;
-      case "acknowledge_pending_community_deep_link": {
-        const { id } = payload as { id: string };
-        const index = mockPendingCommunityDeepLinks.findIndex(
-          (pending) => pending.id === id,
-        );
-        if (index === -1) {
-          return false;
-        }
-        mockPendingCommunityDeepLinks.splice(index, 1);
-        return true;
-      }
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "relay_requires_membership":
@@ -10251,7 +10007,7 @@ export function maybeInstallE2eTauriMocks() {
           },
           { id: "gpt-5.5[high]", name: "GPT-5.5 (high)", description: null },
         ];
-        if (provider === "relay-mesh") {
+        if (provider === "shared-compute") {
           if (!mockMeshState.admitted) {
             throw new Error(mockMeshState.denyReason);
           }
@@ -10262,7 +10018,7 @@ export function maybeInstallE2eTauriMocks() {
           }
         }
         const models =
-          provider === "relay-mesh"
+          provider === "shared-compute"
             ? mockMeshState.models.map((model) => ({
                 id: model.id,
                 name: model.name,
@@ -10589,7 +10345,7 @@ export function maybeInstallE2eTauriMocks() {
             (payload as { kind: number }).kind,
             (payload as { content: string }).content,
             (payload as { tags: string[][] }).tags,
-            DEFAULT_MOCK_IDENTITY.pubkey,
+            DEFAULT_MOCK_IDENTITY.agent_id,
             (payload as { createdAt?: number }).createdAt,
           ),
         );
@@ -10740,7 +10496,7 @@ export function maybeInstallE2eTauriMocks() {
       case "resolve_oa_owner": {
         const isMe = activeConfig?.mock?.oaOwnerIsMe ?? false;
         const owner = isMe
-          ? (identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey)
+          ? (identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.agent_id)
           : "ff".repeat(32);
         return { owner, is_me: isMe };
       }
@@ -10773,133 +10529,10 @@ export function maybeInstallE2eTauriMocks() {
         // Return the no-canvas success shape — content null means no canvas set.
         return { content: null, updated_at: null, author: null };
       }
-      // ── Local-save archive ──────────────────────────────────────────────
-      // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests
-      // without requiring a real SQLite backend. `mockSaveSubscriptions` is a
-      // mutable clone of `activeConfig.mock.saveSubscriptions` (reset on
-      // install); create/merge/delete/remove mutate it with the same
-      // union / delete-row-when-empty semantics as the real Rust commands
-      // (see `archive/store.rs::merge_owner_p_kinds` / `remove_owner_p_kind`)
-      // so specs can drive fresh-internal-repair and toggle ON/OFF flows.
-      case "list_save_subscriptions": {
-        const win = window as unknown as Record<string, unknown>;
-        if (!win.__BUZZ_E2E_IPC_COUNTERS__) {
-          win.__BUZZ_E2E_IPC_COUNTERS__ = {};
-        }
-        const ipcCounters = win.__BUZZ_E2E_IPC_COUNTERS__ as Record<
-          string,
-          number
-        >;
-        ipcCounters.list_save_subscriptions =
-          (ipcCounters.list_save_subscriptions ?? 0) + 1;
-        const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
-        return mockSaveSubscriptions.map((s) => ({
-          identity_pubkey: ident.pubkey,
-          relay_url: DEFAULT_RELAY_WS_URL,
-          scope_type: s.scope_type,
-          scope_value: s.scope_value,
-          kinds: s.kinds,
-          created_at: Math.floor(Date.now() / 1000),
-        }));
-      }
-      case "create_save_subscription": {
-        const req = payload as {
-          scopeType: string;
-          scopeValue: string;
-          kinds: number[];
-        };
-        const kindsJson = JSON.stringify(req.kinds);
-        const existing = mockSaveSubscriptions.find(
-          (s) =>
-            s.scope_type === req.scopeType && s.scope_value === req.scopeValue,
-        );
-        if (existing) {
-          existing.kinds = kindsJson;
-        } else {
-          mockSaveSubscriptions.push({
-            scope_type: req.scopeType,
-            scope_value: req.scopeValue,
-            kinds: kindsJson,
-          });
-        }
-        return null;
-      }
-      case "delete_save_subscription": {
-        const req = payload as { scopeType: string; scopeValue: string };
-        const before = mockSaveSubscriptions.length;
-        mockSaveSubscriptions = mockSaveSubscriptions.filter(
-          (s) =>
-            !(
-              s.scope_type === req.scopeType && s.scope_value === req.scopeValue
-            ),
-        );
-        return mockSaveSubscriptions.length < before;
-      }
-      case "archive_events":
-        // Returns the ArchiveBatchResult shape the UI expects.
-        return { persisted: 0, dropped: 0 };
-      case "observer_archive_default_enabled": {
-        const delayMs =
-          activeConfig?.mock?.observerArchiveDefaultEnabledDelayMs;
-        if (delayMs && delayMs > 0) {
-          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-        }
-        const error = activeConfig?.mock?.observerArchiveDefaultEnabledError;
-        if (error) {
-          throw new Error(error);
-        }
-        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
-      }
-      case "agent_metric_archive_default_enabled":
-        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
       case "set_prevent_sleep_active":
         return null;
       case "plugin:window|is_fullscreen":
         return false;
-      case "merge_save_subscription_kinds": {
-        // Mirrors `merge_owner_p_kinds`: union `kind` into the owner_p row's
-        // kinds, creating the row if it doesn't exist yet.
-        const { kind } = payload as { kind: number };
-        const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
-        const row = mockSaveSubscriptions.find(
-          (s) => s.scope_type === "owner_p" && s.scope_value === ident.pubkey,
-        );
-        if (row) {
-          const kinds: number[] = JSON.parse(row.kinds);
-          if (!kinds.includes(kind)) {
-            row.kinds = JSON.stringify([...kinds, kind]);
-          }
-        } else {
-          mockSaveSubscriptions.push({
-            scope_type: "owner_p",
-            scope_value: ident.pubkey,
-            kinds: JSON.stringify([kind]),
-          });
-        }
-        return null;
-      }
-      case "remove_save_subscription_kind": {
-        // Mirrors `remove_owner_p_kind`: remove `kind` from the owner_p row's
-        // kinds, deleting the row entirely once its kinds list is empty.
-        const { kind } = payload as { kind: number };
-        const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
-        const row = mockSaveSubscriptions.find(
-          (s) => s.scope_type === "owner_p" && s.scope_value === ident.pubkey,
-        );
-        if (row) {
-          const kinds: number[] = JSON.parse(row.kinds).filter(
-            (k: number) => k !== kind,
-          );
-          if (kinds.length === 0) {
-            mockSaveSubscriptions = mockSaveSubscriptions.filter(
-              (s) => s !== row,
-            );
-          } else {
-            row.kinds = JSON.stringify(kinds);
-          }
-        }
-        return null;
-      }
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

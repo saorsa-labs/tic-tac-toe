@@ -1,13 +1,11 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
+    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_clone_url,
     GitAuthConfig,
 };
 use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
-use crate::app_state::AppState;
 use serde::Serialize;
 use std::time::UNIX_EPOCH;
-use tauri::State;
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
@@ -488,7 +486,7 @@ fn snapshot_from_worktree(
     }
 }
 
-/// Normalizes a relay-supplied branch option through the shared
+/// Normalizes a remote-supplied branch option through the shared
 /// [`clean_branch`] validation, so every command applies the same character
 /// allowlist and flag-injection rejection before the value reaches git.
 pub(crate) fn normalize_branch_option(branch: Option<&str>) -> Option<String> {
@@ -524,7 +522,7 @@ pub(crate) fn compare_local_remote_status(
     .unwrap_or_default();
     // The local checkout's branch name is attacker-influencable (a hostile
     // remote can point HEAD at a flag-shaped refname), so it must pass the
-    // same `clean_branch` validation as relay-supplied names before it is
+    // same `clean_branch` validation as remote-supplied names before it is
     // ever handed to git as an argument.
     let branch = normalize_branch_option(branch_name)
         .or_else(|| normalize_branch_option(local_branch.as_deref()))
@@ -685,10 +683,10 @@ pub(crate) fn compare_local_remote_status(
 
 /// The viewer's configured git identity (`user.name` / `user.email`), used by
 /// the frontend to attribute their own commits to their Buzz profile when git
-/// author strings don't match any relay profile fields.
+/// author strings don't match any profile fields.
 #[tauri::command]
-pub async fn get_git_identity(state: State<'_, AppState>) -> Result<GitIdentityInfo, String> {
-    let auth = build_git_auth_config(&state)?;
+pub async fn get_git_identity() -> Result<GitIdentityInfo, String> {
+    let auth = build_git_auth_config()?;
     tauri::async_runtime::spawn_blocking(move || {
         let read = |key: &str| {
             run_git(&["config", "--get", key], None, &auth)
@@ -712,10 +710,9 @@ pub async fn get_project_repo_snapshot(
     base_branch: Option<String>,
     target_ref: Option<String>,
     target_commit: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<ProjectRepoSnapshotInfo, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    validate_clone_url(&clone_url)?;
+    let auth = build_git_auth_config()?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
     let target_ref = clean_target_ref(target_ref);
@@ -798,9 +795,8 @@ pub async fn get_project_local_repo_snapshot(
     clone_url: Option<String>,
     default_branch: Option<String>,
     base_branch: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<Option<ProjectLocalRepoSnapshotInfo>, String> {
-    let auth = build_git_auth_config(&state)?;
+    let auth = build_git_auth_config()?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
 
@@ -868,10 +864,9 @@ pub async fn get_project_repo_sync_status(
     clone_url: String,
     branch_name: Option<String>,
     base_branch: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<ProjectRepoSyncStatusInfo, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    validate_clone_url(&clone_url)?;
+    let auth = build_git_auth_config()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let Some(repo_dir) =
@@ -919,10 +914,9 @@ pub async fn push_project_local_repository(
     clone_url: String,
     branch_name: Option<String>,
     base_branch: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<ProjectRepoPushResult, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    validate_clone_url(&clone_url)?;
+    let auth = build_git_auth_config()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let Some(repo_dir) =
@@ -950,10 +944,9 @@ pub async fn pull_project_local_repository(
     project_dtag: String,
     clone_url: String,
     branch_name: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<ProjectRepoPullResult, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    validate_clone_url(&clone_url)?;
+    let auth = build_git_auth_config()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let Some(repo_dir) =

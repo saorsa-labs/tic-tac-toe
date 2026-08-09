@@ -4,12 +4,11 @@ import {
   deleteManagedAgentWithRules,
   type ManagedAgentActionResult,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { removeChannelMember } from "@/shared/api/tauri";
+import { x0xRemoveGroupMember } from "@/shared/api/tauriNativeX0x";
 import type {
   AgentPersona,
   Channel,
   ManagedAgent,
-  PresenceLookup,
   RelayAgent,
 } from "@/shared/api/types";
 import { getRelayAgentChannelIds } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -34,7 +33,6 @@ type UseProfileAgentDeletionInput = {
   deleteManagedAgent: DeleteManagedAgentRulesContext["deleteManagedAgent"];
   managedAgent?: ManagedAgent;
   managedAgents?: readonly ManagedAgent[];
-  presenceLookup?: PresenceLookup | null;
   relayAgents?: readonly RelayAgent[];
 };
 
@@ -43,7 +41,6 @@ export function useProfileAgentDeletion({
   deleteManagedAgent,
   managedAgent,
   managedAgents,
-  presenceLookup,
   relayAgents,
 }: UseProfileAgentDeletionInput) {
   const removeAgentFromAllChannels = React.useCallback(
@@ -64,7 +61,7 @@ export function useProfileAgentDeletion({
       if (channelIds.size === 0) return;
       await Promise.allSettled(
         [...channelIds].map((channelId) =>
-          removeChannelMember(channelId, agentPubkey),
+          x0xRemoveGroupMember(channelId, agentPubkey),
         ),
       );
     },
@@ -74,40 +71,25 @@ export function useProfileAgentDeletion({
   const deleteManagedAgentRecord = React.useCallback(
     (agentToDelete: ManagedAgent) =>
       deleteProfileManagedAgent(agentToDelete, {
-        channels: channels ?? [],
         deleteManagedAgent,
-        presenceLookup,
-        relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         skipRemoteDeleteConfirm: true,
       }),
-    [
-      channels,
-      deleteManagedAgent,
-      presenceLookup,
-      relayAgents,
-      removeAgentFromAllChannels,
-    ],
+    [deleteManagedAgent, removeAgentFromAllChannels],
   );
 
   const deleteManagedAgentsForPersona = React.useCallback(
     (persona: AgentPersona) =>
       deleteProfileManagedAgentsForPersona(persona, {
-        channels: channels ?? [],
         deleteManagedAgent,
         managedAgents: managedAgents ?? [],
-        presenceLookup,
-        relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         selectedAgent: managedAgent,
       }),
     [
-      channels,
       deleteManagedAgent,
       managedAgent,
       managedAgents,
-      presenceLookup,
-      relayAgents,
       removeAgentFromAllChannels,
     ],
   );

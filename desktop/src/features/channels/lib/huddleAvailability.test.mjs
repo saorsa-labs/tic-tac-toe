@@ -48,7 +48,7 @@ test("canStartHuddleInChannel allows DM participants", () => {
         participantPubkeys: [OTHER, SELF],
         isMember: false,
       }),
-      currentPubkey: SELF.toUpperCase(),
+      currentAgentId: SELF.toUpperCase(),
       selfMember: null,
     }),
     true,
@@ -79,7 +79,7 @@ test("canStartHuddleInChannel blocks non-participant DMs", () => {
         participantPubkeys: [OTHER],
         isMember: false,
       }),
-      currentPubkey: SELF,
+      currentAgentId: SELF,
       selfMember: null,
     }),
     false,
@@ -92,7 +92,7 @@ test("canStartHuddleInChannel keeps private channels member-gated", () => {
   assert.equal(
     canStartHuddleInChannel({
       channel: privateChannel,
-      currentPubkey: SELF,
+      currentAgentId: SELF,
       selfMember: null,
     }),
     false,
@@ -101,7 +101,7 @@ test("canStartHuddleInChannel keeps private channels member-gated", () => {
   assert.equal(
     canStartHuddleInChannel({
       channel: privateChannel,
-      currentPubkey: SELF,
+      currentAgentId: SELF,
       selfMember: member(),
     }),
     true,
@@ -115,7 +115,7 @@ test("canStartHuddleInChannel blocks archived channels and DMs", () => {
         archivedAt: "2026-01-01T00:00:00Z",
         visibility: "open",
       }),
-      currentPubkey: SELF,
+      currentAgentId: SELF,
       selfMember: member(),
     }),
     false,
@@ -128,7 +128,7 @@ test("canStartHuddleInChannel blocks archived channels and DMs", () => {
         channelType: "dm",
         participantPubkeys: [SELF, OTHER],
       }),
-      currentPubkey: SELF,
+      currentAgentId: SELF,
       selfMember: null,
     }),
     false,

@@ -3,12 +3,13 @@ use super::*;
 
 #[test]
 fn canonical_dev_data_dir_replaces_last_component() {
-    let current =
-        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev.my-branch");
+    let current = PathBuf::from(
+        "/Users/me/Library/Application Support/com.saorsalabs.tictactoe.dev.my-branch",
+    );
     let canonical = canonical_dev_data_dir(&current).unwrap();
     assert_eq!(
         canonical,
-        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev")
+        PathBuf::from("/Users/me/Library/Application Support/com.saorsalabs.tictactoe.dev")
     );
 }
 
@@ -20,22 +21,23 @@ fn canonical_dev_data_dir_returns_none_for_root() {
 
 #[test]
 fn legacy_app_data_dir_maps_release_identifier() {
-    let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app");
+    let current = PathBuf::from("/Users/me/Library/Application Support/com.saorsalabs.tictactoe");
     let legacy = legacy_app_data_dir(&current).unwrap();
     assert_eq!(
         legacy,
-        PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app")
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app")
     );
 }
 
 #[test]
 fn legacy_app_data_dir_maps_dev_worktree_identifier() {
-    let current =
-        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev.my-branch");
+    let current = PathBuf::from(
+        "/Users/me/Library/Application Support/com.saorsalabs.tictactoe.dev.my-branch",
+    );
     let legacy = legacy_app_data_dir(&current).unwrap();
     assert_eq!(
         legacy,
-        PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app.dev.my-branch",)
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev.my-branch",)
     );
 }
 
@@ -446,7 +448,8 @@ fn canonical_dev_data_dir_returns_self_for_canonical_instance() {
     // The env-var guards (BUZZ_SHARE_IDENTITY, BUZZ_PRIVATE_KEY)
     // require a live Tauri AppHandle and are covered by integration
     // testing only.
-    let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev");
+    let current =
+        PathBuf::from("/Users/me/Library/Application Support/com.saorsalabs.tictactoe.dev");
     assert_eq!(canonical_dev_data_dir(&current).unwrap(), current);
 
     // Also verify with a temp dir on the real filesystem.

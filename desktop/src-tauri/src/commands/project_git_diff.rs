@@ -1,10 +1,8 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
+    build_git_auth_config, clean_branch, run_git, validate_clone_url, GitAuthConfig,
 };
 use super::project_repo_paths::find_local_repo_dir;
-use crate::app_state::AppState;
 use serde::Serialize;
-use tauri::State;
 
 /// Per-file cap on rendered patch lines. One regenerated lockfile or
 /// minified bundle would otherwise produce tens of thousands of DOM nodes
@@ -386,10 +384,9 @@ pub async fn get_project_repo_diff(
     base_branch: Option<String>,
     target_ref: Option<String>,
     target_commit: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<ProjectRepoDiffInfo, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    validate_clone_url(&clone_url)?;
+    let auth = build_git_auth_config()?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
     let target_ref = clean_target_ref(target_ref);
@@ -446,9 +443,8 @@ pub async fn get_project_local_repo_diff(
     base_branch: Option<String>,
     base_commit: Option<String>,
     target_commit: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<Option<ProjectRepoDiffInfo>, String> {
-    let auth = build_git_auth_config(&state)?;
+    let auth = build_git_auth_config()?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
     let base_commit = clean_commit(base_commit);

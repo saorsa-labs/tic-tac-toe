@@ -3,12 +3,10 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import { mergeMessages } from "@/features/messages/hooks";
-import {
-  getChannelIdFromTags,
-  getThreadReference,
-} from "@/features/messages/lib/threading";
-import { getEventById } from "@/shared/api/tauri";
+import { getThreadReference } from "@/features/messages/lib/threading";
+import { fetchNativeMessagesById } from "@/features/messages/lib/nativeMessaging";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+import { useResolvedHistoryScope } from "@/features/messages/lib/useResolvedHistoryScope";
 
 export function useLoadMissingAncestors(
   activeChannel: Channel | null,
@@ -16,19 +14,30 @@ export function useLoadMissingAncestors(
 ) {
   const queryClient = useQueryClient();
   const requestedAncestorIdsRef = React.useRef<Set<string>>(new Set());
-  const previousChannelIdRef = React.useRef<string | null>(null);
+  const previousScopeIdentityRef = React.useRef<string>("");
+  const resolvedScope = useResolvedHistoryScope(activeChannel?.id ?? null);
 
+  // Clear the ancestor dedup set whenever the resolved-scope identity changes
+  // — channel change OR scope transition (null->value, A->B) — so ancestors
+  // marked requested under a prior/unresolved scope retry against the fresh
+  // scope. Declared before the fetch effect so it runs first on transition.
   React.useEffect(() => {
-    const activeChannelId = activeChannel?.id ?? null;
-    if (previousChannelIdRef.current === activeChannelId) {
+    const scopeIdentity = `${activeChannel?.id ?? ""}:${resolvedScope ?? ""}`;
+    if (previousScopeIdentityRef.current === scopeIdentity) {
       return;
     }
-    previousChannelIdRef.current = activeChannelId;
+    previousScopeIdentityRef.current = scopeIdentity;
     requestedAncestorIdsRef.current.clear();
-  }, [activeChannel?.id]);
+  }, [activeChannel?.id, resolvedScope]);
 
   React.useEffect(() => {
     if (!activeChannel || activeChannel.channelType === "forum") {
+      return;
+    }
+    // Hold while the group's durable-history scope is unresolved: do NOT mark
+    // ids requested (which would poison dedup against an unresolved-scope
+    // failure) nor fetch. Re-evaluates when the scope arrives via resolvedScope.
+    if (activeChannel.channelType !== "dm" && resolvedScope === null) {
       return;
     }
 
@@ -77,30 +86,26 @@ export function useLoadMissingAncestors(
 
     let isCancelled = false;
 
-    void Promise.all(
-      [...missingAncestorIds].map(async (eventId) => {
-        try {
-          const event = await getEventById(eventId);
-
-          if (
-            isCancelled ||
-            getChannelIdFromTags(event.tags) !== activeChannel.id
-          ) {
-            return;
-          }
-
+    void fetchNativeMessagesById(activeChannel, missingAncestorIds)
+      .then((events) => {
+        if (isCancelled) return;
+        for (const event of events) {
           queryClient.setQueryData<RelayEvent[]>(
             channelMessagesKey(activeChannel.id),
             (current = []) => mergeMessages(current, event),
           );
-        } catch (error) {
-          console.error("Failed to load ancestor event", eventId, error);
         }
-      }),
-    );
+      })
+      .catch((error) => {
+        console.error(
+          "Failed to load native thread ancestors",
+          [...missingAncestorIds],
+          error,
+        );
+      });
 
     return () => {
       isCancelled = true;
     };
-  }, [activeChannel, queryClient, resolvedMessages]);
+  }, [activeChannel, queryClient, resolvedMessages, resolvedScope]);
 }

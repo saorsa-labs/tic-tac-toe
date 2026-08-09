@@ -13,7 +13,7 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 type TypingIndicatorRowProps = {
   channel: Channel | null;
   className?: string;
-  currentPubkey?: string;
+  currentAgentId?: string;
   profiles?: UserProfileLookup;
   typingPubkeys: string[];
   variant?: "default" | "activity";
@@ -54,7 +54,7 @@ function formatTypingLabel(names: string[]) {
 export function TypingIndicatorRow({
   channel,
   className,
-  currentPubkey,
+  currentAgentId,
   profiles,
   typingPubkeys,
   variant = "default",
@@ -65,13 +65,13 @@ export function TypingIndicatorRow({
       typingPubkeys.map((pubkey) =>
         resolveUserLabel({
           pubkey,
-          currentPubkey,
+          currentAgentId,
           fallbackName: resolveFallbackName(channel, pubkey),
           profiles,
           preferResolvedSelfLabel: true,
         }),
       ),
-    [channel, currentPubkey, profiles, typingPubkeys],
+    [channel, currentAgentId, profiles, typingPubkeys],
   );
 
   return (

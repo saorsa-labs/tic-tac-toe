@@ -1,5 +1,3 @@
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
-
 export type ThreadActivityItem = {
   id: string;
   kind: number;
@@ -14,32 +12,32 @@ export type ThreadActivityItem = {
 const ACTIVITY_STORAGE_PREFIX = "buzz-thread-activity.v1";
 const MAX_ACTIVITY_ITEMS = 100;
 
-// Scoped to relay+pubkey. The legacy pubkey-only key is intentionally not read
-// — rows from an unknown relay cannot be safely attributed.
-export function activityStorageKey(pubkey: string, relayUrl: string): string {
-  return `${ACTIVITY_STORAGE_PREFIX}:${normalizeRelayUrl(relayUrl)}:${pubkey}`;
+// Scoped to group+pubkey. The legacy pubkey-only key is intentionally not read
+// — rows from an unknown group cannot be safely attributed.
+export function activityStorageKey(pubkey: string, groupId: string): string {
+  return `${ACTIVITY_STORAGE_PREFIX}:${groupId}:${pubkey}`;
 }
 
 /**
  * Stable identity string for the in-memory thread-activity buffer.
- * A single definition avoids the `${pubkey}:${relay}` expression being
+ * A single definition avoids the `${pubkey}:${groupId}` expression being
  * repeated at reset, both writers, and the render fence.
  * Returns `""` when either value is absent — the empty string never matches a
  * valid loaded scope, so the fence returns `[]` until the buffer is seeded.
  */
 export function activityScopeKey(
   pubkey: string | null,
-  relayUrl: string,
+  groupId: string,
 ): string {
-  if (!pubkey || !relayUrl) return "";
-  return `${pubkey}:${normalizeRelayUrl(relayUrl)}`;
+  if (!pubkey || !groupId) return "";
+  return `${pubkey}:${groupId}`;
 }
 
 /**
  * Pure projection helper used at the hook return and in tests.
  *
  * Returns `items` only when both scopes are non-empty and identical.
- * An empty `currentScope` (absent pubkey or relay) is always rejected —
+ * An empty `currentScope` (absent pubkey or group) is always rejected —
  * `activityScopeKey()` returns `""` in that case, and `""` must never
  * compare-equal to a valid loaded scope even if the ref was initialised to
  * `""` before the first reset effect commits.
@@ -55,11 +53,11 @@ export function projectActivityForScope(
 
 export function readActivityFromStorage(
   pubkey: string,
-  relayUrl: string,
+  groupId: string,
 ): ThreadActivityItem[] {
   try {
     const raw = window.localStorage.getItem(
-      activityStorageKey(pubkey, relayUrl),
+      activityStorageKey(pubkey, groupId),
     );
     if (!raw) return [];
     const parsed = JSON.parse(raw);
@@ -77,7 +75,7 @@ export function readActivityFromStorage(
 
 export function writeActivityToStorage(
   pubkey: string,
-  relayUrl: string,
+  groupId: string,
   items: ThreadActivityItem[],
 ): void {
   try {
@@ -86,7 +84,7 @@ export function writeActivityToStorage(
         ? items.slice(items.length - MAX_ACTIVITY_ITEMS)
         : items;
     window.localStorage.setItem(
-      activityStorageKey(pubkey, relayUrl),
+      activityStorageKey(pubkey, groupId),
       JSON.stringify(capped),
     );
   } catch {

@@ -57,6 +57,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goCompany = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/company",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goAgents = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -200,32 +211,6 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
-  const goForumPost = React.useCallback(
-    (
-      channelId: string,
-      postId: string,
-      options?: {
-        replace?: boolean;
-        replyId?: string;
-      },
-    ) =>
-      commitNavigation(
-        {
-          to: "/channels/$channelId/posts/$postId",
-          params: {
-            channelId,
-            postId,
-          },
-          search: options?.replyId ? { replyId: options.replyId } : {},
-        },
-        {
-          replace: options?.replace,
-          resetScroll: false,
-        },
-      ),
-    [commitNavigation],
-  );
-
   const goSettings = React.useCallback(
     (section?: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -256,18 +241,6 @@ export function useAppNavigation() {
     void goWorkflows({ replace: true });
   }, [canGoBack, goWorkflows, router.history]);
 
-  const closeForumPost = React.useCallback(
-    (channelId: string) => {
-      if (canGoBack) {
-        router.history.back();
-        return;
-      }
-
-      void goChannel(channelId, { replace: true });
-    },
-    [canGoBack, goChannel, router.history],
-  );
-
   const openSearchHit = React.useCallback(
     async (hit: SearchHit) => {
       cacheSearchHitEvent(hit);
@@ -277,27 +250,20 @@ export function useAppNavigation() {
         return false;
       }
 
-      if (destination.kind === "forum-post") {
-        return goForumPost(destination.channelId, destination.postId, {
-          replyId: destination.replyId,
-        });
-      }
-
       return goChannel(destination.channelId, {
         messageId: destination.messageId,
         threadRootId: destination.threadRootId,
       });
     },
-    [goChannel, goForumPost],
+    [goChannel],
   );
 
   return {
-    closeForumPost,
     closeSettings,
     closeWorkflowDetail,
     goAgents,
     goChannel,
-    goForumPost,
+    goCompany,
     goHome,
     goNewMessage,
     goProject,

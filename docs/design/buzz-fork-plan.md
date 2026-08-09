@@ -1,9 +1,16 @@
 # tic-tac-toe — Buzz deep-copy plan
 
-**Status:** Design for review
+**Status:** Design for review; implementation snapshot updated 2026-08-05
 **Date:** 2026-07-22
 **Decision (David):** deep-copy Buzz's desktop UX and work from it; extend for symphony/swarm/templates. End state remains pure x0x (no Nostr on any wire beyond the process boundary, and eventually none at all).
 **Ground truth:** seam analysis of `block/buzz` @ main (2026-07-22, Apache-2.0, desktop v0.4.22). File references below are to `buzz-upstream/desktop`.
+
+**As-built divergence:** Stages 1–2 were useful seam analysis, but the packaged
+application did not retain an embedded Nostr bridge. The production tree has
+cut directly to the Stage 3 x0xd REST/WS architecture and AgentId identity.
+The bridge remains a standalone interoperability project. The original staged
+text below is retained as decision history; current execution priorities are
+listed in §5.
 
 ## 1. What Buzz desktop actually is (fork-relevant facts)
 
@@ -167,18 +174,30 @@ being "Buzz on x0x" and becomes the company-in-a-box product.
 
 | Risk | Mitigation |
 |---|---|
-| `thread_metadata` + extended `/query` dialect fidelity (the same risk, write side + read side — riskiest coupling) | One conformance milestone in M1a with fixtures mined from Buzz's interop tests; moved server-side into the x0x history store in Stage 3 so it is solved once, natively |
-| BuilderLab hosted-community dependency (hardcoded Block service) | Cut at Stage 0; local-relay onboarding is the supported path |
+| Native thread ancestry | Read-side history projection exists, but the current x0xd public-message write API accepts only body/kind. Keep group replies disabled until x0xd persists and transports `threadRoot`/`threadParent` end to end. |
+| BuilderLab hosted-community dependency (hardcoded Block service) | Cut; public-group creation and owner-managed AgentId membership are local x0xd operations. Hosted join and invite UI are absent. |
 | Upstream velocity (Buzz is a week old and moving) | Keep `desktop/` tree cherry-pickable through Stage 2 (desktop is outside Buzz's root workspace, easing subtree extraction); accept divergence at Stage 3 by design — by then the UX shell is ours |
-| Two Nostr identities linger past Stage 2 | Stage gate: after Stage 2, npub never appears in UI; CI grep enforces |
-| Stack: team is Rust-first, app is React/TS | Accepted cost of "work from their UX" (David's call); Rust stays in the Tauri shell where our expertise concentrates (daemon, bridge, ACP runtime) |
-| managed_agents runtime is deeply Nostr-evented | Stage 4 maps events → x0x surfaces before extending; do not build templates on the Nostr shapes |
+| Two Nostr identities linger past Stage 2 | Closed in production paths: AgentId is the displayed identity and the no-relay gate rejects application bridge/relay/Nostr runtime dependencies. |
+| Stack: team is Rust-first, app is React/TS | Accepted cost of "work from their UX" (David's call); Rust stays in the Tauri shell where our expertise concentrates (daemon and ACP/Symphony runtime). |
+| managed-agent state inherits Buzz event shapes | Native agent records, group membership, observer frames, and Company manifests are x0x-backed; the remaining risk is live end-to-end workflow evidence, not a compatibility event layer. |
 
-## 5. Immediate next actions
+## 5. Current execution priorities
 
-1. Bridge v2 scope doc + `thread_metadata` conformance fixture extraction
-   from `buzz-relay` ingest code.
-2. Fork + Stage 0 hygiene (LICENSE/NOTICE, strip server crates, CI:
-   Playwright mock suite green in our repo).
-3. ADR-0023 store lands in x0xd (M0 of `tic-tac-toe-v1.md`) — prerequisite
-   for Stage 3, parallel to Stages 0–1.
+The local real-process gate now covers two fresh isolated daemons, direct
+SignedPublic cross-node delivery, zero relayed links, sender restart, and exact
+durable-history recovery. Remaining priorities:
+
+1. Repeat the proof-point suite on two clean physical machines: cold workspace,
+   cross-network DM/public-group delivery, 50-message restart-surviving history
+   and FTS, AgentId cards, managed-agent reply, and listener/packet inspection.
+2. Land and consume an x0xd public-message write contract for
+   `threadRoot`/`threadParent`. Until then, native group replies remain disabled;
+   local-only ancestry is not an acceptable delivery substitute.
+3. Exercise the first public-only Company template against real x0xd, Symphony,
+   and managed-agent processes, including restart resume, cancellation, and
+   single-active rejection. The current runner supports one preset per process;
+   multi-harness role routing is rejected rather than simulated.
+4. Keep authenticated private-group cryptography and invite bootstrap behind
+   David's explicit x0x secure-group design approval. Do not reintroduce the
+   removed policy-mutation, mint/join, or private-message product surfaces before
+   that review lands.

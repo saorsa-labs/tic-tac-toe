@@ -9,7 +9,6 @@ import {
   readActivityFromStorage,
   writeActivityToStorage,
 } from "./threadActivityStorage.ts";
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 
 // Mock window.localStorage with a simple in-memory store.
 if (typeof globalThis.window === "undefined") {
@@ -57,48 +56,55 @@ function makeItem(id, channelId = "channel-1", createdAt = 1) {
 }
 
 // ── activityStorageKey (production function) ─────────────────────────────────
+//
+// The scope dimension is the native x0x group id — a stable opaque identifier,
+// NOT a URL. It is embedded verbatim (no normalization), so two distinct
+// group ids always map to two distinct storage buckets.
 
-test("activityStorageKey normalizes relay URL before embedding", () => {
-  const key1 = activityStorageKey("pk1", "WSS://Relay.Example.Com/");
-  const key2 = activityStorageKey("pk1", "wss://relay.example.com");
-  assert.equal(key1, key2);
+test("activityStorageKey embeds the groupId verbatim", () => {
+  assert.equal(
+    activityStorageKey("pk1", "group-abc"),
+    "buzz-thread-activity.v1:group-abc:pk1",
+  );
 });
 
-test("activityStorageKey produces different keys for different relays", () => {
-  const keyA = activityStorageKey("pk1", "wss://relay-a.example.com");
-  const keyB = activityStorageKey("pk1", "wss://relay-b.example.com");
+test("activityStorageKey produces different keys for different groups", () => {
+  const keyA = activityStorageKey("pk1", "group-a");
+  const keyB = activityStorageKey("pk1", "group-b");
   assert.notEqual(keyA, keyB);
 });
 
 test("activityStorageKey produces different keys for different pubkeys", () => {
-  const key1 = activityStorageKey("pk1", "wss://relay.example.com");
-  const key2 = activityStorageKey("pk2", "wss://relay.example.com");
+  const key1 = activityStorageKey("pk1", "group-a");
+  const key2 = activityStorageKey("pk2", "group-a");
   assert.notEqual(key1, key2);
 });
 
-test("activityStorageKey differs from legacy unscoped key", () => {
+test("activityStorageKey differs from the legacy unscoped key", () => {
+  // The legacy pubkey-only bucket must never collide with a group-scoped one,
+  // so rows from an unknown group cannot be attributed to the current identity.
   const pubkey = "abc123";
-  const relay = "wss://relay.example.com";
+  const groupId = "group-a";
   const legacyKey = `buzz-thread-activity.v1:${pubkey}`;
-  const scopedKey = activityStorageKey(pubkey, relay);
+  const scopedKey = activityStorageKey(pubkey, groupId);
   assert.notEqual(legacyKey, scopedKey);
   assert.ok(
-    scopedKey.includes(normalizeRelayUrl(relay)),
-    "scoped key should contain normalized relay URL",
+    scopedKey.includes(groupId),
+    "scoped key should contain the group id",
   );
 });
 
 // ── write/read round-trip using production functions ─────────────────────────
 
-test("round-trip: items written for relay A are readable under relay A", () => {
+test("round-trip: items written for group A are readable under group A", () => {
   const isolated = makeIsolatedStorage();
   try {
     const pubkey = "pk1";
-    const relayA = "wss://relay-a.example.com";
+    const groupA = "group-a";
     const items = [makeItem("reply-a1", "channel-1", 1)];
 
-    writeActivityToStorage(pubkey, relayA, items);
-    const read = readActivityFromStorage(pubkey, relayA);
+    writeActivityToStorage(pubkey, groupA, items);
+    const read = readActivityFromStorage(pubkey, groupA);
 
     assert.equal(read.length, 1);
     assert.equal(read[0].id, "reply-a1");
@@ -107,16 +113,14 @@ test("round-trip: items written for relay A are readable under relay A", () => {
   }
 });
 
-test("round-trip: items written for relay A are NOT readable under relay B", () => {
+test("round-trip: items written for group A are NOT readable under group B", () => {
   const isolated = makeIsolatedStorage();
   try {
     const pubkey = "pk1";
-    const relayA = "wss://relay-a.example.com";
-    const relayB = "wss://relay-b.example.com";
     const items = [makeItem("reply-a1", "channel-1", 1)];
 
-    writeActivityToStorage(pubkey, relayA, items);
-    const read = readActivityFromStorage(pubkey, relayB);
+    writeActivityToStorage(pubkey, "group-a", items);
+    const read = readActivityFromStorage(pubkey, "group-b");
 
     assert.deepEqual(read, []);
   } finally {
@@ -128,54 +132,36 @@ test("round-trip: A→B→A — A rows absent in B, A rows return on switch back
   const isolated = makeIsolatedStorage();
   try {
     const pubkey = "pk1";
-    const relayA = "wss://relay-a.example.com";
-    const relayB = "wss://relay-b.example.com";
+    const groupA = "group-a";
+    const groupB = "group-b";
 
     // Community A accumulates two activity rows.
     const itemsA = [
       makeItem("reply-a1", "channel-a1", 1),
       makeItem("reply-a2", "channel-a2", 2),
     ];
-    writeActivityToStorage(pubkey, relayA, itemsA);
+    writeActivityToStorage(pubkey, groupA, itemsA);
 
     // Community B has its own rows.
     const itemsB = [makeItem("reply-b1", "channel-b1", 3)];
-    writeActivityToStorage(pubkey, relayB, itemsB);
+    writeActivityToStorage(pubkey, groupB, itemsB);
 
-    // While in community B, reading relay A gives B's rows (not A's).
-    const inB = readActivityFromStorage(pubkey, relayB);
+    // While in community B, reading group B gives B's rows (not A's).
+    const inB = readActivityFromStorage(pubkey, groupB);
     assert.equal(inB.length, 1);
     assert.equal(inB[0].id, "reply-b1");
 
     // A's rows must not appear in B.
     assert.ok(
       !inB.some((item) => item.id === "reply-a1" || item.id === "reply-a2"),
-      "relay A rows must not appear when reading relay B bucket",
+      "group A rows must not appear when reading group B bucket",
     );
 
     // Switch back to A — A's persisted rows return.
-    const backInA = readActivityFromStorage(pubkey, relayA);
+    const backInA = readActivityFromStorage(pubkey, groupA);
     assert.equal(backInA.length, 2);
     assert.ok(backInA.some((item) => item.id === "reply-a1"));
     assert.ok(backInA.some((item) => item.id === "reply-a2"));
-  } finally {
-    isolated.restore();
-  }
-});
-
-test("round-trip: trailing slash on relay URL collapses to same bucket", () => {
-  const isolated = makeIsolatedStorage();
-  try {
-    const pubkey = "pk1";
-    const relayWithSlash = "wss://relay.example.com/";
-    const relayWithout = "wss://relay.example.com";
-    const items = [makeItem("reply-1", "channel-1", 1)];
-
-    writeActivityToStorage(pubkey, relayWithSlash, items);
-    const read = readActivityFromStorage(pubkey, relayWithout);
-
-    assert.equal(read.length, 1);
-    assert.equal(read[0].id, "reply-1");
   } finally {
     isolated.restore();
   }
@@ -185,12 +171,12 @@ test("round-trip: corrupt JSON in storage returns empty array without throwing",
   const isolated = makeIsolatedStorage();
   try {
     const pubkey = "pk1";
-    const relay = "wss://relay.example.com";
+    const groupId = "group-a";
     globalThis.window.localStorage.setItem(
-      activityStorageKey(pubkey, relay),
+      activityStorageKey(pubkey, groupId),
       "not-valid-json{{{",
     );
-    const read = readActivityFromStorage(pubkey, relay);
+    const read = readActivityFromStorage(pubkey, groupId);
     assert.deepEqual(read, []);
   } finally {
     isolated.restore();
@@ -201,12 +187,12 @@ test("round-trip: non-array JSON in storage returns empty array", () => {
   const isolated = makeIsolatedStorage();
   try {
     const pubkey = "pk1";
-    const relay = "wss://relay.example.com";
+    const groupId = "group-a";
     globalThis.window.localStorage.setItem(
-      activityStorageKey(pubkey, relay),
+      activityStorageKey(pubkey, groupId),
       JSON.stringify({ not: "an array" }),
     );
-    const read = readActivityFromStorage(pubkey, relay);
+    const read = readActivityFromStorage(pubkey, groupId);
     assert.deepEqual(read, []);
   } finally {
     isolated.restore();
@@ -264,28 +250,26 @@ test("addThreadActivityItems returns didAdd false when all items are duplicates"
 // ── activityScopeKey (scope-ref identity helper) ─────────────────────────────
 
 test("activityScopeKey returns empty string when pubkey is null", () => {
-  assert.equal(activityScopeKey(null, "wss://relay.example.com"), "");
+  assert.equal(activityScopeKey(null, "group-a"), "");
 });
 
-test("activityScopeKey returns empty string when relayUrl is empty", () => {
+test("activityScopeKey returns empty string when groupId is empty", () => {
   assert.equal(activityScopeKey("pk1", ""), "");
 });
 
-test("activityScopeKey normalizes relay URL", () => {
-  const k1 = activityScopeKey("pk1", "WSS://Relay.Example.Com/");
-  const k2 = activityScopeKey("pk1", "wss://relay.example.com");
-  assert.equal(k1, k2);
+test("activityScopeKey embeds the groupId verbatim", () => {
+  assert.equal(activityScopeKey("pk1", "group-a"), "pk1:group-a");
 });
 
 test("activityScopeKey differs for different pubkeys", () => {
-  const k1 = activityScopeKey("pk1", "wss://relay.example.com");
-  const k2 = activityScopeKey("pk2", "wss://relay.example.com");
+  const k1 = activityScopeKey("pk1", "group-a");
+  const k2 = activityScopeKey("pk2", "group-a");
   assert.notEqual(k1, k2);
 });
 
-test("activityScopeKey differs for different relays", () => {
-  const k1 = activityScopeKey("pk1", "wss://relay-a.example.com");
-  const k2 = activityScopeKey("pk1", "wss://relay-b.example.com");
+test("activityScopeKey differs for different groups", () => {
+  const k1 = activityScopeKey("pk1", "group-a");
+  const k2 = activityScopeKey("pk1", "group-b");
   assert.notEqual(k1, k2);
 });
 
@@ -302,10 +286,10 @@ test("activityScopeKey differs for different relays", () => {
 // This proves that A rows are hidden on the first B render (before the reset
 // effect commits), and restored only when A is active again.
 
-function makeScopeState({ pubkey, relayUrl, loadedItems = [] } = {}) {
+function makeScopeState({ pubkey, groupId, loadedItems = [] } = {}) {
   const loaded = loadedItems;
   // Simulate what the reset effect writes (executed after commit, not in render).
-  const effectCommitScope = activityScopeKey(pubkey ?? null, relayUrl ?? "");
+  const effectCommitScope = activityScopeKey(pubkey ?? null, groupId ?? "");
   return {
     threadActivityScopeRef: { current: effectCommitScope },
     threadActivityItems: loaded,
@@ -316,9 +300,9 @@ function renderFence(
   threadActivityScopeRef,
   threadActivityItems,
   pubkey,
-  relayUrl,
+  groupId,
 ) {
-  const currentScope = activityScopeKey(pubkey ?? null, relayUrl ?? "");
+  const currentScope = activityScopeKey(pubkey ?? null, groupId ?? "");
   return projectActivityForScope(
     threadActivityScopeRef.current,
     currentScope,
@@ -327,12 +311,12 @@ function renderFence(
 }
 
 test("scope-transition: A rows visible when scope matches A (steady state)", () => {
-  const relayA = "wss://relay-a.example.com";
+  const groupA = "group-a";
   const pubkey = "pk1";
   const itemsA = [{ id: "a1" }];
   const state = makeScopeState({
     pubkey,
-    relayUrl: relayA,
+    groupId: groupA,
     loadedItems: itemsA,
   });
 
@@ -340,21 +324,21 @@ test("scope-transition: A rows visible when scope matches A (steady state)", () 
     state.threadActivityScopeRef,
     state.threadActivityItems,
     pubkey,
-    relayA,
+    groupA,
   );
   assert.deepEqual(visible, itemsA);
 });
 
 test("scope-transition: A rows hidden on first B render (scope mismatch before effect commits)", () => {
-  const relayA = "wss://relay-a.example.com";
-  const relayB = "wss://relay-b.example.com";
+  const groupA = "group-a";
+  const groupB = "group-b";
   const pubkey = "pk1";
   const itemsA = [{ id: "a1" }, { id: "a2" }];
 
   // State reflects A's committed scope (reset effect hasn't run for B yet).
   const state = makeScopeState({
     pubkey,
-    relayUrl: relayA,
+    groupId: groupA,
     loadedItems: itemsA,
   });
 
@@ -363,7 +347,7 @@ test("scope-transition: A rows hidden on first B render (scope mismatch before e
     state.threadActivityScopeRef,
     state.threadActivityItems,
     pubkey,
-    relayB,
+    groupB,
   );
   assert.deepEqual(
     visible,
@@ -373,14 +357,14 @@ test("scope-transition: A rows hidden on first B render (scope mismatch before e
 });
 
 test("scope-transition: B rows visible after B reset effect commits", () => {
-  const relayB = "wss://relay-b.example.com";
+  const groupB = "group-b";
   const pubkey = "pk1";
   const itemsB = [{ id: "b1" }];
 
   // Reset effect has now committed for B.
   const state = makeScopeState({
     pubkey,
-    relayUrl: relayB,
+    groupId: groupB,
     loadedItems: itemsB,
   });
 
@@ -388,14 +372,14 @@ test("scope-transition: B rows visible after B reset effect commits", () => {
     state.threadActivityScopeRef,
     state.threadActivityItems,
     pubkey,
-    relayB,
+    groupB,
   );
   assert.deepEqual(visible, itemsB);
 });
 
 test("scope-transition: A→B→A — A rows return when A's reset effect commits again", () => {
-  const relayA = "wss://relay-a.example.com";
-  const relayB = "wss://relay-b.example.com";
+  const groupA = "group-a";
+  const groupB = "group-b";
   const pubkey = "pk1";
   const itemsA = [{ id: "a1" }, { id: "a2" }];
   const itemsB = [{ id: "b1" }];
@@ -403,7 +387,7 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
   // Step 1: in A, scope and ref match A.
   const stateA = makeScopeState({
     pubkey,
-    relayUrl: relayA,
+    groupId: groupA,
     loadedItems: itemsA,
   });
   assert.deepEqual(
@@ -411,7 +395,7 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
       stateA.threadActivityScopeRef,
       stateA.threadActivityItems,
       pubkey,
-      relayA,
+      groupA,
     ),
     itemsA,
   );
@@ -422,7 +406,7 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
       stateA.threadActivityScopeRef,
       stateA.threadActivityItems,
       pubkey,
-      relayB,
+      groupB,
     ),
     [],
     "A rows must be hidden on B transition render",
@@ -431,7 +415,7 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
   // Step 3: B reset effect commits — now ref holds B scope and B items.
   const stateB = makeScopeState({
     pubkey,
-    relayUrl: relayB,
+    groupId: groupB,
     loadedItems: itemsB,
   });
   assert.deepEqual(
@@ -439,7 +423,7 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
       stateB.threadActivityScopeRef,
       stateB.threadActivityItems,
       pubkey,
-      relayB,
+      groupB,
     ),
     itemsB,
   );
@@ -450,7 +434,7 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
       stateB.threadActivityScopeRef,
       stateB.threadActivityItems,
       pubkey,
-      relayA,
+      groupA,
     ),
     [],
     "B rows must be hidden on A transition render",
@@ -459,7 +443,7 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
   // Step 5: A reset effect commits — A rows return.
   const stateA2 = makeScopeState({
     pubkey,
-    relayUrl: relayA,
+    groupId: groupA,
     loadedItems: itemsA,
   });
   assert.deepEqual(
@@ -467,14 +451,14 @@ test("scope-transition: A→B→A — A rows return when A's reset effect commit
       stateA2.threadActivityScopeRef,
       stateA2.threadActivityItems,
       pubkey,
-      relayA,
+      groupA,
     ),
     itemsA,
     "A rows must return when A's reset effect commits again",
   );
 });
 
-test("scope-transition: empty pubkey produces empty fence regardless of relay", () => {
+test("scope-transition: empty pubkey produces empty fence regardless of group", () => {
   // When currentActivityScope is "" (no pubkey), the hook never loads items
   // into threadActivityRef — the reset effect guards on normalizedPubkey.
   // So scope "" with empty items correctly returns [].
@@ -486,7 +470,7 @@ test("scope-transition: empty pubkey produces empty fence regardless of relay", 
     state.threadActivityScopeRef,
     state.threadActivityItems,
     null,
-    "wss://relay.example.com",
+    "group-a",
   );
   assert.deepEqual(visible, []);
 });
@@ -510,11 +494,7 @@ test("projectActivityForScope: rejects empty currentScope even if loadedScope is
 test("projectActivityForScope: returns items when both scopes are equal and non-empty", () => {
   const items = [{ id: "x1" }];
   assert.deepEqual(
-    projectActivityForScope(
-      "pk:wss://relay.example.com/",
-      "pk:wss://relay.example.com/",
-      items,
-    ),
+    projectActivityForScope("pk1:group-a", "pk1:group-a", items),
     items,
   );
 });
@@ -522,11 +502,7 @@ test("projectActivityForScope: returns items when both scopes are equal and non-
 test("projectActivityForScope: returns [] on scope mismatch", () => {
   const items = [{ id: "x1" }];
   assert.deepEqual(
-    projectActivityForScope(
-      "pk:wss://relay-a.example.com/",
-      "pk:wss://relay-b.example.com/",
-      items,
-    ),
+    projectActivityForScope("pk1:group-a", "pk1:group-b", items),
     [],
   );
 });

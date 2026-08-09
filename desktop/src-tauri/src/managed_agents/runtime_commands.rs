@@ -20,7 +20,7 @@ fn status_for(
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
-    requested_relay_url: Option<String>,
+    requested_group_id: Option<String>,
 ) -> ManagedAgentRuntimeStatus {
     let personas = load_personas(app).unwrap_or_default();
     let global = load_global_agent_config(app).unwrap_or_default();
@@ -29,7 +29,7 @@ fn status_for(
         record,
         key,
         runtime,
-        requested_relay_url,
+        requested_group_id,
         StatusInputs {
             personas: &personas,
             global: &global,
@@ -49,7 +49,7 @@ fn status_for_with(
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
-    requested_relay_url: Option<String>,
+    requested_group_id: Option<String>,
     inputs: StatusInputs<'_>,
 ) -> ManagedAgentRuntimeStatus {
     let StatusInputs { personas, global } = inputs;
@@ -59,8 +59,8 @@ fn status_for_with(
     let local_setup = matches!(agent_readiness(&effective), AgentReadiness::Ready);
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
-        relay_url: key.relay_url.clone(),
-        requested_relay_url,
+        group_id: key.group_id.clone(),
+        requested_group_id,
         local_setup,
         lifecycle: runtime
             .map(|runtime| runtime.lifecycle.clone())
@@ -96,7 +96,7 @@ fn observer_lifecycle_key(
     if payload.lifecycle != ManagedAgentRuntimeLifecycle::Failed && payload.error.is_some() {
         return Err("lifecycle error is only valid for failed".into());
     }
-    ManagedAgentRuntimeKey::new(payload.pubkey.clone(), &payload.relay_url)
+    ManagedAgentRuntimeKey::new(payload.pubkey.clone(), &payload.group_id)
 }
 
 #[tauri::command]
@@ -221,24 +221,24 @@ pub fn list_managed_agent_runtimes(
 
 pub(crate) fn start_managed_agent_runtime_pair_lazy(
     pubkey: String,
-    relay_url: String,
+    group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, group_id, true, None, app)
 }
 
 #[tauri::command]
 pub fn start_managed_agent_runtime(
     pubkey: String,
-    relay_url: String,
+    group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_managed_agent_runtime_pair_lazy(pubkey, relay_url, app)
+    start_managed_agent_runtime_pair_lazy(pubkey, group_id, app)
 }
 
 fn start_pair(
     pubkey: String,
-    relay_url: String,
+    group_id: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
     app: AppHandle,
@@ -263,7 +263,7 @@ fn start_pair(
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
-    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    let key = ManagedAgentRuntimeKey::new(pubkey, &group_id)?;
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -278,12 +278,7 @@ fn start_pair(
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
 
-    let owner = state
-        .keys
-        .lock()
-        .ok()
-        .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    let mut process = spawn_agent_child(&app, record, &key.group_id, lazy)?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -312,7 +307,7 @@ fn start_pair(
 #[tauri::command]
 pub fn stop_managed_agent_runtime(
     pubkey: String,
-    relay_url: String,
+    group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
@@ -326,7 +321,7 @@ pub fn stop_managed_agent_runtime(
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
-    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    let key = ManagedAgentRuntimeKey::new(pubkey, &group_id)?;
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -379,193 +374,11 @@ pub fn stop_managed_agent_runtime(
 #[tauri::command]
 pub fn restart_managed_agent_runtime(
     pubkey: String,
-    relay_url: String,
+    group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
-    start_pair(pubkey, relay_url, true, None, app)
-}
-
-/// Probe whether this agent can operate on `requested_relay_url`.
-///
-/// Runs a bounded authenticated query with the agent's own keys (NIP-42 +
-/// NIP-OA auth tag). Auth success is the spawn-eligibility signal: NIP-29
-/// membership (kind 39002) cannot exist before the agent's harness first
-/// connects to a relay, so gating on membership *presence* could never
-/// bootstrap a pair on a newly configured community — it only rediscovered
-/// pairs that had already run. A rejected or timed-out probe surfaces as a
-/// Failed status row instead of a silent skip.
-async fn probe_agent_relay_access(
-    state: &AppState,
-    record: super::ManagedAgentRecord,
-    requested_relay_url: String,
-) -> Result<(super::ManagedAgentRecord, ManagedAgentRuntimeKey, String), String> {
-    let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
-    let keys = nostr::Keys::parse(record.private_key_nsec.trim())
-        .map_err(|error| format!("invalid managed-agent key: {error}"))?;
-    let api_base = crate::relay::relay_http_base_url(&key.relay_url);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        crate::relay::query_relay_at_with_keys(
-            state,
-            &api_base,
-            &[serde_json::json!({"kinds": [39002], "#p": [record.pubkey]})],
-            &keys,
-            record.auth_tag.as_deref(),
-        ),
-    )
-    .await
-    .map_err(|_| "relay access probe timed out".to_string())??;
-    Ok((record, key, requested_relay_url))
-}
-
-/// Build the `Failed` status row for a probe failure whose requested relay URL
-/// cannot even form a pair key (so there is no canonical `relay_url` to key on).
-/// The raw requested URL stands in for both the identity and the requested
-/// field so the batch still degrades this one community to a visible row
-/// instead of aborting every other community's row.
-fn unkeyable_failed_status(
-    record: &super::ManagedAgentRecord,
-    requested: String,
-    error: String,
-    personas: &[super::AgentDefinition],
-    global: &super::GlobalAgentConfig,
-) -> ManagedAgentRuntimeStatus {
-    let command = record_agent_command(record, personas);
-    let metadata = super::known_acp_runtime(&command);
-    let effective = resolve_effective_agent_env(record, personas, metadata, global);
-    ManagedAgentRuntimeStatus {
-        pubkey: record.pubkey.clone(),
-        relay_url: requested.clone(),
-        requested_relay_url: Some(requested),
-        local_setup: matches!(agent_readiness(&effective), AgentReadiness::Ready),
-        lifecycle: ManagedAgentRuntimeLifecycle::Failed,
-        pid: None,
-        error: Some(error),
-        log_path: None,
-    }
-}
-
-/// Spawn a lazy harness pair for every eligible (agent, community) pair.
-///
-/// Eligibility is deliberately gated on `start_on_app_launch`: auto-start is
-/// the *proactive fan-out* policy — "keep this agent warm in every community" —
-/// not a correctness prerequisite. A manual-start agent still works on demand
-/// everywhere: attaching it to a channel ensures its pair, an @mention wakes a
-/// pair, the members sidebar and Settings controls start pairs, and restore
-/// preserves running pairs across relaunch. Fanning out warm-socket pairs for
-/// agents the user chose *not* to auto-start would contradict that choice, so
-/// reconcile leaves them alone until something explicitly asks for them.
-#[tauri::command]
-pub async fn reconcile_managed_agent_runtimes(
-    communities: Vec<super::ManagedAgentCommunityTarget>,
-    app: AppHandle,
-) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
-    use futures_util::{stream, StreamExt};
-
-    let records = load_managed_agents(&app)?;
-    let mut jobs = Vec::new();
-    for community in communities {
-        for record in records
-            .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
-        // The legacy per-record relay pin is deliberately ignored here — see
-        // `effective_agent_relay_url`. Every local auto-start agent fans out
-        // to every configured community.
-        {
-            jobs.push((record.clone(), community.relay_url.clone()));
-        }
-    }
-    let probes: Vec<_> = stream::iter(jobs)
-        .map(|(record, requested)| {
-            let state = app.state::<AppState>();
-            async move {
-                let fallback_record = record.clone();
-                let fallback_requested = requested.clone();
-                probe_agent_relay_access(&state, record, requested)
-                    .await
-                    .map_err(|error| (fallback_record, fallback_requested, error))
-            }
-        })
-        .buffer_unordered(6)
-        .collect()
-        .await;
-
-    // start_pair does blocking work (std mutexes, process spawn, receipt
-    // writes, and up-to-2s exit polling in terminate_untracked_pair_runtime),
-    // so run the post-probe start loop off the async workers, matching the
-    // restart flows.
-    tokio::task::spawn_blocking(move || {
-        let personas = load_personas(&app).unwrap_or_default();
-        let global = load_global_agent_config(&app).unwrap_or_default();
-        let mut rows = Vec::new();
-        for probe in probes {
-            match probe {
-                Ok((record, key, requested)) => {
-                    match start_pair(
-                        record.pubkey.clone(),
-                        key.relay_url.clone(),
-                        true,
-                        Some(&record.updated_at),
-                        app.clone(),
-                    ) {
-                        Ok(mut status) => {
-                            status.requested_relay_url = Some(requested);
-                            rows.push(status);
-                        }
-                        Err(error) => {
-                            let mut status = status_for_with(
-                                &app,
-                                &record,
-                                &key,
-                                None,
-                                Some(requested),
-                                StatusInputs {
-                                    personas: &personas,
-                                    global: &global,
-                                },
-                            );
-                            status.lifecycle = ManagedAgentRuntimeLifecycle::Failed;
-                            status.error = Some(error);
-                            rows.push(status);
-                        }
-                    }
-                }
-                Err((record, requested, error)) => {
-                    // Per-community degradation: a relay URL that cannot even
-                    // form a pair key gets a Failed row (with the raw
-                    // requested URL) like any other probe failure, instead of
-                    // aborting every other community's row.
-                    let status =
-                        match ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested) {
-                            Ok(key) => {
-                                let mut status = status_for_with(
-                                    &app,
-                                    &record,
-                                    &key,
-                                    None,
-                                    Some(requested),
-                                    StatusInputs {
-                                        personas: &personas,
-                                        global: &global,
-                                    },
-                                );
-                                status.lifecycle = ManagedAgentRuntimeLifecycle::Failed;
-                                status.error = Some(error);
-                                status
-                            }
-                            Err(_) => unkeyable_failed_status(
-                                &record, requested, error, &personas, &global,
-                            ),
-                        };
-                    rows.push(status);
-                }
-            }
-        }
-        rows
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))
+    stop_managed_agent_runtime(pubkey.clone(), group_id.clone(), app.clone())?;
+    start_pair(pubkey, group_id, true, None, app)
 }
 
 #[cfg(test)]
@@ -573,141 +386,59 @@ mod tests {
     use super::*;
 
     fn payload(
-        relay_url: &str,
+        group_id: &str,
         lifecycle: ManagedAgentRuntimeLifecycle,
         error: Option<&str>,
     ) -> super::super::ManagedAgentRuntimeLifecycleObserverPayload {
         super::super::ManagedAgentRuntimeLifecycleObserverPayload {
             pubkey: "aa".repeat(32),
-            relay_url: relay_url.into(),
+            group_id: group_id.into(),
             start_nonce: "test-generation".into(),
             lifecycle,
             error: error.map(str::to_owned),
         }
     }
 
-    fn record_with_relay(relay_url: &str) -> super::super::ManagedAgentRecord {
-        serde_json::from_str(&format!(
-            r#"{{
-                "pubkey": "{}",
-                "name": "pin-test",
-                "relay_url": "{relay_url}",
-                "acp_command": "buzz-acp",
-                "agent_command": "goose",
-                "agent_args": [],
-                "mcp_command": "",
-                "turn_timeout_seconds": 320,
-                "system_prompt": "",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
-            }}"#,
-            "aa".repeat(32)
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn legacy_relay_pin_is_ignored_for_fan_out() {
-        // Zero-touch cutover (#2122): a record carrying a creation-era
-        // `relay_url` pin must fan out exactly like an unpinned one — the
-        // stored field is parsed but never consulted. See
-        // `effective_agent_relay_url`.
-        let unpinned = record_with_relay("");
-        let pinned = record_with_relay("wss://one.example");
-        for record in [&unpinned, &pinned] {
-            assert_eq!(
-                crate::relay::effective_agent_relay_url(&record.relay_url, "wss://two.example"),
-                "wss://two.example"
-            );
-        }
-    }
-
-    #[test]
-    fn unkeyable_relay_degrades_to_failed_row() {
-        // A requested URL that cannot form a pair key must still yield a
-        // Failed row keyed by the raw requested string, so one bad community
-        // never aborts the rest of the reconcile batch.
-        let record = record_with_relay("");
-        let status = unkeyable_failed_status(
-            &record,
-            "not a url".to_string(),
-            "relay access probe timed out".to_string(),
-            &[],
-            &super::super::GlobalAgentConfig::default(),
-        );
-        assert!(matches!(
-            status.lifecycle,
-            ManagedAgentRuntimeLifecycle::Failed
-        ));
-        assert_eq!(status.relay_url, "not a url");
-        assert_eq!(status.requested_relay_url.as_deref(), Some("not a url"));
-        assert_eq!(status.pubkey, record.pubkey);
-        assert_eq!(
-            status.error.as_deref(),
-            Some("relay access probe timed out")
-        );
-        assert!(status.pid.is_none());
-    }
-
     #[test]
     fn runtime_key_rejects_non_hex_pubkeys() {
-        assert!(ManagedAgentRuntimeKey::new("../not-a-key", "wss://relay.example").is_err());
-        assert!(ManagedAgentRuntimeKey::new("gg".repeat(32), "wss://relay.example").is_err());
+        assert!(ManagedAgentRuntimeKey::new("../not-a-key", "group-a").is_err());
+        assert!(ManagedAgentRuntimeKey::new("gg".repeat(32), "group-a").is_err());
     }
 
     #[test]
     fn runtime_key_canonicalizes_hex_pubkeys() {
-        let key = ManagedAgentRuntimeKey::new("AA".repeat(32), "wss://relay.example").unwrap();
+        let key = ManagedAgentRuntimeKey::new("AA".repeat(32), "group-a").unwrap();
         assert_eq!(key.pubkey, "aa".repeat(32));
+        assert_eq!(key.group_id, "group-a");
     }
 
     #[test]
-    fn observer_lifecycle_key_preserves_exact_canonical_pair() {
-        let first = payload(
-            "WSS://Relay.Example:443/",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
+    fn observer_lifecycle_key_preserves_exact_group_pair() {
+        let first = payload("group-a", ManagedAgentRuntimeLifecycle::Ready, None);
         let key = observer_lifecycle_key(&first.pubkey, &first).unwrap();
         assert_eq!(key.pubkey, first.pubkey);
-        assert_eq!(key.relay_url, "wss://relay.example");
+        assert_eq!(key.group_id, "group-a");
 
-        let other = payload(
-            "wss://other.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
+        let other = payload("group-b", ManagedAgentRuntimeLifecycle::Ready, None);
         assert_ne!(key, observer_lifecycle_key(&other.pubkey, &other).unwrap());
     }
 
     #[test]
     fn observer_lifecycle_rejects_cross_agent_and_desktop_states() {
-        let ready = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
+        let ready = payload("group-a", ManagedAgentRuntimeLifecycle::Ready, None);
         assert!(observer_lifecycle_key(&"bb".repeat(32), &ready).is_err());
 
-        let stopped = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Stopped,
-            None,
-        );
+        let stopped = payload("group-a", ManagedAgentRuntimeLifecycle::Stopped, None);
         assert!(observer_lifecycle_key(&stopped.pubkey, &stopped).is_err());
     }
 
     #[test]
     fn observer_lifecycle_enforces_failed_error_contract() {
-        let failed = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Failed,
-            None,
-        );
+        let failed = payload("group-a", ManagedAgentRuntimeLifecycle::Failed, None);
         assert!(observer_lifecycle_key(&failed.pubkey, &failed).is_err());
 
         let ready_with_error = payload(
-            "wss://relay.example",
+            "group-a",
             ManagedAgentRuntimeLifecycle::Ready,
             Some("unexpected"),
         );

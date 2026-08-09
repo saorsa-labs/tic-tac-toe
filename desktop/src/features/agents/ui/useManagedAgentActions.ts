@@ -21,7 +21,7 @@ import type {
   CreateManagedAgentResponse,
   ManagedAgent,
 } from "@/shared/api/types";
-import { removeChannelMember } from "@/shared/api/tauri";
+import { x0xRemoveGroupMember } from "@/shared/api/tauriNativeX0x";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
@@ -227,25 +227,13 @@ export function useManagedAgentActions() {
     }
   }
 
-  async function getChannelsForAction() {
-    if (channelsQuery.data) {
-      return channelsQuery.data;
-    }
-
-    const result = await channelsQuery.refetch();
-    return result.data ?? [];
-  }
-
   async function handleStop(pubkey: string) {
     clearFeedback();
     try {
       const agent = managedAgents.find((a) => a.pubkey === pubkey);
       if (!agent) return;
-      const channels = await getChannelsForAction();
       const result = await stopManagedAgentWithRules({
         agent,
-        channels,
-        relayAgents: relayAgentsQuery.data ?? [],
         stopManagedAgent: stopMutation.mutateAsync,
       });
       if (result.noticeMessage) {
@@ -270,7 +258,7 @@ export function useManagedAgentActions() {
     const channelIds = getAgentChannelIds(pubkey);
     if (channelIds.length === 0) return;
     await Promise.allSettled(
-      channelIds.map((channelId) => removeChannelMember(channelId, pubkey)),
+      channelIds.map((channelId) => x0xRemoveGroupMember(channelId, pubkey)),
     );
   }
 
@@ -279,13 +267,9 @@ export function useManagedAgentActions() {
     try {
       const agent = managedAgents.find((a) => a.pubkey === pubkey);
       if (!agent) return;
-      const channels = await getChannelsForAction();
       const result = await deleteManagedAgentWithRules({
         agent,
-        channels,
         deleteManagedAgent: deleteMutation.mutateAsync,
-        presenceLookup: managedPresenceQuery.data,
-        relayAgents: relayAgentsQuery.data ?? [],
       });
       if (result.cancelled) return;
       await removeAgentFromAllChannels(pubkey);
@@ -371,8 +355,6 @@ export function useManagedAgentActions() {
       (a) =>
         stopManagedAgentWithRules({
           agent: a,
-          channels: channelsQuery.data ?? [],
-          relayAgents: relayAgentsQuery.data ?? [],
           stopManagedAgent: stopMutation.mutateAsync,
         }),
     );

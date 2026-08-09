@@ -129,6 +129,32 @@ export async function load(url, context, nextLoad) {
     };
   }
 
+  // Vite resolves image/font asset imports (e.g. `import url from "./x.png"`,
+  // the `?inline` query in shared/ui/RuntimeIcon) at bundle time; node's ESM
+  // loader can't read them and they're never read for value in unit tests.
+  // Serve as empty modules so components that pull in static assets stay
+  // unit-testable.
+  const assetPath = url.split("?")[0];
+  if (
+    assetPath.endsWith(".png") ||
+    assetPath.endsWith(".svg") ||
+    assetPath.endsWith(".jpg") ||
+    assetPath.endsWith(".jpeg") ||
+    assetPath.endsWith(".webp") ||
+    assetPath.endsWith(".gif") ||
+    assetPath.endsWith(".avif") ||
+    assetPath.endsWith(".ico") ||
+    assetPath.endsWith(".woff") ||
+    assetPath.endsWith(".woff2") ||
+    assetPath.endsWith(".ttf")
+  ) {
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: 'export default "";',
+    };
+  }
+
   if (url.endsWith(".tsx")) {
     const source = fs.readFileSync(fileURLToPath(url), "utf8");
     const transpiled = ts.transpileModule(source, {

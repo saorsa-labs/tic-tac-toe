@@ -12,6 +12,9 @@ const MOCK_AVATAR_DATA_URL =
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const MOCK_RELAY_URL = "ws://localhost:3000";
 const SELF_PROFILE_CACHE_KEY = `buzz-self-profile.v1:${MOCK_RELAY_URL}:${MOCK_PUBKEY}`;
+// M2 identity: the mock viewer's displayed name is its four speakable words
+// (derived from agentId), never a Nostr key. See e2eBridge MOCK_IDENTITY_WORDS.
+const MOCK_IDENTITY_DISPLAY_NAME = "bodily example dismiss galaxy";
 
 async function settle(page: import("@playwright/test").Page) {
   await page.evaluate(() =>
@@ -194,14 +197,14 @@ test.describe("relay connectivity", () => {
     await settle(page);
   });
 
-  test("05 — no-cache npub fallback when offline", async ({ page }) => {
-    // No cache seeded — profile card falls back to the mock identity npub name.
+  test("05 — no-cache identity fallback when offline", async ({ page }) => {
+    // No cache seeded — profile card falls back to the mock viewer's
+    // four-word AgentId identity.
     await installMockBridge(page, { profileReadError: RELAY_UNREACHABLE });
     await page.goto("/");
 
     const profileCard = page.getByTestId("sidebar-profile-card");
-    // Default mock identity display name is "npub1mock...".
-    await expect(profileCard).toContainText("npub1mock");
+    await expect(profileCard).toContainText(MOCK_IDENTITY_DISPLAY_NAME);
     await settle(page);
   });
 

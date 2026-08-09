@@ -7,9 +7,6 @@ fn record() -> ManagedAgentRecord {
         pubkey: "p".repeat(64),
         name: "agent".into(),
         persona_id: None,
-        private_key_nsec: "nsec1fake".into(),
-        auth_tag: None,
-        relay_url: "ws://localhost:3000".into(),
         avatar_url: None,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
@@ -54,7 +51,6 @@ fn record() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
-        relay_mesh: None,
     }
 }
 
@@ -178,32 +174,13 @@ fn persona_prompt_edit_changes_hash() {
 }
 
 #[test]
-fn workspace_relay_change_trips_hash_even_for_stored_record_relay() {
-    // The legacy per-record relay pin is ignored (#2122): every record spawns
-    // against the active workspace relay, so a workspace relay change means a
-    // restart would change what runs — pinned records included.
+fn group_id_change_trips_hash() {
+    // Every record spawns under the active workspace group, so a group
+    // change means a restart would change what runs.
     let rec = record();
-    assert!(
-        !rec.relay_url.is_empty(),
-        "fixture should carry a legacy pin"
-    );
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
-        spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
-    );
-}
-
-#[test]
-fn stored_record_relay_does_not_affect_hash() {
-    // Editing the (ignored) stored pin must not badge a restart: what a
-    // restart would run is identical either way.
-    let mut a = record();
-    let mut b = record();
-    a.relay_url = String::new();
-    b.relay_url = "wss://legacy-pin.example".into();
-    assert_eq!(
-        spawn_config_hash(&a, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&b, &[], &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "group-a", &Default::default()),
+        spawn_config_hash(&rec, &[], &[], "group-b", &Default::default())
     );
 }
 

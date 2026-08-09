@@ -134,14 +134,14 @@ function getReactionTargetId(tags: string[][]) {
 function formatMessageAuthor(
   event: RelayEvent,
   channel: Channel | null,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   profiles: UserProfileLookup | undefined,
-  relaySelfPubkey: string | null | undefined,
+  eventAuthorityAgentId: string | null | undefined,
 ) {
   const authorPubkey = resolveEventAuthorPubkey({
     event,
     preferActorTag: true,
-    relaySelfPubkey,
+    relaySelfPubkey: eventAuthorityAgentId,
     requireChannelTagForPTags: true,
   });
   const fallbackName =
@@ -159,7 +159,7 @@ function formatMessageAuthor(
 
   return resolveUserLabel({
     pubkey: authorPubkey,
-    currentPubkey,
+    currentAgentId,
     fallbackName,
     profiles,
     preferResolvedSelfLabel: true,
@@ -168,13 +168,14 @@ function formatMessageAuthor(
 
 function getAuthorAvatarUrl(input: {
   authorPubkey: string;
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   currentUserAvatarUrl: string | null;
   profiles: UserProfileLookup | undefined;
 }) {
-  const { authorPubkey, currentPubkey, currentUserAvatarUrl, profiles } = input;
+  const { authorPubkey, currentAgentId, currentUserAvatarUrl, profiles } =
+    input;
 
-  if (currentPubkey === authorPubkey) {
+  if (currentAgentId === authorPubkey) {
     return currentUserAvatarUrl ?? null;
   }
 
@@ -184,7 +185,7 @@ function getAuthorAvatarUrl(input: {
 export function formatTimelineMessages(
   events: RelayEvent[],
   channel: Channel | null,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   currentUserAvatarUrl: string | null,
   profiles?: UserProfileLookup,
   members?: ChannelMember[],
@@ -193,11 +194,11 @@ export function formatTimelineMessages(
   /** Map from lowercase pubkey → respond-to mode for bot messages. */
   respondToLookup?: Map<string, RespondToMode>,
   /** Active relay identity from NIP-11 `self`; absent or malformed fails closed to the signer. */
-  relaySelfPubkey?: string | null,
+  eventAuthorityAgentId?: string | null,
   /** Profiles for verified agent owners, fetched in one batch by the surface. */
   ownerProfiles?: UserProfileLookup,
 ): TimelineMessage[] {
-  const currentPubkeyLower = currentPubkey?.toLowerCase();
+  const currentAgentIdLower = currentAgentId?.toLowerCase();
   const roleByPubkey = new Map<string, string>();
   if (members) {
     for (const member of members) {
@@ -279,7 +280,7 @@ export function formatTimelineMessages(
     const actorPubkey = resolveEventAuthorPubkey({
       event,
       preferActorTag: true,
-      relaySelfPubkey,
+      relaySelfPubkey: eventAuthorityAgentId,
       requireChannelTagForPTags: true,
     }).toLowerCase();
     const emoji = event.content.trim() || "+";
@@ -331,13 +332,13 @@ export function formatTimelineMessages(
     }
 
     existing.count += 1;
-    if (currentPubkeyLower && actorPubkey === currentPubkeyLower) {
+    if (currentAgentIdLower && actorPubkey === currentAgentIdLower) {
       existing.reactedByCurrentUser = true;
     }
 
     const profile = profiles?.[actorPubkey];
     const displayName =
-      currentPubkeyLower && actorPubkey === currentPubkeyLower
+      currentAgentIdLower && actorPubkey === currentAgentIdLower
         ? "You"
         : profile?.displayName?.trim() ||
           profile?.nip05Handle?.trim() ||
@@ -366,15 +367,15 @@ export function formatTimelineMessages(
     const authorPubkey = resolveEventAuthorPubkey({
       event,
       preferActorTag: true,
-      relaySelfPubkey,
+      relaySelfPubkey: eventAuthorityAgentId,
       requireChannelTagForPTags: true,
     });
     const author = formatMessageAuthor(
       event,
       channel,
-      currentPubkey,
+      currentAgentId,
       profiles,
-      relaySelfPubkey,
+      eventAuthorityAgentId,
     );
 
     authorPubkeyByEventId.set(event.id, authorPubkey);
@@ -420,7 +421,7 @@ export function formatTimelineMessages(
       resolveEventAuthorPubkey({
         event,
         preferActorTag: true,
-        relaySelfPubkey,
+        relaySelfPubkey: eventAuthorityAgentId,
         requireChannelTagForPTags: true,
       });
     const thread = getThreadReference(event.tags);
@@ -439,11 +440,11 @@ export function formatTimelineMessages(
       isAgent,
       ownerPubkey,
       ownerLabel: isAgent
-        ? formatOwnerLabel(ownerPubkey, currentPubkey, ownerProfiles)
+        ? formatOwnerLabel(ownerPubkey, currentAgentId, ownerProfiles)
         : null,
       avatarUrl: getAuthorAvatarUrl({
         authorPubkey,
-        currentPubkey,
+        currentAgentId,
         currentUserAvatarUrl,
         profiles,
       }),
@@ -461,7 +462,7 @@ export function formatTimelineMessages(
       parentId: thread.parentId,
       rootId: thread.rootId,
       depth: getDepth(event),
-      accent: currentPubkey === authorPubkey,
+      accent: currentAgentId === authorPubkey,
       pending: event.pending,
       edited: edit !== undefined,
       kind: event.kind,
@@ -509,7 +510,7 @@ function extractSystemMessagePubkeys(event: RelayEvent): string[] {
 
 export function collectReactionActorPubkeys(
   events: RelayEvent[],
-  relaySelfPubkey?: string | null,
+  eventAuthorityAgentId?: string | null,
 ) {
   const deletedEventIds = new Set<string>();
   for (const event of events) {
@@ -536,7 +537,7 @@ export function collectReactionActorPubkeys(
       resolveEventAuthorPubkey({
         event,
         preferActorTag: true,
-        relaySelfPubkey,
+        relaySelfPubkey: eventAuthorityAgentId,
         requireChannelTagForPTags: true,
       }).toLowerCase(),
     );
@@ -546,7 +547,7 @@ export function collectReactionActorPubkeys(
 
 export function collectMessageAuthorPubkeys(
   events: RelayEvent[],
-  relaySelfPubkey?: string | null,
+  eventAuthorityAgentId?: string | null,
 ) {
   const pubkeys = new Set<string>();
 
@@ -565,7 +566,7 @@ export function collectMessageAuthorPubkeys(
         resolveEventAuthorPubkey({
           event,
           preferActorTag: true,
-          relaySelfPubkey,
+          relaySelfPubkey: eventAuthorityAgentId,
           requireChannelTagForPTags: true,
         }).toLowerCase(),
       );

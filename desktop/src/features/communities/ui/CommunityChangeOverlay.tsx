@@ -5,7 +5,7 @@ import { CommunityEditForm } from "./CommunityEditForm";
 
 type CommunityChangeOverlayProps = {
   onClose: () => void;
-  onUpdated?: (name: string, relayUrl: string) => void;
+  onUpdated?: (name: string, groupId: string) => void;
 };
 
 export function CommunityChangeOverlay({
@@ -33,29 +33,25 @@ export function CommunityChangeOverlay({
   }, [onClose]);
 
   const handleSubmit = React.useCallback(
-    (name: string, relayUrl: string) => {
+    async (name: string) => {
       if (!activeCommunity) return;
       setError(null);
-      const result = updateCommunity(activeCommunity.id, { name, relayUrl });
-      switch (result.kind) {
-        case "unchanged":
-          onClose();
-          break;
-        case "updated":
-          onUpdated?.(name, relayUrl);
-          // If reinit is needed, the communityKey change will trigger a remount.
-          // If not (name-only), just close.
-          if (!result.requiresReinit) {
+      try {
+        const result = await updateCommunity(activeCommunity.id, { name });
+        switch (result.kind) {
+          case "unchanged":
             onClose();
-          }
-          // If requiresReinit, the tree remounts — overlay unmounts naturally.
-          break;
-        case "duplicate-relay":
-          setError("Another community already uses this relay URL.");
-          break;
-        case "not-found":
-          setError("Community not found.");
-          break;
+            break;
+          case "updated":
+            onUpdated?.(name, activeCommunity.groupId);
+            onClose();
+            break;
+          case "not-found":
+            setError("Community not found.");
+            break;
+        }
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
     [activeCommunity, onClose, onUpdated, updateCommunity],
@@ -76,15 +72,14 @@ export function CommunityChangeOverlay({
       <div aria-hidden="true" className="absolute inset-0" onClick={onClose} />
       <div className="relative z-10 w-full max-w-md rounded-2xl border border-border bg-background p-8 shadow-2xl">
         <h2 className="text-xl font-semibold tracking-tight">
-          Change community
+          Change community name
         </h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          Update your community name or relay URL.
+          Rename this community on this device.
         </p>
         <div className="mt-6">
           <CommunityEditForm
             initialName={activeCommunity.name}
-            initialRelayUrl={activeCommunity.relayUrl}
             onCancel={onClose}
             onSubmit={handleSubmit}
             submitLabel="Save changes"

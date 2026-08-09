@@ -3,7 +3,6 @@ import {
   Bot,
   CircleDot,
   Copy,
-  FileText,
   FolderGit2,
   Hash,
   House,
@@ -75,10 +74,6 @@ function ChannelIcon({
 
   if (visibility === "private") {
     return <Lock className={HEADER_ICON_CLASS} />;
-  }
-
-  if (channelType === "forum") {
-    return <FileText className={HEADER_ICON_CLASS} />;
   }
 
   return <Hash className={CHANNEL_HASH_ICON_CLASS} color="gray" />;

@@ -4,14 +4,6 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import type { TimelineMessage } from "@/features/messages/types";
-import { relayClient } from "@/shared/api/relayClient";
-import type { RelayEvent } from "@/shared/api/types";
-import {
-  KIND_HUDDLE_ENDED,
-  KIND_HUDDLE_PARTICIPANT_JOINED,
-  KIND_HUDDLE_PARTICIPANT_LEFT,
-  KIND_HUDDLE_STARTED,
-} from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import {
   Attachment,
@@ -32,11 +24,6 @@ type HuddleAttachmentProps = {
   onOpenThread?: (message: TimelineMessage) => void;
 };
 
-type HuddleLifecycleState = {
-  ended: boolean;
-  participants: Set<string>;
-};
-
 function parseEphemeralChannelId(content: string): string | null {
   try {
     const parsed = JSON.parse(content) as { ephemeral_channel_id?: unknown };
@@ -48,71 +35,19 @@ function parseEphemeralChannelId(content: string): string | null {
   }
 }
 
-function lifecycleEventChannelId(event: RelayEvent): string | null {
-  return parseEphemeralChannelId(event.content);
-}
-
-function lifecycleParticipant(event: RelayEvent): string | null {
-  return (
-    event.tags.find(
-      (tag) => tag[0] === "p" && typeof tag[1] === "string",
-    )?.[1] ??
-    event.pubkey ??
-    null
-  );
-}
-
-function reconstructHuddleLifecycle(
-  events: Iterable<RelayEvent>,
-  fallbackCreatorPubkey: string | undefined,
-  ephemeralChannelId: string,
-): HuddleLifecycleState {
-  const sorted = [...events]
-    .filter((event) => lifecycleEventChannelId(event) === ephemeralChannelId)
-    .sort(
-      (left, right) =>
-        left.created_at - right.created_at ||
-        left.kind - right.kind ||
-        left.id.localeCompare(right.id),
-    );
-  const participants = new Set<string>();
-  let ended = false;
-
-  if (fallbackCreatorPubkey) {
-    participants.add(fallbackCreatorPubkey);
-  }
-
-  for (const event of sorted) {
-    switch (event.kind) {
-      case KIND_HUDDLE_STARTED:
-        ended = false;
-        if (event.pubkey) participants.add(event.pubkey);
-        break;
-      case KIND_HUDDLE_PARTICIPANT_JOINED: {
-        if (ended) break;
-        const pubkey = lifecycleParticipant(event);
-        if (pubkey) participants.add(pubkey);
-        break;
-      }
-      case KIND_HUDDLE_PARTICIPANT_LEFT: {
-        if (ended) break;
-        const pubkey = lifecycleParticipant(event);
-        if (pubkey) participants.delete(pubkey);
-        break;
-      }
-      case KIND_HUDDLE_ENDED:
-        ended = true;
-        break;
-    }
-  }
-
-  return { ended, participants };
-}
-
 function participantLabel(count: number) {
   return `${count} participant${count === 1 ? "" : "s"}`;
 }
 
+/**
+ * Thread attachment for a huddle-start message.
+ *
+ * M3 cutover: the kind 48100–48103 lifecycle subscription is gone — there is no
+ * relay event source, so the card no longer tracks live join/leave/end. It
+ * renders from the start message alone: the starter is the known participant,
+ * and staleness (time since start) gates the "Ended" state. Joining is native
+ * (`join_huddle`); the stale-guard still hides dead join affordances.
+ */
 export function HuddleAttachment({
   channelId,
   className,
@@ -126,80 +61,7 @@ export function HuddleAttachment({
   const { activeEphemeralChannelId, isStarting, joinHuddle } = useHuddle();
   const queryClient = useQueryClient();
   const [isJoining, setIsJoining] = React.useState(false);
-  const [lifecycleState, setLifecycleState] =
-    React.useState<HuddleLifecycleState>(() => ({
-      ended: false,
-      participants: new Set(message.pubkey ? [message.pubkey] : []),
-    }));
 
-  React.useEffect(() => {
-    if (!channelId || !ephemeralChannelId) return;
-
-    const huddleChannelId = ephemeralChannelId;
-    let disposed = false;
-    let cleanup: (() => void) | null = null;
-    const seenEvents = new Map<string, RelayEvent>([
-      [
-        message.id,
-        {
-          id: message.id,
-          pubkey: message.pubkey ?? "",
-          kind: message.kind ?? KIND_HUDDLE_STARTED,
-          created_at: message.createdAt,
-          content: message.body,
-          tags: message.tags ?? [],
-          sig: "",
-        },
-      ],
-    ]);
-
-    function updateState() {
-      if (disposed) return;
-      setLifecycleState(
-        reconstructHuddleLifecycle(
-          seenEvents.values(),
-          message.pubkey,
-          huddleChannelId,
-        ),
-      );
-    }
-
-    updateState();
-    relayClient
-      .subscribeToHuddleEvents(channelId, (event) => {
-        if (disposed || seenEvents.has(event.id)) return;
-        if (lifecycleEventChannelId(event) !== huddleChannelId) return;
-        seenEvents.set(event.id, event);
-        updateState();
-      })
-      .then((dispose) => {
-        if (disposed) {
-          void dispose();
-          return;
-        }
-        cleanup = () => void dispose();
-      })
-      .catch((error) => {
-        console.error("[HuddleAttachment] subscription failed:", error);
-      });
-
-    return () => {
-      disposed = true;
-      cleanup?.();
-    };
-  }, [
-    channelId,
-    ephemeralChannelId,
-    message.body,
-    message.createdAt,
-    message.id,
-    message.kind,
-    message.pubkey,
-    message.tags,
-  ]);
-
-  const participantCount = Math.max(1, lifecycleState.participants.size);
-  const isEnded = lifecycleState.ended;
   const isCurrentHuddle =
     Boolean(ephemeralChannelId) &&
     activeEphemeralChannelId === ephemeralChannelId;
@@ -208,11 +70,11 @@ export function HuddleAttachment({
   const canJoin = Boolean(
     channelId &&
       ephemeralChannelId &&
-      !isEnded &&
-      !isCurrentHuddle &&
-      !isStaleUnconfirmedHuddle,
+      !isStaleUnconfirmedHuddle &&
+      !isCurrentHuddle,
   );
-  const displayEnded = isEnded || isStaleUnconfirmedHuddle;
+  const displayEnded = isStaleUnconfirmedHuddle;
+  const participantCount = message.pubkey ? 1 : 0;
 
   async function handleJoin() {
     if (!channelId || !ephemeralChannelId || isJoining || isStarting) return;
@@ -221,9 +83,9 @@ export function HuddleAttachment({
       await joinHuddle(channelId, ephemeralChannelId);
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
     } catch (error) {
-      const message =
+      const errorMessage =
         error instanceof Error ? error.message : "Failed to join huddle";
-      toast.error(message);
+      toast.error(errorMessage);
     } finally {
       setIsJoining(false);
     }

@@ -3,22 +3,6 @@ import test from "node:test";
 
 import { resolveSnapshotAvatarPng } from "./snapshotAvatarPng.ts";
 
-const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-
-test("resolveSnapshotAvatarPng: relay media URL becomes PNG data URL", async () => {
-  const result = await resolveSnapshotAvatarPng(
-    "https://relay.example/media/avatar.png",
-    {
-      fetchBytes: async (url) => {
-        assert.equal(url, "https://relay.example/media/avatar.png");
-        return PNG_BYTES;
-      },
-    },
-  );
-
-  assert.equal(result, "data:image/png;base64,iVBORw==");
-});
-
 test("resolveSnapshotAvatarPng: emoji SVG is rasterized onto a canvas", async () => {
   const draws = [];
   const image = {
@@ -59,25 +43,11 @@ test("resolveSnapshotAvatarPng: emoji SVG is rasterized onto a canvas", async ()
   assert.deepEqual(draws, [[image, 0, 0, 512, 512]]);
 });
 
-test("resolveSnapshotAvatarPng: failed media fetches and malformed URLs return undefined", async () => {
-  let fetchCalled = false;
-  const dependencies = {
-    fetchBytes: async () => {
-      fetchCalled = true;
-      throw new Error("external URL rejected by Rust validation");
-    },
-  };
-
+test("resolveSnapshotAvatarPng: non-SVG URLs have no fetch transport and return undefined", async () => {
   assert.equal(
-    await resolveSnapshotAvatarPng(
-      "https://external.example/avatar.png",
-      dependencies,
-    ),
+    await resolveSnapshotAvatarPng("https://relay.example/media/avatar.png"),
     undefined,
   );
-  assert.equal(
-    await resolveSnapshotAvatarPng("not a URL", dependencies),
-    undefined,
-  );
-  assert.equal(fetchCalled, true);
+  assert.equal(await resolveSnapshotAvatarPng("not a URL"), undefined);
+  assert.equal(await resolveSnapshotAvatarPng(null), undefined);
 });

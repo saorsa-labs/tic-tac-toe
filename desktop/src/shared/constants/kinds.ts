@@ -28,8 +28,6 @@ export const KIND_JOB_PROGRESS = 43003;
 export const KIND_JOB_RESULT = 43004;
 export const KIND_JOB_CANCEL = 43005;
 export const KIND_JOB_ERROR = 43006;
-export const KIND_FORUM_POST = 45001;
-export const KIND_FORUM_COMMENT = 45003;
 export const KIND_APPROVAL_REQUEST = 46010;
 export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
 export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;
@@ -78,8 +76,6 @@ export const KIND_DM_VISIBILITY = 30622;
 export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
-  KIND_FORUM_POST,
-  KIND_FORUM_COMMENT,
 ] as const;
 
 // Keep this in sync with the Home-feed mention query in buzz-db.
@@ -120,8 +116,7 @@ export const CHANNEL_AUX_EVENT_KINDS = [
 // `isTimelineContentEvent` in formatTimelineMessages.ts — keep the two in sync.
 // This is the kind set the history fetch requests so the `limit` budget maps
 // to visible rows; auxiliary overlays (CHANNEL_AUX_EVENT_KINDS) are fetched
-// separately by `#e` reference. Forum kinds (45001/45003) are excluded: forum
-// channels use a different query path, not this timeline.
+// separately by `#e` reference.
 export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_STREAM_MESSAGE, // 9
   KIND_STREAM_MESSAGE_V2, // 40002

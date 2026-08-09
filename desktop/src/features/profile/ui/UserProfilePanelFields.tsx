@@ -5,16 +5,13 @@ import {
   Copy,
   Cpu,
   Ear,
-  Fingerprint,
   Server,
   Terminal,
   UserRound,
 } from "lucide-react";
 import * as React from "react";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
-import { truncatePubkey } from "@/shared/lib/pubkey";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
-import { PubKey } from "@/shared/ui/PubKey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type {
   AgentPersona,
@@ -164,15 +161,6 @@ export function buildPublicFields({
   relayAgent: RelayAgent | undefined;
 }): ProfileField[] {
   const fields: ProfileField[] = [];
-
-  if (pubkey) {
-    fields.push({
-      displayValue: truncatePubkey(pubkey),
-      displayNode: <PubKey pubkey={pubkey} testId="user-profile-copy-pubkey" />,
-      icon: Fingerprint,
-      label: "Public key",
-    });
-  }
 
   if (profile?.nip05Handle) {
     fields.push({

@@ -12,18 +12,20 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 
-import {
-  getProfile,
-  searchUsers,
-  getUserProfile,
-  getUsersBatch,
-  updateProfile,
-} from "@/shared/api/tauriProfiles";
-import { getContactList, setContactList } from "@/shared/api/social";
 import type { ContactListResponse } from "@/shared/api/socialTypes";
+import {
+  addNativeContact,
+  getNativeSelfProfile,
+  getNativeUserProfile,
+  getNativeUsersBatch,
+  listNativeContacts,
+  removeNativeContact,
+  searchNativeProfiles,
+  updateNativeProfile,
+} from "@/features/profile/nativeSocialApi";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import type {
   Profile,
-  UpdateProfileInput,
   UserSearchResult,
   UserSearchPage,
   UserProfileSummary,
@@ -31,7 +33,7 @@ import type {
 } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getAvatarSnapshotUrl } from "@/shared/lib/animatedAvatar";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+
 import {
   SELF_PROFILE_CACHE_EVENT,
   type SelfProfileCache,
@@ -63,7 +65,7 @@ async function persistSelfProfile(
   const avatarSnapshotUrl = getAvatarSnapshotUrl(profile.avatarUrl);
   const fetched =
     shouldFetchAvatar(profile.avatarUrl, existing) && avatarSnapshotUrl !== null
-      ? await fetchAvatarDataUrl(rewriteRelayUrl(avatarSnapshotUrl))
+      ? await fetchAvatarDataUrl(avatarSnapshotUrl)
       : null;
   const avatarDataUrl = resolveAvatarDataUrl(
     profile.avatarUrl,
@@ -88,15 +90,18 @@ export function useProfileQuery(enabled = true) {
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   const queryClient = useQueryClient();
-  const relayUrl = activeCommunity?.relayUrl ?? "";
-  const pubkey = identityQuery.data?.pubkey ?? "";
+  const relayUrl = activeCommunity?.groupId ?? "";
+  const pubkey = identityQuery.data?.agentId ?? "";
 
   // Parse localStorage once per relayUrl/pubkey pair — not on every render.
   // Cached identity renders instantly and persists through fetch errors (relay
   // unreachable); initialDataUpdatedAt keeps the normal background refetch.
   const cached = React.useMemo(
-    () => (relayUrl && pubkey ? readSelfProfileCache(relayUrl, pubkey) : null),
-    [relayUrl, pubkey],
+    () =>
+      !activeCommunity?.groupId && relayUrl && pubkey
+        ? readSelfProfileCache(relayUrl, pubkey)
+        : null,
+    [activeCommunity?.groupId, relayUrl, pubkey],
   );
 
   // Stable memo so the seeding effect below has stable deps and doesn't
@@ -141,8 +146,8 @@ export function useProfileQuery(enabled = true) {
     enabled,
     queryKey: profileQueryKey,
     queryFn: async () => {
-      const profile = await getProfile();
-      if (relayUrl && pubkey) {
+      const profile = await getNativeSelfProfile();
+      if (!activeCommunity?.groupId && relayUrl && pubkey) {
         void persistSelfProfile(relayUrl, pubkey, profile);
       }
       return profile;
@@ -161,8 +166,8 @@ export function useProfileQuery(enabled = true) {
 export function useSelfProfileCache(): SelfProfileCache | null {
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
-  const relayUrl = activeCommunity?.relayUrl ?? "";
-  const pubkey = identityQuery.data?.pubkey ?? "";
+  const relayUrl = activeCommunity?.groupId ?? "";
+  const pubkey = identityQuery.data?.agentId ?? "";
 
   const [cache, setCache] = React.useState<SelfProfileCache | null>(() =>
     relayUrl && pubkey ? readSelfProfileCache(relayUrl, pubkey) : null,
@@ -183,7 +188,7 @@ export function useSelfProfileCache(): SelfProfileCache | null {
     const firstRun = isFirstRun.current;
     isFirstRun.current = false;
 
-    if (!relayUrl || !pubkey) {
+    if (activeCommunity?.groupId || !relayUrl || !pubkey) {
       setCache(null);
       return;
     }
@@ -200,72 +205,70 @@ export function useSelfProfileCache(): SelfProfileCache | null {
     return () => {
       window.removeEventListener(SELF_PROFILE_CACHE_EVENT, handleCacheEvent);
     };
-  }, [relayUrl, pubkey]);
+  }, [activeCommunity?.groupId, relayUrl, pubkey]);
 
   return cache;
 }
 
-export function useContactListQuery(pubkey?: string) {
+async function getNativeContactList(): Promise<ContactListResponse> {
+  const [{ agentId }, contacts] = await Promise.all([
+    getIdentity(),
+    listNativeContacts(),
+  ]);
+  return {
+    id: "x0xd-contacts",
+    pubkey: agentId,
+    createdAt: 0,
+    contacts: contacts.map((contact) => ({
+      // Legacy Buzz render field; value is the daemon's x0x AgentId.
+      pubkey: contact.agentId,
+      petname: contact.label ?? undefined,
+    })),
+  };
+}
+
+export function useContactListQuery(agentId?: string) {
   return useQuery<ContactListResponse>({
-    queryKey: contactListQueryKey(pubkey ?? ""),
-    // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
-    queryFn: () => getContactList(pubkey!),
-    enabled: !!pubkey,
+    queryKey: contactListQueryKey(agentId ?? "native"),
+    queryFn: getNativeContactList,
+    enabled: agentId !== "",
     staleTime: 60_000,
     gcTime: 5 * 60_000,
   });
 }
 
 /**
- * Follow mutation re-fetches the contact list inside the mutationFn to prevent
- * race conditions when clicking Follow on multiple users quickly. The kind:3
- * contact list is a full-snapshot replaceable event — stale reads cause data loss.
+ * Native follow is a daemon contact add. There is no replaceable contact-list
+ * event, so concurrent clicks cannot overwrite one another.
  */
-export function useFollowMutation(currentPubkey?: string) {
+export function useFollowMutation(currentAgentId?: string) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (targetPubkey: string) => {
-      if (!currentPubkey) throw new Error("No identity");
-      const current = await getContactList(currentPubkey);
-      if (current.contacts.some((c) => c.pubkey === targetPubkey)) {
-        return;
-      }
-      const updated = [...current.contacts, { pubkey: targetPubkey }];
-      return setContactList(updated);
-    },
+    mutationFn: (targetAgentId: string) => addNativeContact(targetAgentId),
     onSuccess: () => {
-      if (currentPubkey) {
-        void queryClient.invalidateQueries({
-          queryKey: contactListQueryKey(currentPubkey),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: allPulseTimelinesQueryKey,
-        });
-      }
+      void queryClient.invalidateQueries({
+        queryKey: contactListQueryKey(currentAgentId ?? "native"),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: allPulseTimelinesQueryKey,
+      });
     },
   });
 }
 
-export function useUnfollowMutation(currentPubkey?: string) {
+export function useUnfollowMutation(currentAgentId?: string) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (targetPubkey: string) => {
-      if (!currentPubkey) throw new Error("No identity");
-      const current = await getContactList(currentPubkey);
-      const updated = current.contacts.filter((c) => c.pubkey !== targetPubkey);
-      return setContactList(updated);
-    },
+    mutationFn: removeNativeContact,
     onSuccess: () => {
-      if (currentPubkey) {
-        void queryClient.invalidateQueries({
-          queryKey: contactListQueryKey(currentPubkey),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: allPulseTimelinesQueryKey,
-        });
-      }
+      void queryClient.invalidateQueries({
+        queryKey: contactListQueryKey(currentAgentId ?? "native"),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: allPulseTimelinesQueryKey,
+      });
     },
   });
 }
@@ -274,7 +277,7 @@ export function useUserProfileQuery(pubkey?: string) {
   return useQuery({
     enabled: typeof pubkey === "string" && pubkey.length > 0,
     queryKey: ["user-profile", pubkey?.toLowerCase() ?? ""],
-    queryFn: () => getUserProfile(pubkey),
+    queryFn: () => getNativeUserProfile(pubkey ?? ""),
     staleTime: 60_000,
   });
 }
@@ -351,7 +354,7 @@ export function useUsersBatchQuery(
         }
       }
       if (toFetch.length > 0) {
-        const fresh = await getUsersBatch(toFetch);
+        const fresh = await getNativeUsersBatch(toFetch);
         for (const pubkey of toFetch) {
           const summary = fresh.profiles[pubkey] ?? null;
           queryClient.setQueryData<UsersBatchEntry>(
@@ -412,8 +415,7 @@ export function useUserSearchQuery(
   return useQuery<UserSearchResult[]>({
     enabled,
     queryKey: ["user-search", normalizedQuery, options?.limit ?? 8],
-    queryFn: async () =>
-      (await searchUsers(normalizedQuery, options?.limit ?? 8)).users,
+    queryFn: () => searchNativeProfiles(normalizedQuery, options?.limit ?? 8),
     staleTime: 30_000,
     gcTime: 5 * 60 * 1_000,
   });
@@ -440,12 +442,10 @@ export function useInfiniteUserSearchQuery(
       normalizedQuery,
       options?.limit ?? 50,
     ],
-    queryFn: ({ pageParam }) =>
-      searchUsers(
-        normalizedQuery,
-        options?.limit ?? 50,
-        typeof pageParam === "string" ? pageParam : null,
-      ),
+    queryFn: async () => ({
+      users: await searchNativeProfiles(normalizedQuery, options?.limit ?? 50),
+      nextCursor: null,
+    }),
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
     initialPageParam: null,
     staleTime: 30_000,
@@ -491,7 +491,7 @@ export function useUpdateProfileMutation() {
   const identityQuery = useIdentityQuery();
 
   return useMutation({
-    mutationFn: (input: UpdateProfileInput) => updateProfile(input),
+    mutationFn: updateNativeProfile,
     onMutate: async () => {
       // Discard any in-flight profile fetch: a background refetch started
       // before the update (e.g. by a route mount) can resolve AFTER
@@ -506,9 +506,9 @@ export function useUpdateProfileMutation() {
       // Cancel again: a refetch may have started while mutationFn awaited.
       await queryClient.cancelQueries({ queryKey: profileQueryKey });
       queryClient.setQueryData(profileQueryKey, profile);
-      const relayUrl = activeCommunity?.relayUrl ?? "";
-      const pubkey = identityQuery.data?.pubkey ?? profile.pubkey;
-      if (relayUrl && pubkey) {
+      const relayUrl = activeCommunity?.groupId ?? "";
+      const pubkey = identityQuery.data?.agentId ?? profile.pubkey;
+      if (!activeCommunity?.groupId && relayUrl && pubkey) {
         void persistSelfProfile(relayUrl, pubkey, profile);
       }
       if (pubkey) {

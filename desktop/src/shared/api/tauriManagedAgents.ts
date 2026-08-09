@@ -60,23 +60,23 @@ export async function listManagedAgentRuntimes(): Promise<
 
 export async function startManagedAgentRuntime(
   pubkey: string,
-  relayUrl: string,
+  groupId: string,
 ): Promise<ManagedAgentRuntimeStatus> {
-  return invokeTauri("start_managed_agent_runtime", { pubkey, relayUrl });
+  return invokeTauri("start_managed_agent_runtime", { pubkey, groupId });
 }
 
 export async function stopManagedAgentRuntime(
   pubkey: string,
-  relayUrl: string,
+  groupId: string,
 ): Promise<ManagedAgentRuntimeStatus> {
-  return invokeTauri("stop_managed_agent_runtime", { pubkey, relayUrl });
+  return invokeTauri("stop_managed_agent_runtime", { pubkey, groupId });
 }
 
 export async function restartManagedAgentRuntime(
   pubkey: string,
-  relayUrl: string,
+  groupId: string,
 ): Promise<ManagedAgentRuntimeStatus> {
-  return invokeTauri("restart_managed_agent_runtime", { pubkey, relayUrl });
+  return invokeTauri("restart_managed_agent_runtime", { pubkey, groupId });
 }
 
 export async function putManagedAgentRuntimeLifecycle(
@@ -90,7 +90,7 @@ export async function putManagedAgentRuntimeLifecycle(
 }
 
 export async function reconcileManagedAgentRuntimes(
-  communities: readonly { relayUrl: string }[],
+  communities: readonly { groupId: string }[],
 ): Promise<ManagedAgentRuntimeStatus[]> {
   return invokeTauri("reconcile_managed_agent_runtimes", { communities });
 }

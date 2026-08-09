@@ -90,13 +90,13 @@ export function mergeCurrentProfileIntoLookup(
 
 export function resolveUserLabel(input: {
   pubkey: string;
-  currentPubkey?: string;
+  currentAgentId?: string;
   fallbackName?: string | null;
   profiles?: UserProfileLookup;
   preferResolvedSelfLabel?: boolean;
 }) {
   const {
-    currentPubkey,
+    currentAgentId,
     fallbackName,
     preferResolvedSelfLabel = false,
     profiles,
@@ -104,8 +104,8 @@ export function resolveUserLabel(input: {
   } = input;
 
   if (
-    typeof currentPubkey === "string" &&
-    normalizePubkey(currentPubkey) === normalizePubkey(pubkey)
+    typeof currentAgentId === "string" &&
+    normalizePubkey(currentAgentId) === normalizePubkey(pubkey)
   ) {
     if (!preferResolvedSelfLabel) {
       return "You";
@@ -139,12 +139,12 @@ export function resolveUserLabel(input: {
  */
 export function ownsAuthorAgent(
   profile: { ownerPubkey: string | null } | undefined,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
 ): boolean {
   return (
-    !!currentPubkey &&
+    !!currentAgentId &&
     !!profile?.ownerPubkey &&
-    normalizePubkey(profile.ownerPubkey) === normalizePubkey(currentPubkey)
+    normalizePubkey(profile.ownerPubkey) === normalizePubkey(currentAgentId)
   );
 }
 
@@ -169,7 +169,7 @@ export function resolveUserSecondaryLabel(input: {
  */
 export function formatOwnerLabel(
   ownerPubkey: string | null | undefined,
-  currentPubkey: string | null | undefined,
+  currentAgentId: string | null | undefined,
   ownerProfiles?: UserProfileLookup,
 ) {
   if (!ownerPubkey) {
@@ -178,8 +178,8 @@ export function formatOwnerLabel(
 
   const normalizedOwnerPubkey = normalizePubkey(ownerPubkey);
   if (
-    currentPubkey &&
-    normalizedOwnerPubkey === normalizePubkey(currentPubkey)
+    currentAgentId &&
+    normalizedOwnerPubkey === normalizePubkey(currentAgentId)
   ) {
     return "you";
   }

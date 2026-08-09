@@ -1,9 +1,8 @@
 import * as React from "react";
 import { Check, Copy } from "lucide-react";
 
-import { HostedCommunityOnboarding } from "@/features/communities/ui/HostedCommunityOnboarding";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
-import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
+import { createNativeCommunity } from "@/features/communities/nativeCommunityApi";
 import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
 import {
   OnboardingFooter,
@@ -15,13 +14,13 @@ import {
 } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
-import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
+import { Input } from "@/shared/ui/input";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 
-type WelcomeSetupPage = "welcome" | "existing" | "join" | "member" | "owned";
+type WelcomeSetupPage = "welcome" | "existing" | "create" | "join" | "member";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -41,21 +40,18 @@ export function WelcomeSetup({
   const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
-  // While true, the Builderlab sign-in modal floats over the current page —
-  // we only navigate to the hosted stage once sign-in completes, so the page
-  // behind the modal never changes out from under the user.
-  const [isHostedSignInOpen, setIsHostedSignInOpen] = React.useState(false);
-  const [copiedNpub, setCopiedNpub] = React.useState(false);
+  const [copiedId, setCopiedId] = React.useState(false);
+  const [communityName, setCommunityName] = React.useState("");
+  const [createError, setCreateError] = React.useState<string | null>(null);
+  const [isCreating, setIsCreating] = React.useState(false);
   const communityOnboarding = useCommunityOnboarding();
   const identityQuery = useIdentityQuery();
   const systemColorScheme = useSystemColorScheme();
-  const npub = identityQuery.data?.pubkey
-    ? pubkeyToNpub(identityQuery.data.pubkey)
-    : "";
-  const npubError = identityQuery.error
+  const agentId = identityQuery.data?.agentId ?? "";
+  const idError = identityQuery.error
     ? identityQuery.error instanceof Error
       ? identityQuery.error.message
-      : "Could not load your public key."
+      : "Could not load your identity."
     : null;
 
   const showPage = React.useCallback(
@@ -68,29 +64,27 @@ export function WelcomeSetup({
     [],
   );
 
-  const startConnection = React.useCallback(
-    (relayUrl: string) => {
+  const createCommunity = React.useCallback(async () => {
+    if (!communityName.trim() || isCreating) return;
+    setIsCreating(true);
+    setCreateError(null);
+    try {
+      const group = await createNativeCommunity({
+        name: communityName,
+      });
       communityOnboarding.start({
         source: "first-community",
-        firstCommunityPage: page === "member" ? "member" : "join",
-        relayUrl,
+        communityName: group.name,
+        groupId: group.groupId,
       });
-    },
-    [communityOnboarding, page],
-  );
-
-  const redeemInvite = React.useCallback(
-    (relayUrl: string, code: string, policyReceipt?: string) => {
-      communityOnboarding.start({
-        source: "first-community",
-        firstCommunityPage: page === "member" ? "member" : "join",
-        relayUrl,
-        inviteCode: code,
-        policyReceipt,
-      });
-    },
-    [communityOnboarding, page],
-  );
+    } catch (error) {
+      setCreateError(
+        error instanceof Error ? error.message : "Could not create community.",
+      );
+    } finally {
+      setIsCreating(false);
+    }
+  }, [communityName, communityOnboarding, isCreating]);
 
   const transitionDirection =
     transitionMode === "backward" ? "backward" : "forward";
@@ -144,7 +138,7 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="community-choice-create"
-                    onClick={() => setIsHostedSignInOpen(true)}
+                    onClick={() => showPage("create")}
                     type="button"
                   >
                     Create a community
@@ -199,7 +193,7 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="existing-choice-owner"
-                    onClick={() => setIsHostedSignInOpen(true)}
+                    onClick={() => showPage("member")}
                     type="button"
                   >
                     I own the community
@@ -231,14 +225,6 @@ export function WelcomeSetup({
                 </Button>
               </OnboardingFooter>
             </OnboardingSlideTransition>
-          ) : page === "owned" ? (
-            <OnboardingSlideTransition
-              className="flex w-full flex-col items-center text-center"
-              direction={transitionDirection}
-              transitionKey={`owned-${transitionDirection}`}
-            >
-              <HostedCommunityOnboarding onBack={() => showPage("welcome")} />
-            </OnboardingSlideTransition>
           ) : (
             <OnboardingSlideTransition
               className="flex min-h-[calc(100dvh-15.625rem)] w-full flex-col items-center text-center"
@@ -247,87 +233,110 @@ export function WelcomeSetup({
             >
               <div className="w-full max-w-[620px]">
                 <h1 className="text-title font-normal">
-                  {page === "member"
-                    ? "Reconnect to your community"
-                    : "Join a community"}
+                  {page === "create"
+                    ? "Create a private community"
+                    : page === "member"
+                      ? "Reconnect to your community"
+                      : "Join a community"}
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  {page === "member"
-                    ? "Enter the community URL or an invite link. Your role will be restored when you connect."
-                    : "Enter the invite link or community URL you received."}
+                  {page === "create"
+                    ? "x0xd creates the group and its post-quantum identity locally."
+                    : "Ask the community owner to add you as a member."}
                 </p>
               </div>
               <div className="flex w-full flex-1 flex-col items-center justify-center gap-16">
-                <InviteRedeemForm
-                  error={null}
-                  isRedeeming={false}
-                  onCancel={() =>
-                    showPage(page === "member" ? "existing" : "welcome")
-                  }
-                  onConnect={startConnection}
-                  onRedeem={redeemInvite}
-                  placeholder="Invite link or community URL"
-                  variant="onboarding-spotlight"
-                />
-                {page === "join" ? (
+                {page === "create" ? (
+                  <form
+                    className="w-full max-w-[520px] space-y-4"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void createCommunity();
+                    }}
+                  >
+                    <Input
+                      autoFocus
+                      data-testid="native-community-name"
+                      onChange={(event) => setCommunityName(event.target.value)}
+                      placeholder="Community name"
+                      value={communityName}
+                    />
+                    {createError ? (
+                      <p className="text-sm text-destructive">{createError}</p>
+                    ) : null}
+                    <div className="flex justify-center gap-3">
+                      <Button
+                        disabled={!communityName.trim() || isCreating}
+                        type="submit"
+                      >
+                        {isCreating ? "Creating…" : "Create community"}
+                      </Button>
+                      <Button
+                        onClick={() => showPage("welcome")}
+                        type="button"
+                        variant="ghost"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </form>
+                ) : (
                   <div className="w-full max-w-[560px] text-left">
                     <p className="text-sm font-medium text-foreground">
                       Joining a private community?
                     </p>
                     <p className="mt-2 text-sm leading-6 text-foreground/75">
-                      Some communities need the owner to add you before you can
-                      join. Copy your public ID and send it to the community
-                      owner.
+                      Ask the owner to add you as a member, then copy your Agent
+                      ID below and send it to them out of band.
                     </p>
                     <div className="mt-4 flex items-center gap-3 rounded-xl border border-foreground/10 bg-background/35 px-4 py-3">
                       <code
                         className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80"
-                        data-testid="welcome-join-npub"
+                        data-testid="welcome-join-agent-id"
                       >
-                        {npub || "Loading…"}
+                        {agentId || "Loading…"}
                       </code>
                       <Button
-                        aria-label="Copy public ID"
+                        aria-label="Copy Agent ID"
                         className="h-9 shrink-0 rounded-full px-3"
-                        disabled={!npub}
+                        disabled={!agentId}
                         onClick={() => {
-                          void writeTextToClipboard(npub).then(() => {
-                            setCopiedNpub(true);
-                            window.setTimeout(() => setCopiedNpub(false), 1500);
+                          void writeTextToClipboard(agentId).then(() => {
+                            setCopiedId(true);
+                            window.setTimeout(() => setCopiedId(false), 1500);
                           });
                         }}
                         size="sm"
                         type="button"
                         variant="outline"
                       >
-                        {copiedNpub ? (
+                        {copiedId ? (
                           <Check className="h-4 w-4" aria-hidden="true" />
                         ) : (
                           <Copy className="h-4 w-4" aria-hidden="true" />
                         )}
-                        <span>{copiedNpub ? "Copied" : "Copy"}</span>
+                        <span>{copiedId ? "Copied" : "Copy"}</span>
                       </Button>
                     </div>
-                    {npubError ? (
-                      <p className="mt-3 text-sm text-destructive">
-                        {npubError}
-                      </p>
+                    {idError ? (
+                      <p className="mt-3 text-sm text-destructive">{idError}</p>
                     ) : null}
+                    <div className="mt-6 flex justify-center gap-3">
+                      <Button
+                        onClick={() =>
+                          showPage(page === "member" ? "existing" : "welcome")
+                        }
+                        type="button"
+                        variant="ghost"
+                      >
+                        Back
+                      </Button>
+                    </div>
                   </div>
-                ) : null}
+                )}
               </div>
             </OnboardingSlideTransition>
           )}
-          {isHostedSignInOpen && page !== "owned" ? (
-            <HostedCommunityOnboarding
-              onBack={() => setIsHostedSignInOpen(false)}
-              onReady={() => {
-                setIsHostedSignInOpen(false);
-                showPage("owned");
-              }}
-              stageHidden
-            />
-          ) : null}
         </div>
       </OnboardingFooterProvider>
     </div>

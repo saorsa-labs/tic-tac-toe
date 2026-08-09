@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import { ALargeSmall, ArrowUp, AtSign, X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -25,14 +25,12 @@ export const MessageComposerToolbar = React.memo(
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
-    isUploading,
     onCaptureSelection,
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
     onLinkButton,
     onOpenMentionPicker,
-    onPaperclip,
     sendDisabled,
   }: {
     composerDisabled: boolean;
@@ -42,14 +40,12 @@ export const MessageComposerToolbar = React.memo(
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
-    isUploading: boolean;
     onCaptureSelection: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
-    onPaperclip: () => void;
     sendDisabled: boolean;
   }) {
     return (
@@ -175,22 +171,6 @@ export const MessageComposerToolbar = React.memo(
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Mention someone</TooltipContent>
-                </Tooltip>
-                <Tooltip disableHoverableContent>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label="Attach image"
-                      disabled={composerDisabled || isUploading}
-                      onClick={onPaperclip}
-                      onMouseDown={onCaptureSelection}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <Paperclip />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Attach image</TooltipContent>
                 </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}

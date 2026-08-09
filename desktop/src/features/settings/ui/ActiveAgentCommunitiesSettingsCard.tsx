@@ -50,7 +50,7 @@ export function ActiveAgentCommunitiesSettingsCard() {
               ? "start"
               : "restart",
         pubkey: runtime.pubkey,
-        relayUrl: runtime.relayUrl,
+        groupId: runtime.groupId,
       });
     } finally {
       setPendingRuntimeKey(null);
@@ -80,7 +80,7 @@ export function ActiveAgentCommunitiesSettingsCard() {
               <div
                 className="flex items-center gap-3 border-b border-border/60 px-4 py-3 last:border-b-0"
                 data-pubkey={runtime.pubkey}
-                data-relay-url={runtime.relayUrl}
+                data-group-id={runtime.groupId}
                 data-testid="agent-community-runtime"
                 key={runtimeKey}
               >
@@ -97,7 +97,7 @@ export function ActiveAgentCommunitiesSettingsCard() {
                     </Badge>
                   </div>
                   <p className="truncate text-xs text-muted-foreground">
-                    {runtime.relayUrl}
+                    {runtime.groupId}
                   </p>
                   {detail ? (
                     <p className="text-xs text-muted-foreground">{detail}</p>

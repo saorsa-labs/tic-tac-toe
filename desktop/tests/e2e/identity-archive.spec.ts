@@ -13,13 +13,19 @@ import { installMockBridge } from "../helpers/bridge";
 const ALICE_PUBKEY =
   "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
 
+// M2 identity: the active mock identity's author label is its four speakable
+// words (DEFAULT_MOCK_IDENTITY.identity_words in e2eBridge). The legacy
+// bech32 key UI is gone, so the self seed message is authored under this label.
+const SELF_DISPLAY_NAME = "bodily example dismiss galaxy";
+
 async function openSelfProfile(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  // First seed message in #general is from the active identity.
+  // First seed message in #general is from the active identity, authored
+  // under the four-word label (SELF_DISPLAY_NAME).
   const firstMessage = page.getByTestId("message-row").first();
-  await firstMessage.locator("button", { hasText: "npub1mock..." }).click();
+  await firstMessage.locator("button", { hasText: SELF_DISPLAY_NAME }).click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 }
 
@@ -33,7 +39,9 @@ async function openAliceProfile(page: import("@playwright/test").Page) {
   await aliceMessage.locator("button", { hasText: "alice" }).first().click();
   const panel = page.getByTestId("user-profile-panel");
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText(ALICE_PUBKEY.slice(0, 8));
+  // M2 dropped the pubkey hex from the panel; Alice is identified by her
+  // registered display name.
+  await expect(panel).toContainText("alice");
 }
 
 async function openProfileSettingsMenu(page: import("@playwright/test").Page) {

@@ -21,10 +21,6 @@ import * as React from "react";
 import type { Community } from "@/features/communities/types";
 import { EditCommunityDialog } from "@/features/communities/ui/EditCommunityDialog";
 import { useCommunityIcons } from "@/features/communities/useCommunityIcons";
-import {
-  useCommunityUnread,
-  type CommunityUnreadState,
-} from "@/features/communities/useCommunityUnread";
 import { useAppShell } from "@/app/AppShellContext";
 import {
   ContextMenu,
@@ -47,50 +43,15 @@ type CommunityRailProps = {
   onAddCommunity: () => void;
   onUpdateCommunity: (
     id: string,
-    updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
+    updates: Partial<Pick<Community, "name" | "reposDir">>,
   ) => void;
   onRemoveCommunity: (id: string) => void;
   onReorderCommunities: (orderedIds: string[]) => void;
 };
 
-const MAX_BADGE = 99;
-
-/**
- * Presentation decisions for one community button, derived from its observed
- * mention state. Pure so it can be unit-tested without a DOM. The `state` guard
- * ensures we NEVER render any indicator for a relay we could not observe
- * (`unknown`/`loading`/`error`) — only a `ready` observation is trusted.
- *
- * Two-tier indicator system:
- * - `showBadge`: numeric mention count (mentions/thread-replies present).
- * - `showDot`: plain unread dot when there are regular channel unreads but no
- *   mentions. Mutually exclusive with `showBadge` by construction.
- */
-export function communityRailIndicators(unread: CommunityUnreadState): {
-  mentionCount: number;
-  showBadge: boolean;
-  showDot: boolean;
-  pending: boolean;
-  badgeLabel: string;
-} {
-  const observed = unread.state === "ready";
-  const mentionCount = observed ? (unread.count ?? 0) : 0;
-  const showBadge = mentionCount > 0;
-  const showDot = observed && unread.hasUnread && !showBadge;
-  return {
-    mentionCount,
-    showBadge,
-    showDot,
-    pending: unread.state === "unknown" || unread.state === "loading",
-    badgeLabel:
-      mentionCount > MAX_BADGE ? `${MAX_BADGE}+` : String(mentionCount),
-  };
-}
-
 function CommunityButton({
   community,
   isActive,
-  unread,
   iconUrl,
   onSwitch,
   menu,
@@ -100,7 +61,6 @@ function CommunityButton({
 }: {
   community: Community;
   isActive: boolean;
-  unread: CommunityUnreadState;
   iconUrl: string | null;
   onSwitch: () => void;
   menu: React.ReactNode;
@@ -108,15 +68,6 @@ function CommunityButton({
   dragAttributes?: React.HTMLAttributes<HTMLElement>;
   isDragging?: boolean;
 }) {
-  const { mentionCount, showBadge, showDot, pending, badgeLabel } =
-    communityRailIndicators(unread);
-
-  const tooltipLabel = showBadge
-    ? `${community.name} — ${mentionCount} mention${mentionCount === 1 ? "" : "s"}`
-    : showDot
-      ? `${community.name} — unread`
-      : community.name;
-
   return (
     <ContextMenu modal={false}>
       <Tooltip>
@@ -124,7 +75,7 @@ function CommunityButton({
           <ContextMenuTrigger asChild>
             <button
               aria-current={isActive ? "true" : undefined}
-              aria-label={tooltipLabel}
+              aria-label={community.name}
               className={cn(
                 "relative flex h-9 w-9 items-center justify-center touch-none outline-hidden focus:outline-none focus-visible:outline-none",
                 isDragging && "opacity-30",
@@ -141,7 +92,6 @@ function CommunityButton({
                   isActive
                     ? "rounded-xl bg-primary text-primary-foreground"
                     : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
-                  pending && "opacity-60",
                 )}
               >
                 {iconUrl ? (
@@ -156,25 +106,10 @@ function CommunityButton({
                   getInitials(community.name) || "🐝"
                 )}
               </span>
-              {showBadge ? (
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold text-primary-foreground ring-2 ring-sidebar"
-                  data-testid={`community-rail-mentions-${community.id}`}
-                >
-                  {badgeLabel}
-                </span>
-              ) : showDot ? (
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 h-2 w-2 shrink-0 rounded-full bg-primary ring-2 ring-sidebar"
-                  data-testid={`community-rail-unread-dot-${community.id}`}
-                >
-                  <span className="sr-only">unread</span>
-                </span>
-              ) : null}
             </button>
           </ContextMenuTrigger>
         </TooltipTrigger>
-        <TooltipContent side="right">{tooltipLabel}</TooltipContent>
+        <TooltipContent side="right">{community.name}</TooltipContent>
       </Tooltip>
       <ContextMenuContent data-testid={`community-rail-menu-${community.id}`}>
         {menu}
@@ -213,7 +148,6 @@ function SortableCommunityButton({
   community,
   activeCommunityId,
   iconsByCommunity,
-  unreadByCommunity,
   onSwitchCommunity,
   onMarkAllRead,
   onSetEditingCommunity,
@@ -221,7 +155,6 @@ function SortableCommunityButton({
   community: Community;
   activeCommunityId: string | null;
   iconsByCommunity: Record<string, string | null | undefined>;
-  unreadByCommunity: Record<string, CommunityUnreadState>;
   onSwitchCommunity: (id: string) => void;
   onMarkAllRead: (community: Community) => void;
   onSetEditingCommunity: (community: Community) => void;
@@ -257,7 +190,7 @@ function SortableCommunityButton({
             </ContextMenuItem>
             <ContextMenuItem
               onClick={() => {
-                void writeTextToClipboard(community.relayUrl);
+                void writeTextToClipboard(community.groupId);
               }}
             >
               <Link2 className="h-4 w-4" />
@@ -271,12 +204,6 @@ function SortableCommunityButton({
           </>
         }
         onSwitch={() => onSwitchCommunity(community.id)}
-        unread={
-          unreadByCommunity[community.id] ?? {
-            hasUnread: false,
-            state: "unknown",
-          }
-        }
       />
     </div>
   );
@@ -284,9 +211,8 @@ function SortableCommunityButton({
 
 /**
  * Discord/Slack-style vertical rail of communities on the far left of the app.
- * Shows a mention-count badge for inactive communities (observed via
- * `useCommunityUnread`) and switches relays on click. Right-click opens a
- * per-community menu: mark all as read, copy relay URL, community settings.
+ * Click switches the active community. Right-click opens a per-community menu:
+ * mark active community as read, copy relay URL, community settings.
  *
  * Hidden entirely with a single community — a rail of one adds no value.
  */
@@ -299,10 +225,6 @@ export function CommunityRail({
   onRemoveCommunity,
   onReorderCommunities,
 }: CommunityRailProps) {
-  const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
-    communities,
-    activeCommunityId,
-  );
   const iconsByCommunity = useCommunityIcons(communities);
   const isFullscreen = useIsFullscreen();
   const { markAllChannelsRead } = useAppShell();
@@ -342,16 +264,8 @@ export function CommunityRail({
   };
 
   const handleMarkAllRead = (community: Community) => {
-    if (community.id === activeCommunityId) {
-      markAllChannelsRead();
-      return;
-    }
-    markCommunityRead(community.id).catch((error) => {
-      console.warn(
-        `[CommunityRail] mark all read failed community=${community.id}:`,
-        error,
-      );
-    });
+    if (community.id !== activeCommunityId) return;
+    markAllChannelsRead();
   };
 
   // macOS traffic lights overlay the top-left, so start buttons below them (they hide in fullscreen).
@@ -384,7 +298,6 @@ export function CommunityRail({
               activeCommunityId={activeCommunityId}
               community={community}
               iconsByCommunity={iconsByCommunity}
-              unreadByCommunity={unreadByCommunity}
               onMarkAllRead={handleMarkAllRead}
               onSetEditingCommunity={setEditingCommunity}
               onSwitchCommunity={onSwitchCommunity}

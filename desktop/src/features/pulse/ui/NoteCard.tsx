@@ -1,13 +1,7 @@
-import {
-  Bot,
-  Heart,
-  MessageCircle,
-  PenSquare,
-  SquareArrowOutUpRight,
-} from "lucide-react";
+import { Bot, Heart, MessageCircle, PenSquare } from "lucide-react";
 import * as React from "react";
 
-import { ForumComposer } from "@/features/forum/ui/ForumComposer";
+import { NoteComposer } from "@/features/pulse/ui/NoteComposer";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useNoteByIdQuery } from "@/features/pulse/hooks";
@@ -27,7 +21,6 @@ export type NoteCardActions = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
   ) => Promise<unknown>;
-  share?: (note: UserNote) => void;
   startDm?: (pubkey: string) => void;
   toggleUpvote?: (note: UserNote, remove: boolean) => Promise<unknown>;
 };
@@ -256,20 +249,7 @@ export function NoteCard({
               </TooltipTrigger>
               <TooltipContent>Reply</TooltipContent>
             </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  aria-label="Share"
-                  className={actionButtonClass}
-                  onClick={() => actions?.share?.(note)}
-                  type="button"
-                >
-                  <SquareArrowOutUpRight className="h-4 w-4" />
-                  {countPlaceholder}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Share</TooltipContent>
-            </Tooltip>
+
             {!isOwnNote ? (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -289,7 +269,7 @@ export function NoteCard({
         </div>
         {isReplyComposerOpen ? (
           <div className="mt-4 rounded-2xl border border-border/60 bg-background/60 p-3">
-            <ForumComposer
+            <NoteComposer
               compact
               className="pulse-reply-composer border-0 bg-transparent p-0 shadow-none"
               disabled={!actions?.reply}

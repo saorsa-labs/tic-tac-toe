@@ -1,4 +1,3 @@
-import { invokeTauri } from "@/shared/api/tauri";
 import type {
   ApprovalActionResponse,
   TriggerWorkflowResponse,
@@ -6,266 +5,251 @@ import type {
   WorkflowApproval,
   WorkflowRun,
   WorkflowSaveResult,
-  TraceEntry,
 } from "@/shared/api/types";
+import {
+  x0xCreateStore,
+  x0xDeleteStoreValue,
+  x0xGetStoreValue,
+  x0xListStoreKeys,
+  x0xListStores,
+  x0xPutStoreValue,
+  type X0xStoreSummary,
+} from "@/shared/api/tauriNativeAuxiliary";
+import {
+  decodeWorkflowDefinition,
+  definitionPayloadToWorkflow,
+  encodeWorkflowDefinition,
+  isWorkflowDefinitionStore,
+  WORKFLOW_DEFINITION_STORE_PREFIX,
+  WORKFLOW_DEFINITION_STORE_SUFFIX,
+  workflowDefinitionStoreCreateInput,
+  workflowToDefinitionPayload,
+  type WorkflowDefinitionPayload,
+} from "@/features/workflows/lib/nativeWorkflowData";
 
-// ── Raw types (snake_case from backend) ───────────────────────────────────
+const JSON_CONTENT_TYPE = "application/json";
 
-type RawWorkflow = {
-  id: string;
-  name: string;
-  owner_pubkey: string;
-  channel_id: string | null;
-  definition: Record<string, unknown>;
-  status: Workflow["status"];
-  created_at: number;
-  updated_at: number;
-};
-
-type RawWorkflowSaveResponse = RawWorkflow & {
-  webhook_secret?: string | null;
-};
-
-type RawTraceEntry = {
-  step_id: string;
-  status: string;
-  output?: Record<string, unknown>;
-  started_at?: number | null;
-  completed_at?: number | null;
-  error?: string | null;
-};
-
-type RawWorkflowRun = {
-  id: string;
-  workflow_id: string;
-  status: WorkflowRun["status"];
-  current_step: number | null;
-  execution_trace: RawTraceEntry[];
-  started_at: number | null;
-  completed_at: number | null;
-  error_message: string | null;
-  created_at: number;
-};
-
-type RawWorkflowApproval = {
-  token: string;
-  workflow_id: string;
-  run_id: string;
-  step_id: string;
-  step_index: number;
-  approver_spec: string;
-  status: WorkflowApproval["status"];
-  approver_pubkey: string | null;
-  note: string | null;
-  expires_at: string;
-  created_at: number;
-};
-
-type RawTriggerWorkflowResponse = {
-  run_id: string;
-  workflow_id: string;
-  status: string;
-};
-
-type RawApprovalActionResponse = {
-  token: string;
-  status: string;
-  run_id: string;
-  workflow_id: string;
-};
-
-// ── Conversion functions ──────────────────────────────────────────────────
-
-function fromRawWorkflow(raw: RawWorkflow): Workflow {
-  return {
-    id: raw.id,
-    name: raw.name,
-    ownerPubkey: raw.owner_pubkey,
-    channelId: raw.channel_id,
-    definition: raw.definition,
-    status: raw.status,
-    createdAt: raw.created_at,
-    updatedAt: raw.updated_at,
-  };
+function textBytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
 }
 
-function fromRawWorkflowSave(raw: RawWorkflowSaveResponse): WorkflowSaveResult {
-  return {
-    workflow: fromRawWorkflow(raw),
-    webhookSecret: raw.webhook_secret ?? null,
-  };
+function decodeText(value: Uint8Array, context: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(value);
+  } catch {
+    throw new Error(`Native workflow data is not valid UTF-8 (${context}).`);
+  }
 }
 
-function fromRawTraceEntry(raw: RawTraceEntry): TraceEntry {
-  return {
-    stepId: raw.step_id,
-    status: raw.status,
-    output: raw.output ?? {},
-    startedAt: raw.started_at ?? null,
-    completedAt: raw.completed_at ?? null,
-    error: raw.error ?? null,
-  };
+function nativeExecutionUnavailable(surface: string): never {
+  throw new Error(
+    `${surface} is not exposed by x0xd. Start the Symphony service to use workflow execution; no relay fallback is available.`,
+  );
 }
 
-function fromRawWorkflowRun(raw: RawWorkflowRun): WorkflowRun {
-  return {
-    id: raw.id,
-    workflowId: raw.workflow_id,
-    status: raw.status,
-    currentStep: raw.current_step,
-    executionTrace: raw.execution_trace.map(fromRawTraceEntry),
-    startedAt: raw.started_at,
-    completedAt: raw.completed_at,
-    errorMessage: raw.error_message,
-    createdAt: raw.created_at,
-  };
+async function definitionStores(): Promise<X0xStoreSummary[]> {
+  return (await x0xListStores()).filter(
+    (store) =>
+      store.topic.startsWith(WORKFLOW_DEFINITION_STORE_PREFIX) &&
+      store.topic.endsWith(WORKFLOW_DEFINITION_STORE_SUFFIX),
+  );
 }
 
-export function fromRawApproval(raw: RawWorkflowApproval): WorkflowApproval {
-  return {
-    token: raw.token,
-    workflowId: raw.workflow_id,
-    runId: raw.run_id,
-    stepId: raw.step_id,
-    stepIndex: raw.step_index,
-    approverSpec: raw.approver_spec,
-    status: raw.status,
-    approverPubkey: raw.approver_pubkey,
-    note: raw.note,
-    expiresAt: raw.expires_at,
-    createdAt: raw.created_at,
-  };
+async function ensureDefinitionStore(
+  groupId: string,
+): Promise<X0xStoreSummary> {
+  const stores = await x0xListStores();
+  const existing = stores.find((store) =>
+    isWorkflowDefinitionStore(store, groupId),
+  );
+  if (existing !== undefined) return existing;
+
+  const input = workflowDefinitionStoreCreateInput(groupId);
+  try {
+    return await x0xCreateStore(input);
+  } catch (error) {
+    // A second window may have created the same daemon store between LIST and
+    // POST. Re-read once and accept only the exact native topic; otherwise
+    // surface the original x0xd failure. This is a native race reconciliation,
+    // never a relay fallback.
+    const raced = (await x0xListStores()).find((store) =>
+      isWorkflowDefinitionStore(store, groupId),
+    );
+    if (raced !== undefined) return raced;
+    throw error;
+  }
 }
 
-function fromRawTriggerResponse(
-  raw: RawTriggerWorkflowResponse,
-): TriggerWorkflowResponse {
-  return {
-    runId: raw.run_id,
-    workflowId: raw.workflow_id,
-    status: raw.status,
-  };
+async function readDefinition(
+  storeId: string,
+  workflowId: string,
+): Promise<WorkflowDefinitionPayload | null> {
+  const entry = await x0xGetStoreValue(storeId, workflowId);
+  if (entry === null) return null;
+  const encoded = decodeText(entry.value, `${storeId}/${workflowId}`);
+  const payload = decodeWorkflowDefinition(encoded);
+  if (payload === null) {
+    throw new Error(
+      `Native workflow definition ${workflowId} has an unsupported or malformed schema.`,
+    );
+  }
+  return payload;
 }
 
-function fromRawApprovalResponse(
-  raw: RawApprovalActionResponse,
-): ApprovalActionResponse {
-  return {
-    token: raw.token,
-    status: raw.status,
-    runId: raw.run_id,
-    workflowId: raw.workflow_id,
-  };
+async function workflowsInStore(store: X0xStoreSummary): Promise<Workflow[]> {
+  const keys = await x0xListStoreKeys(store.id);
+  const workflows = await Promise.all(
+    keys.map(async ({ key }) => {
+      const payload = await readDefinition(store.id, key);
+      return payload === null ? null : definitionPayloadToWorkflow(payload);
+    }),
+  );
+  return workflows.filter(
+    (workflow): workflow is Workflow => workflow !== null,
+  );
 }
 
-// ── Tauri invoke wrappers ─────────────────────────────────────────────────
+async function locateWorkflow(workflowId: string): Promise<{
+  store: X0xStoreSummary;
+  payload: WorkflowDefinitionPayload;
+}> {
+  for (const store of await definitionStores()) {
+    const payload = await readDefinition(store.id, workflowId);
+    if (payload !== null) return { store, payload };
+  }
+  throw new Error(
+    `Workflow ${workflowId} was not found in native x0xd stores.`,
+  );
+}
 
 export async function getChannelWorkflows(
   channelId: string,
 ): Promise<Workflow[]> {
-  const raw = await invokeTauri<RawWorkflow[]>("get_channel_workflows", {
-    channelId,
-  });
-  return raw.map(fromRawWorkflow);
+  const store = (await x0xListStores()).find((candidate) =>
+    isWorkflowDefinitionStore(candidate, channelId),
+  );
+  return store === undefined ? [] : workflowsInStore(store);
 }
 
-/**
- * Fetch workflows across many channels in a single relay round-trip.
- *
- * Replaces the per-channel `Promise.all(getChannelWorkflows)` fanout on the
- * Workflows overview: the backend `#h` filter matches any listed channel, and
- * each returned workflow carries its own `channelId` so callers can group.
- */
 export async function getChannelsWorkflows(
   channelIds: string[],
 ): Promise<Workflow[]> {
-  const raw = await invokeTauri<RawWorkflow[]>("get_channels_workflows", {
-    channelIds,
+  const wanted = new Set(channelIds);
+  const stores = (await x0xListStores()).filter((store) => {
+    if (
+      !store.topic.startsWith(WORKFLOW_DEFINITION_STORE_PREFIX) ||
+      !store.topic.endsWith(WORKFLOW_DEFINITION_STORE_SUFFIX)
+    ) {
+      return false;
+    }
+    const groupId = store.topic.slice(
+      WORKFLOW_DEFINITION_STORE_PREFIX.length,
+      -WORKFLOW_DEFINITION_STORE_SUFFIX.length,
+    );
+    return wanted.has(groupId);
   });
-  return raw.map(fromRawWorkflow);
+  return (await Promise.all(stores.map(workflowsInStore))).flat();
 }
 
 export async function getWorkflow(workflowId: string): Promise<Workflow> {
-  const raw = await invokeTauri<RawWorkflow>("get_workflow", { workflowId });
-  return fromRawWorkflow(raw);
+  const { payload } = await locateWorkflow(workflowId);
+  return definitionPayloadToWorkflow(payload);
 }
 
 export async function createWorkflow(
   channelId: string,
   yamlDefinition: string,
 ): Promise<WorkflowSaveResult> {
-  const raw = await invokeTauri<RawWorkflowSaveResponse>("create_workflow", {
+  const store = await ensureDefinitionStore(channelId);
+  const now = Math.floor(Date.now() / 1_000);
+  const workflowId = crypto.randomUUID();
+  const provisional: Workflow = {
+    id: workflowId,
+    name: workflowId,
+    ownerPubkey: store.owner ?? "",
     channelId,
+    definition: {},
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const payload = workflowToDefinitionPayload(
+    provisional,
     yamlDefinition,
+    channelId,
+  );
+  const projected = definitionPayloadToWorkflow(payload);
+  payload.name = projected.name;
+  await x0xPutStoreValue({
+    storeId: store.id,
+    key: workflowId,
+    value: textBytes(encodeWorkflowDefinition(payload)),
+    contentType: JSON_CONTENT_TYPE,
   });
-  return fromRawWorkflowSave(raw);
+  return {
+    workflow: { ...projected, ownerPubkey: store.owner ?? "" },
+  };
 }
 
 export async function updateWorkflow(
   workflowId: string,
   yamlDefinition: string,
 ): Promise<WorkflowSaveResult> {
-  const raw = await invokeTauri<RawWorkflowSaveResponse>("update_workflow", {
-    workflowId,
+  const { store, payload: previous } = await locateWorkflow(workflowId);
+  const previousWorkflow = definitionPayloadToWorkflow(previous);
+  const updated = workflowToDefinitionPayload(
+    { ...previousWorkflow, updatedAt: Math.floor(Date.now() / 1_000) },
     yamlDefinition,
+    previous.group_id,
+  );
+  const projected = definitionPayloadToWorkflow(updated);
+  updated.name = projected.name;
+  await x0xPutStoreValue({
+    storeId: store.id,
+    key: workflowId,
+    value: textBytes(encodeWorkflowDefinition(updated)),
+    contentType: JSON_CONTENT_TYPE,
   });
-  return fromRawWorkflowSave(raw);
+  return {
+    workflow: { ...projected, ownerPubkey: store.owner ?? "" },
+  };
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<void> {
-  await invokeTauri("delete_workflow", { workflowId });
+  const { store } = await locateWorkflow(workflowId);
+  await x0xDeleteStoreValue(store.id, workflowId);
 }
 
 export async function getWorkflowRuns(
-  workflowId: string,
-  limit?: number,
+  _workflowId: string,
+  _limit?: number,
 ): Promise<WorkflowRun[]> {
-  const raw = await invokeTauri<RawWorkflowRun[]>("get_workflow_runs", {
-    workflowId,
-    limit: limit ?? null,
-  });
-  return raw.map(fromRawWorkflowRun);
+  return nativeExecutionUnavailable("Workflow run history");
 }
 
 export async function getRunApprovals(
-  workflowId: string,
-  runId: string,
+  _workflowId: string,
+  _runId: string,
 ): Promise<WorkflowApproval[]> {
-  const raw = await invokeTauri<RawWorkflowApproval[]>("get_run_approvals", {
-    workflowId,
-    runId,
-  });
-  return raw.map(fromRawApproval);
+  return nativeExecutionUnavailable("Workflow approvals");
 }
 
 export async function triggerWorkflow(
-  workflowId: string,
+  _workflowId: string,
 ): Promise<TriggerWorkflowResponse> {
-  const raw = await invokeTauri<RawTriggerWorkflowResponse>(
-    "trigger_workflow",
-    { workflowId },
-  );
-  return fromRawTriggerResponse(raw);
+  return nativeExecutionUnavailable("Workflow triggering");
 }
 
 export async function grantApproval(
-  token: string,
-  note?: string,
+  _token: string,
+  _note?: string,
 ): Promise<ApprovalActionResponse> {
-  const raw = await invokeTauri<RawApprovalActionResponse>("grant_approval", {
-    token,
-    note: note ?? null,
-  });
-  return fromRawApprovalResponse(raw);
+  return nativeExecutionUnavailable("Workflow approval grants");
 }
 
 export async function denyApproval(
-  token: string,
-  note?: string,
+  _token: string,
+  _note?: string,
 ): Promise<ApprovalActionResponse> {
-  const raw = await invokeTauri<RawApprovalActionResponse>("deny_approval", {
-    token,
-    note: note ?? null,
-  });
-  return fromRawApprovalResponse(raw);
+  return nativeExecutionUnavailable("Workflow approval denials");
 }

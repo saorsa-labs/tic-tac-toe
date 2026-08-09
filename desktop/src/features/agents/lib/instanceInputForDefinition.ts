@@ -9,10 +9,7 @@ import {
   resolvePersonaRuntime,
   type ResolvePersonaRuntimeResult,
 } from "./resolvePersonaRuntime";
-import {
-  resolveManagedAgentAvatarUrl,
-  type UploadMediaBytes,
-} from "../ui/managedAgentAvatar";
+import { resolveManagedAgentAvatarUrl } from "../ui/managedAgentAvatar";
 
 type RuntimesQueryLike = {
   isFetched: boolean;
@@ -75,7 +72,7 @@ export function resolveStartRuntimeForDefinition(
  *   no local ACP/agent/MCP commands are spawned, so none are set;
  *   `startOnAppLaunch` is forced false (remote agents don't auto-start with
  *   the desktop) and `spawnAfterCreate` true.
- * - `mesh`: relay-mesh compute. The preset patch carries the instance
+ * - `mesh`: shared compute. The preset patch carries the instance
  *   commands/env the legacy dialog fanned into its field state; env lands in
  *   record env_vars (the instance-override layer — the dial pointer is
  *   per-instance runtime state, never definition env). `harnessOverride`
@@ -110,13 +107,9 @@ export type BackendIntent = {
 export async function buildInstanceInputForDefinition(
   persona: AgentPersona,
   runtime: AcpRuntime,
-  upload?: UploadMediaBytes,
   backendIntent?: BackendIntent,
 ): Promise<CreateManagedAgentInput> {
-  const avatarUrl = await resolveManagedAgentAvatarUrl(
-    persona.avatarUrl,
-    upload,
-  );
+  const avatarUrl = await resolveManagedAgentAvatarUrl(persona.avatarUrl);
 
   const base = {
     name: persona.displayName,

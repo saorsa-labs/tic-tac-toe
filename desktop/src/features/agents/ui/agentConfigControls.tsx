@@ -354,7 +354,7 @@ export function AgentModelField({
   useChevronIcon?: boolean;
 }) {
   const trimmedModel = model.trim();
-  const isSharedCompute = provider?.trim() === "relay-mesh";
+  const isSharedCompute = provider?.trim() === "shared-compute";
   const discoveredDefaultOption = discoveredModelOptions?.find(
     (option) => option.id.trim() === "",
   );

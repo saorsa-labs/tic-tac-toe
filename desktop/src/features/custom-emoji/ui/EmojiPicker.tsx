@@ -4,7 +4,8 @@ import { init } from "emoji-mart";
 import * as React from "react";
 
 import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
-import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+const EMPTY_CUSTOM_EMOJI: CustomEmoji[] = [];
 
 // emoji-mart builds its searchable index synchronously inside `init`, which
 // `<Picker>` calls on mount — so the first reaction popover open paid the full
@@ -87,8 +88,8 @@ function disableSearchInputCorrections(
  * drift across call sites (they used to, and that's why custom emoji were
  * missing from some pickers).
  *
- * It always wires the community custom-emoji palette in via `useCustomEmoji()`,
- * so custom emoji show up everywhere for free. Selection is normalized to a
+ * The custom-emoji category is empty post-relay-cutover (no native set API
+ * yet), so only standard emoji appear until one exists. Selection is normalized to a
  * single string: a standard emoji emits its `native` glyph; a custom emoji has
  * no `native`, so it emits its `:shortcode:` (the emoji-mart `id` is the
  * shortcode). Consumers store/send that string and let the existing renderers
@@ -111,11 +112,8 @@ export const EmojiPicker = React.memo(function EmojiPicker({
   autoFocus = false,
   onSelect,
 }: EmojiPickerProps) {
-  const customEmoji = useCustomEmoji();
-  const custom = React.useMemo(
-    () => buildCustomEmojiCategory(customEmoji),
-    [customEmoji],
-  );
+  const customEmoji = EMPTY_CUSTOM_EMOJI;
+  const custom = React.useMemo(() => buildCustomEmojiCategory(customEmoji), []);
   const hostRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {

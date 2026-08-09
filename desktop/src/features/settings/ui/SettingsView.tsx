@@ -2,8 +2,7 @@ import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
-import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
-import { shouldWarnMissingMembershipSnapshot } from "@/shared/api/relayMembers";
+import { useMyNativeMembershipLookupQuery } from "@/features/community-members/hooks";
 import { getFeature } from "@/shared/features/manifest";
 import {
   resolveEnabled,
@@ -51,22 +50,15 @@ const settingsNavGroups: Array<{
 }> = [
   {
     label: "Personal",
-    sections: [
-      "profile",
-      "appearance",
-      "notifications",
-      "shortcuts",
-      "custom-emoji",
-      "local-archive",
-    ],
+    sections: ["profile", "appearance", "notifications", "shortcuts"],
   },
   {
     label: "Communities",
-    sections: ["hosted-communities", "channel-templates", "community-members"],
+    sections: ["channel-templates", "community-members"],
   },
   {
     label: "App",
-    sections: ["agents", "compute", "experimental", "mobile", "updates"],
+    sections: ["agents", "compute", "experimental", "updates"],
   },
 ];
 
@@ -106,7 +98,7 @@ function SettingsSectionButton({
 }
 
 export function SettingsView({
-  currentPubkey,
+  currentAgentId,
   fallbackDisplayName,
   isUpdatingDesktopNotifications,
   notificationErrorMessage,
@@ -123,7 +115,7 @@ export function SettingsView({
   section,
 }: SettingsViewProps) {
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
-  const myMembershipQuery = useMyRelayMembershipLookupQuery();
+  const myMembershipQuery = useMyNativeMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
     const membership = myMembershipQuery.data?.membership;
@@ -265,16 +257,6 @@ export function SettingsView({
               </button>
             </div>
           ) : null}
-          {shouldWarnMissingMembershipSnapshot(myMembershipQuery.data) ? (
-            <div
-              className="mx-3 flex items-start gap-2 rounded-md border border-amber-500/40 px-3 py-2 text-xs text-sidebar-foreground"
-              data-testid="community-access-snapshot-missing"
-            >
-              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              Community access data is unavailable. Relay recovery may still be
-              in progress.
-            </div>
-          ) : null}
           {visibleNavGroups.map((group) => (
             <SidebarGroup key={group.label}>
               <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
@@ -334,7 +316,7 @@ export function SettingsView({
               data-testid={`settings-panel-${section}`}
             >
               {renderSettingsSection(section, {
-                currentPubkey,
+                currentAgentId,
                 fallbackDisplayName,
                 isUpdatingDesktopNotifications,
                 notificationErrorMessage,

@@ -1,8 +1,6 @@
 import * as React from "react";
 import { toast } from "sonner";
 
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-
 export type AvatarPresentationState = "failed" | "pending" | "ready";
 
 export type AvatarPresentation = {
@@ -80,7 +78,7 @@ function probeImage(
     image.onload = () => finish(verifiedUrl);
     image.onerror = () => finish(null);
     image.referrerPolicy = "no-referrer";
-    image.src = rewriteRelayUrl(verifiedUrl);
+    image.src = verifiedUrl;
   });
 }
 

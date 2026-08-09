@@ -3,7 +3,6 @@ import {
   ReadStateManager,
   type ContextParentResolver,
 } from "@/features/channels/readState/readStateManager";
-import type { RelayClient } from "@/shared/api/relayClientSession";
 
 const noopGetTimestamp = () => null;
 const noopMarkRead = () => {};
@@ -14,10 +13,7 @@ const noopSetResolver = () => {};
  * React hook that creates and manages a ReadStateManager instance.
  * Returns no-op functions when pubkey or relayClient are not available.
  */
-export function useReadState(
-  pubkey: string | undefined,
-  relayClient: RelayClient | undefined,
-) {
+export function useReadState(pubkey: string | undefined) {
   const [readStateVersion, forceUpdate] = React.useReducer(
     (x: number) => x + 1,
     0,
@@ -30,10 +26,10 @@ export function useReadState(
   // Create/destroy manager when pubkey becomes available/changes
   React.useEffect(() => {
     setInitializedPubkey(null);
-    if (!pubkey || !relayClient) return;
+    if (!pubkey) return;
 
     let isCancelled = false;
-    const manager = new ReadStateManager(pubkey, relayClient);
+    const manager = new ReadStateManager(pubkey);
     managerRef.current = manager;
 
     const unsubscribe = manager.subscribe(() => {
@@ -52,7 +48,7 @@ export function useReadState(
       manager.destroy();
       managerRef.current = null;
     };
-  }, [pubkey, relayClient]);
+  }, [pubkey]);
 
   const getEffectiveTimestamp = React.useCallback(
     (contextId: string): number | null => {
@@ -93,11 +89,9 @@ export function useReadState(
     [],
   );
 
-  const isReady = Boolean(
-    pubkey && relayClient && initializedPubkey === pubkey,
-  );
+  const isReady = Boolean(pubkey && initializedPubkey === pubkey);
 
-  if (!pubkey || !relayClient) {
+  if (!pubkey) {
     return {
       getEffectiveTimestamp: noopGetTimestamp,
       isReady: false,

@@ -1,7 +1,6 @@
-import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import { cn } from "@/shared/lib/cn";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 
 /**
  * Render a user-status emoji from its stored string. A status emoji is a bare
@@ -26,7 +25,7 @@ type StatusEmojiProps = {
 const SHORTCODE_RE = /^:([^:\s]+):$/;
 
 export function StatusEmoji({ value, className }: StatusEmojiProps) {
-  const customEmoji = useCustomEmoji();
+  const customEmoji: CustomEmoji[] = [];
 
   if (!value) return null;
 
@@ -42,7 +41,7 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
         <img
           alt={value}
           title={displayName}
-          src={rewriteRelayUrl(found.url)}
+          src={found.url}
           className={cn("inline-block object-contain align-middle", className)}
           draggable={false}
         />

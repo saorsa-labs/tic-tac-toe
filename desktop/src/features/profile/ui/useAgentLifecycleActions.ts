@@ -7,18 +7,14 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
-import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type { ManagedAgent } from "@/shared/api/types";
 
 export function useAgentLifecycleActions({
-  channels,
   managedAgent,
-  relayAgents,
   startManagedAgent,
   stopManagedAgent,
 }: {
-  channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
-  relayAgents: readonly RelayAgent[] | undefined;
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
@@ -29,8 +25,6 @@ export function useAgentLifecycleActions({
       if (isManagedAgentActive(managedAgent)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
-          channels: channels ?? [],
-          relayAgents: relayAgents ?? [],
           stopManagedAgent,
         });
         toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);
@@ -51,13 +45,7 @@ export function useAgentLifecycleActions({
         error instanceof Error ? error.message : "Agent action failed.",
       );
     }
-  }, [
-    channels,
-    managedAgent,
-    relayAgents,
-    startManagedAgent,
-    stopManagedAgent,
-  ]);
+  }, [managedAgent, startManagedAgent, stopManagedAgent]);
 
   const handleAgentRestart = React.useCallback(async () => {
     if (!managedAgent) return;

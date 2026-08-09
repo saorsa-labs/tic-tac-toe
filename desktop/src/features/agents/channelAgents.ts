@@ -8,13 +8,13 @@ export { findReusableAgent } from "@/features/agents/agentReuse";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveManagedAgentAvatarUrl } from "@/features/agents/ui/managedAgentAvatar";
 import {
-  addChannelMembers,
   createManagedAgent,
   getChannelMembers,
   listManagedAgents,
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
+import { x0xAddGroupMember } from "@/shared/api/tauriNativeX0x";
 import type {
   AcpRuntime,
   ChannelRole,
@@ -108,24 +108,24 @@ export async function attachManagedAgentToChannel(
   channelId: string,
   input: AttachManagedAgentToChannelInput,
 ) {
-  const role = input.role ?? "bot";
   const ensureRunning = input.ensureRunning ?? true;
-  const agentPubkey = normalizePubkey(input.agent.pubkey);
-  const membershipResult = await addChannelMembers({
-    channelId,
-    pubkeys: [input.agent.pubkey],
-    role,
-  });
-  const membershipError = membershipResult.errors.find(
-    (error) => normalizePubkey(error.pubkey) === agentPubkey,
-  );
-  if (membershipError) {
-    throw new Error(membershipError.error);
-  }
-  const membershipAdded = membershipResult.added.some(
-    (pubkey) => normalizePubkey(pubkey) === agentPubkey,
-  );
+  const agentId = input.agent.pubkey;
 
+  // Native group roster add, keyed by group id (== channel id) and the
+  // agent's AgentId (== pubkey). The relay nip29 `add_channel_members` batch
+  // path and its per-pubkey added/errors result are gone; the native add
+  // takes a single agent and either adds it or throws. The legacy relay "bot"
+  // role has no native equivalent (native roles are owner/admin/member, set
+  // via a separate command), so `input.role` is advisory and not forwarded.
+  // Detect an existing member first so a re-attach reports "already in
+  // channel" rather than erroring on a duplicate add.
+  const existingMembers = await getChannelMembers(channelId);
+  const membershipAdded = !existingMembers.some(
+    (member) => normalizePubkey(member.pubkey) === normalizePubkey(agentId),
+  );
+  if (membershipAdded) {
+    await x0xAddGroupMember({ groupId: channelId, agentId });
+  }
   let agent = input.agent;
   let started = false;
 

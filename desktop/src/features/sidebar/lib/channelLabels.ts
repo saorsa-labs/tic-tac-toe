@@ -18,7 +18,7 @@ function isGenericDmChannelName(name: string) {
 
 export function resolveChannelDisplayLabel(
   channel: Channel,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   profiles: UserProfileLookup | undefined,
 ) {
   if (channel.channelType !== "dm" || !isGenericDmChannelName(channel.name)) {
@@ -29,17 +29,17 @@ export function resolveChannelDisplayLabel(
     fallbackName: channel.participants[index] ?? null,
     pubkey,
   }));
-  const otherParticipants = currentPubkey
+  const otherParticipants = currentAgentId
     ? participants.filter(
         (participant) =>
-          participant.pubkey.toLowerCase() !== currentPubkey.toLowerCase(),
+          participant.pubkey.toLowerCase() !== currentAgentId.toLowerCase(),
       )
     : participants;
   const resolvedLabels = (
     otherParticipants.length > 0 ? otherParticipants : participants
   ).map((participant) =>
     resolveUserLabel({
-      currentPubkey,
+      currentAgentId,
       fallbackName: participant.fallbackName,
       profiles,
       pubkey: participant.pubkey,

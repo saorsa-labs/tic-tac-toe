@@ -8,6 +8,7 @@ export function useVirtualizedBottomSettle(
   hostRef: React.RefObject<HTMLDivElement | null>,
   listRef: React.RefObject<VListHandle | null>,
   itemsLengthRef: React.RefObject<number>,
+  onComplete?: () => void,
 ) {
   const frameRef = React.useRef<number | null>(null);
   const cancel = React.useCallback(() => {
@@ -53,15 +54,20 @@ export function useVirtualizedBottomSettle(
         atBottom && scroller.scrollHeight === previousHeight
           ? settledFrames + 1
           : 0;
-      previousHeight = scroller.scrollHeight;
       if (settledFrames >= 2 || performance.now() >= deadline) {
         frameRef.current = null;
+        // The settle reached the floor (or its deadline). The scroll it
+        // performed may not have moved scrollTop (already pinned) and so may
+        // not have fired onScroll — re-derive the at-bottom verdict from the
+        // now-settled DOM so the affordance cannot stay stale.
+        onComplete?.();
         return;
       }
+      previousHeight = scroller.scrollHeight;
       frameRef.current = requestAnimationFrame(next);
     };
     next();
-  }, [cancel, hostRef, itemsLengthRef, listRef]);
+  }, [cancel, hostRef, itemsLengthRef, listRef, onComplete]);
 
   React.useEffect(() => cancel, [cancel]);
   return { cancel, settle };

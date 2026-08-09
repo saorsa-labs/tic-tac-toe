@@ -50,12 +50,6 @@ const rules = [
 // Do not add to this list; split the file instead. Remove each entry as its
 // file is broken up. Tracked as a follow-up.
 const overrides = new Map([
-  // Native Builderlab auth/community commands add a small registration surface
-  // to the existing Tauri composition root. The implementation lives in
-  // builderlab.rs; this narrowly ratchets the command wiring while lib.rs is
-  // queued for a broader composition-root split. Bumped for the
-  // archive/unarchive/transfer community-management commands (web parity).
-  ["src-tauri/src/lib.rs", 1013],
   // persona-events rebase: build_deploy_payload threads `state` for the
   // read-time relay-URL workspace fallback while keeping the create-time env
   // pin (the credential-leak guard). Load-bearing feature growth from the
@@ -69,13 +63,6 @@ const overrides = new Map([
   // persona-blank-fallback: persona_snapshot_with_agent_config_fallback call
   // sites add ~4 lines (extra fallback params + inline comments). build_deploy_payload
   // fix (blank-persona provider/model fallback) adds ~6 lines. Bug fix.
-  // archive/mod_tests.rs carries the full test module for archive/mod.rs:
-  // unit tests + 4 real-relay integration tests (ignored, live-relay only).
-  // Production logic in mod.rs is now ~527 lines (under 1000). mod_tests.rs
-  // is test-only content; the override covers the test growth accumulated
-  // across the local-archive + agent-metric-archive PR series. store_tests.rs
-  // (~731 lines) is under 1000 so needs no override.
-  ["src-tauri/src/archive/mod_tests.rs", 1208],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports

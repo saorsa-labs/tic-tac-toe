@@ -5,7 +5,7 @@ import data from "@emoji-mart/data";
 
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import { fuzzyStandardEmoji, rankByShortcode } from "@/shared/lib/emojiSearch";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+
 import type { AutocompleteEdit } from "./useRichTextEditor";
 
 export type EmojiSuggestion = {
@@ -86,7 +86,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
       id: e.shortcode,
       name: e.shortcode,
       native: "",
-      url: rewriteRelayUrl(e.url),
+      url: e.url,
     }));
 
     SearchIndex.search(emojiQuery)

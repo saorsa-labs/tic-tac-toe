@@ -16,15 +16,15 @@ import { ownsAuthorAgent } from "@/features/profile/lib/identity";
  */
 export function canManageMessageForCurrentUser(
   message: TimelineMessage,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   profiles: UserProfileLookup | undefined,
 ): boolean {
   if (message.kind === KIND_HUDDLE_STARTED) return false;
-  if (!currentPubkey || !message.pubkey) return false;
-  if (normalizePubkey(message.pubkey) === normalizePubkey(currentPubkey))
+  if (!currentAgentId || !message.pubkey) return false;
+  if (normalizePubkey(message.pubkey) === normalizePubkey(currentAgentId))
     return true;
   return ownsAuthorAgent(
     profiles?.[normalizePubkey(message.pubkey)],
-    currentPubkey,
+    currentAgentId,
   );
 }

@@ -1,13 +1,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import type { Components } from "react-markdown";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  ZoomIn,
-  ZoomOut,
-} from "lucide-react";
+import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
@@ -20,7 +14,6 @@ import {
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
-import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
@@ -29,7 +22,7 @@ import {
   parseSupportedLinkPreview,
 } from "@/shared/lib/linkPreview";
 import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
@@ -171,8 +164,6 @@ function ImageZoomOverlay({
   alt,
   galleryIndex = 0,
   galleryItems,
-  onCopy,
-  onDownload,
   onClose,
   resolvedSrc,
   sourceBox,
@@ -183,8 +174,6 @@ function ImageZoomOverlay({
   alt: string | undefined;
   galleryIndex?: number;
   galleryItems?: ImageGalleryItem[];
-  onCopy: (src: string | undefined) => void;
-  onDownload: (src: string | undefined) => void;
   onClose: () => void;
   resolvedSrc: string;
   sourceBox: ImageLightboxBox;
@@ -222,7 +211,6 @@ function ImageZoomOverlay({
   const [hasEntered, setHasEntered] = React.useState(prefersReducedMotion);
   const [isAdjustingZoom, setIsAdjustingZoom] = React.useState(false);
   const [isGalleryNavigating, setIsGalleryNavigating] = React.useState(false);
-  const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const currentItem = items[currentIndex] ?? items[0];
   const basisBox = React.useMemo(
     () => imageLightboxBasisBoxForItem(currentItem, sourceBox),
@@ -248,7 +236,6 @@ function ImageZoomOverlay({
   const zoomIdleTimerRef = React.useRef<number | null>(null);
   const hasPreviousImage = currentIndex > 0;
   const hasNextImage = currentIndex < items.length - 1;
-  const canActOnCurrentImage = Boolean(currentItem.src);
   useSmoothCorners(imageFrameSurfaceRef);
 
   const galleryTransitionFilter =
@@ -284,7 +271,6 @@ function ImageZoomOverlay({
     suppressCloseUntilRef.current =
       Date.now() + IMAGE_LIGHTBOX_CONTROL_SUPPRESS_CLOSE_MS;
   }, []);
-  const closeMenu = React.useCallback(() => setMenu(null), []);
 
   const finishZoomGestureSoon = React.useCallback(() => {
     if (zoomIdleTimerRef.current != null) {
@@ -356,7 +342,6 @@ function ImageZoomOverlay({
       }
 
       markControlGesture();
-      setMenu(null);
       setGalleryDirection(nextIndex > currentIndex ? "forward" : "backward");
       if (galleryTransitionTimerRef.current != null) {
         window.clearTimeout(galleryTransitionTimerRef.current);
@@ -380,8 +365,6 @@ function ImageZoomOverlay({
   const goToNextImage = React.useCallback(() => {
     navigateGallery(currentIndex + 1);
   }, [currentIndex, navigateGallery]);
-
-  useDismissMediaContextMenu(Boolean(menu), closeMenu);
 
   React.useEffect(() => {
     if (prefersReducedMotion) {
@@ -704,28 +687,6 @@ function ImageZoomOverlay({
       (IMAGE_LIGHTBOX_MAX_ZOOM - IMAGE_LIGHTBOX_MIN_ZOOM)) *
     100;
   const label = currentItem.alt?.trim() || "Image preview";
-  const handleImageContextMenu = React.useCallback(
-    (event: React.MouseEvent<HTMLImageElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      event.nativeEvent.stopImmediatePropagation();
-      markControlGesture();
-      if (canActOnCurrentImage) {
-        setMenu({ x: event.clientX, y: event.clientY });
-      }
-    },
-    [canActOnCurrentImage, markControlGesture],
-  );
-  const handleMenuCopy = React.useCallback(() => {
-    setMenu(null);
-    markControlGesture();
-    onCopy(currentItem.src);
-  }, [currentItem.src, markControlGesture, onCopy]);
-  const handleMenuDownload = React.useCallback(() => {
-    setMenu(null);
-    markControlGesture();
-    onDownload(currentItem.src);
-  }, [currentItem.src, markControlGesture, onDownload]);
 
   return createPortal(
     <div
@@ -865,7 +826,6 @@ function ImageZoomOverlay({
                   ease: IMAGE_LIGHTBOX_GALLERY_EASE,
                 }}
                 variants={galleryImageVariants}
-                onContextMenuCapture={handleImageContextMenu}
               />
             </AnimatePresence>
           </div>
@@ -925,22 +885,6 @@ function ImageZoomOverlay({
             aria-hidden="true"
             className="pointer-events-none absolute inset-0 -z-10 rounded-[inherit] bg-muted shadow-sm backdrop-blur-xl backdrop-saturate-150"
           />
-          <button
-            aria-label="Download image"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-muted-foreground/10 hover:text-foreground outline-hidden focus-visible:ring-2 focus-visible:ring-ring/70 disabled:pointer-events-none disabled:opacity-45"
-            disabled={!canActOnCurrentImage}
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onDownload(currentItem.src);
-            }}
-          >
-            <Download className="h-4 w-4" />
-          </button>
-          <div
-            aria-hidden="true"
-            className="h-5 w-px shrink-0 bg-muted-foreground/15"
-          />
           <ZoomOut aria-hidden="true" className="h-4 w-4 shrink-0 opacity-80" />
           <input
             aria-label="Image zoom"
@@ -976,20 +920,6 @@ function ImageZoomOverlay({
           </span>
         </div>
       </div>
-      {menu && canActOnCurrentImage ? (
-        <MediaContextMenu
-          dataAttributes={[
-            "data-image-context-menu",
-            "data-image-lightbox-controls",
-          ]}
-          items={[
-            { label: "Copy image", onSelect: handleMenuCopy },
-            { label: "Download image", onSelect: handleMenuDownload },
-          ]}
-          portalContainer={dialogRef.current ?? undefined}
-          position={menu}
-        />
-      ) : null}
     </div>,
     document.body,
   );
@@ -1013,7 +943,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
     sourceScope: Element | null;
   } | null>(null);
   const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
-  const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
   const thumbnailImageRef = React.useRef<HTMLImageElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
@@ -1098,17 +1027,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
     return () => observer.disconnect();
   }, []);
 
-  const closeMenu = React.useCallback(() => setMenu(null), []);
-  useDismissMediaContextMenu(Boolean(menu), closeMenu);
-
-  const handleContextMenu = (e: React.MouseEvent) => {
-    e.preventDefault();
-    if (isInsideHiddenSpoiler(e.currentTarget)) return;
-    e.stopPropagation();
-    e.nativeEvent.stopImmediatePropagation();
-    setMenu({ x: e.clientX, y: e.clientY });
-  };
-
   const openLightbox = React.useCallback(
     (image: HTMLImageElement) => {
       if (!resolvedSrc || isInsideHiddenSpoiler(image)) {
@@ -1120,7 +1038,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
         return;
       }
 
-      setMenu(null);
       const sourceBox = imageLightboxBoxFromRect(rect);
       const sourceCornerRadii = imageLightboxCornerRadiiFromElement(image);
       const sourceScope = triggerRef.current
@@ -1157,33 +1074,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
     }
   };
 
-  const handleCopyImage = React.useCallback((copySrc: string | undefined) => {
-    setMenu(null);
-    if (!copySrc) return;
-    invokeTauri("copy_image_to_clipboard", { url: copySrc })
-      .then(() => {
-        toast.success("Copied to clipboard");
-      })
-      .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : "Copy failed";
-        toast.error(msg);
-      });
-  }, []);
-
-  const handleDownload = React.useCallback(
-    (downloadSrc: string | undefined) => {
-      setMenu(null);
-      if (!downloadSrc) return;
-      invokeTauri("download_image", { url: downloadSrc }).catch(
-        (err: unknown) => {
-          const msg = err instanceof Error ? err.message : "Download failed";
-          toast.error(msg);
-        },
-      );
-    },
-    [],
-  );
-
   return (
     <>
       <button
@@ -1203,7 +1093,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
         tabIndex={isHiddenInSpoiler ? -1 : undefined}
         type="button"
         onClick={handleImageTriggerClick}
-        onContextMenuCapture={handleContextMenu}
       >
         <ProgressiveImage
           alt={alt}
@@ -1219,23 +1108,11 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
           width={intrinsicDimensions.width}
         />
       </button>
-      {menu && src ? (
-        <MediaContextMenu
-          dataAttributes={["data-image-context-menu"]}
-          items={[
-            { label: "Copy image", onSelect: () => handleCopyImage(src) },
-            { label: "Download image", onSelect: () => handleDownload(src) },
-          ]}
-          position={menu}
-        />
-      ) : null}
       {lightboxState && resolvedSrc ? (
         <ImageZoomOverlay
           alt={alt}
           galleryIndex={lightboxState.galleryIndex}
           galleryItems={lightboxState.galleryItems}
-          onCopy={handleCopyImage}
-          onDownload={handleDownload}
           onClose={() => setLightboxState(null)}
           resolvedSrc={resolvedSrc}
           sourceBox={lightboxState.sourceBox}
@@ -1363,13 +1240,8 @@ function createMarkdownComponents(
     href,
     ...props
   }: React.ComponentPropsWithoutRef<"a">) {
-    const {
-      channels,
-      imetaByUrl,
-      onOpenMessageLink,
-      onImportSnapshotFromUrl,
-      snapshotSharedBy,
-    } = useMarkdownRuntime();
+    const { channels, imetaByUrl, onOpenMessageLink, snapshotSharedBy } =
+      useMarkdownRuntime();
     if (!interactive) {
       return <span className="font-medium text-current">{children}</span>;
     }
@@ -1394,26 +1266,16 @@ function createMarkdownComponents(
       return (
         <AgentSnapshotCard
           displayName={snapshotCard.displayName}
-          href={snapshotCard.href}
-          filename={snapshotCard.filename}
           sharedBy={snapshotSharedBy}
           size={snapshotCard.size}
-          sha256={snapshotCard.sha256}
           snapshotKind={snapshotCard.snapshotKind}
           thumb={snapshotCard.thumb}
-          onImport={(fileBytes, fileName) => {
-            onImportSnapshotFromUrl?.(
-              fileBytes,
-              fileName,
-              snapshotCard.snapshotKind,
-            );
-          }}
         />
       );
     }
 
     // Generic file attachment: a `[filename](url)` link whose href matches an
-    // imeta entry with a non-image, non-video MIME. Render a download card
+    // imeta entry with a non-image, non-video MIME. Render a file card
     // instead of a plain link. (Media uses the `img` renderer, not this path.)
     const card = resolveFileCard(
       href ? imetaByUrl?.get(href) : undefined,
@@ -1421,9 +1283,7 @@ function createMarkdownComponents(
       label,
     );
     if (card) {
-      return (
-        <FileCard href={card.href} filename={card.filename} size={card.size} />
-      );
+      return <FileCard filename={card.filename} size={card.size} />;
     }
 
     // Intercept `buzz://message?channel=…&id=…` links so a click navigates
@@ -1576,7 +1436,7 @@ function createMarkdownComponents(
         return <span>{alt?.trim() || fallbackLabel}</span>;
       }
 
-      const resolvedSrc = src ? rewriteRelayUrl(src) : src;
+      const resolvedSrc = src ? src : src;
       if (isVideo && src && resolvedSrc) {
         return (
           <span
@@ -1602,7 +1462,7 @@ function createMarkdownComponents(
             dim={entry?.dim}
             resolvedSrc={resolvedSrc}
             src={src}
-            thumbSrc={entry?.thumb ? rewriteRelayUrl(entry.thumb) : undefined}
+            thumbSrc={entry?.thumb ? entry.thumb : undefined}
           />
         </span>
       );
@@ -1718,7 +1578,7 @@ function createMarkdownComponents(
       );
     },
     emoji: ({ src, alt }: { src?: string; alt?: string }) => {
-      const resolvedSrc = src ? rewriteRelayUrl(src) : src;
+      const resolvedSrc = src ? src : src;
       if (!resolvedSrc) {
         return <span>{alt}</span>;
       }

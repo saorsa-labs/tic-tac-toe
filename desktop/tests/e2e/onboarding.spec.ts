@@ -1,6 +1,4 @@
-import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test, type Page } from "@playwright/test";
-import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { installFakeCamera } from "../helpers/fakeCamera";
@@ -604,17 +602,18 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
-test("first-launch key import continues to machine setup", async ({ page }) => {
+test("first-launch continues to machine setup via the daemon identity", async ({
+  page,
+}) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Use an existing key" }).click();
-  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
-  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
-  await page.getByTestId("nostr-import-submit").click();
+  // M2: the daemon owns identity. First launch offers a single "Get started"
+  // CTA that loads the daemon identity — the user-key/npub import path retired.
+  await page.getByRole("button", { name: "Get started" }).click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
@@ -749,15 +748,18 @@ test("first-community choices route join, create, owner, and member intents", as
     page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
   await expect(page.getByText("Joining a private community?")).toBeVisible();
-  await expect(page.getByTestId("welcome-join-npub")).toBeVisible();
+  const publicId = page.getByTestId("welcome-join-agent-id");
+  await expect(publicId).toBeVisible();
+  // M2: the shareable identity is the daemon AgentId (64-hex), never an npub.
+  await expect(publicId).not.toContainText("npub");
   await expect(
-    page.getByRole("button", { name: "Copy public ID" }),
+    page.getByRole("button", { name: "Copy Agent ID" }),
   ).toBeVisible();
   await accessInput.fill("https://default.example.com/invite/abc123");
   await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
 });
 
-test("first-community owner can connect an existing hosted community", async ({
+test("first-community Create and Owner routes land on the local relay/invite path without invoking hosted commands", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -767,401 +769,43 @@ test("first-community owner can connect an existing hosted community", async ({
       "true",
     );
   }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    {
-      builderlabAuth: {
-        email: "owner@example.com",
-        expiresAt: "2099-01-01T00:00:00Z",
-      },
-      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
-      builderlabCommunities: [
-        {
-          id: "owned-community",
-          name: "North Star",
-          normalized_host: "north-star.communities.buzz.xyz",
-        },
-      ],
-    },
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "ws://localhost:3000",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
   await page.goto("/");
 
+  // "Create a community" routes to the local relay/invite surface (Join),
+  // not a hosted-community flow.
   await page.getByTestId("community-choice-create").click();
-  await expect(page.getByText("North Star")).toBeVisible();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Build your profile" }),
-  ).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
-      ),
-    )
-    .toContain('"source":"first-community"');
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
-      ),
-    )
-    .toContain("wss://north-star.communities.buzz.xyz");
-  await page.getByTestId("community-profile-back").click();
-  await expect(
-    page.getByRole("heading", { name: "Choose a community" }),
-  ).toBeVisible();
-  await expect(page.getByText("North Star")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Join a community" }),
-  ).toHaveCount(0);
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
-      ),
-    )
-    .toBeNull();
-});
-
-test("first-community owner can create and connect a hosted community", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await page.addInitScript((pubkey) => {
-    window.localStorage.setItem(
-      `buzz-machine-onboarding-complete.v2:${pubkey}`,
-      "true",
-    );
-  }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    {},
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("community-choice-create").click();
-  await page.getByRole("button", { name: "Sign in to continue" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Finish connecting Buzz" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Connect and continue" }).click();
-  const createSurface = page.getByTestId("hosted-community-create-surface");
-  const surfaceBoxBeforeFeedback = await createSurface.boundingBox();
-  const communityNameInput = page.getByTestId("hosted-community-address-input");
-  await communityNameInput.fill("bee-lab");
-  await expect(communityNameInput).toHaveAttribute("style", /width: 7ch;/);
-  const availabilityFeedback = page.getByText("That address is available.");
-  await expect(availabilityFeedback).toBeVisible();
-  const [feedbackBox, surfaceBox, inputBox, suffixBox] = await Promise.all([
-    availabilityFeedback.boundingBox(),
-    createSurface.boundingBox(),
-    page.getByTestId("hosted-community-address-input").boundingBox(),
-    page.locator("#hosted-community-suffix").boundingBox(),
-  ]);
-  if (
-    !surfaceBoxBeforeFeedback ||
-    !feedbackBox ||
-    !surfaceBox ||
-    !inputBox ||
-    !suffixBox
-  ) {
-    throw new Error("Could not measure hosted community creation layout");
-  }
-  expect(surfaceBox.y).toBe(surfaceBoxBeforeFeedback.y);
-  expect(surfaceBox.height).toBe(surfaceBoxBeforeFeedback.height);
-  const addressLeft = inputBox.x;
-  const addressRight = suffixBox.x + suffixBox.width;
-  expect(
-    Math.abs(
-      (addressLeft + addressRight) / 2 - (surfaceBox.x + surfaceBox.width / 2),
-    ),
-  ).toBeLessThanOrEqual(1);
-  expect(feedbackBox.y).toBeGreaterThanOrEqual(
-    surfaceBox.y + surfaceBox.height,
-  );
-  await page.getByRole("button", { name: "Next" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Build your profile" }),
-  ).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
-      ),
-    )
-    .toContain("wss://bee-lab.communities.buzz.xyz");
-});
-
-test("hosted community address line stays within the card for a long name", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await page.addInitScript((pubkey) => {
-    window.localStorage.setItem(
-      `buzz-machine-onboarding-complete.v2:${pubkey}`,
-      "true",
-    );
-  }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    {},
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  // The 800px app minimum is the worst case for the full-width address line.
-  await page.setViewportSize({ width: 800, height: 720 });
-  await page.goto("/");
-
-  await page.getByTestId("community-choice-create").click();
-  await page.getByRole("button", { name: "Sign in to continue" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Finish connecting Buzz" }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Connect and continue" }).click();
-
-  const createSurface = page.getByTestId("hosted-community-create-surface");
-  const communityNameInput = page.getByTestId("hosted-community-address-input");
-  // A maximum-length (63 char) valid name — the overflow case Wes flagged; the
-  // 7-char check above cannot catch it.
-  const longName = "a".repeat(63);
-  await communityNameInput.fill(longName);
-  await expect(communityNameInput).toHaveValue(longName);
-
-  const [surfaceBox, inputBox, suffixBox] = await Promise.all([
-    createSurface.boundingBox(),
-    communityNameInput.boundingBox(),
-    page.locator("#hosted-community-suffix").boundingBox(),
-  ]);
-  if (!surfaceBox || !inputBox || !suffixBox) {
-    throw new Error("Could not measure hosted community creation layout");
-  }
-  const addressLeft = inputBox.x;
-  const addressRight = suffixBox.x + suffixBox.width;
-  // The composed `<name>.<suffix>` line must stay within the card — no
-  // horizontal overflow past the surface or the 800px window.
-  expect(addressLeft).toBeGreaterThanOrEqual(surfaceBox.x);
-  expect(addressRight).toBeLessThanOrEqual(surfaceBox.x + surfaceBox.width);
-  expect(addressRight).toBeLessThanOrEqual(800);
-  // …and it stays centered within the card.
-  expect(
-    Math.abs(
-      (addressLeft + addressRight) / 2 - (surfaceBox.x + surfaceBox.width / 2),
-    ),
-  ).toBeLessThanOrEqual(2);
-});
-
-test("first-community reports a created community without a relay address", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await page.addInitScript((pubkey) => {
-    window.localStorage.setItem(
-      `buzz-machine-onboarding-complete.v2:${pubkey}`,
-      "true",
-    );
-  }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    {
-      builderlabAuth: {
-        email: "owner@example.com",
-        expiresAt: "2099-01-01T00:00:00Z",
-      },
-      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
-      builderlabCreatedCommunity: {
-        id: "hosted-bee-lab",
-        name: "bee-lab",
-      },
-    },
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("community-choice-create").click();
-  await page.getByRole("textbox", { name: "Community name" }).fill("bee-lab");
-  await expect(page.getByText("That address is available.")).toBeVisible();
-  await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByRole("alert")).toContainText(
-    "The community was created, but Builderlab did not return its relay address.",
-  );
-  await expect(
-    page.getByRole("heading", { name: "Build your profile" }),
-  ).toHaveCount(0);
-});
-
-test("first-community X cancels a pending sign-in", async ({ page }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await page.addInitScript((pubkey) => {
-    window.localStorage.setItem(
-      `buzz-machine-onboarding-complete.v2:${pubkey}`,
-      "true",
-    );
-  }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    { builderlabLoginDelayMs: 5_000 },
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("community-choice-create").click();
-  await page.getByRole("button", { name: "Sign in to continue" }).click();
-  await expect(page.getByText("Waiting for your browser…")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Cancel sign-in" }),
-  ).toHaveCount(0);
-  await page.getByRole("button", { name: "Close" }).click();
-  await expect(
-    page.getByRole("button", { name: /Create a community/ }),
-  ).toBeVisible();
-  await expect
-    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
-    .toEqual(expect.arrayContaining(["cancel_builderlab_login"]));
-});
-
-test("first-community owner can replace a mismatched account identity", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await page.addInitScript((pubkey) => {
-    window.localStorage.setItem(
-      `buzz-machine-onboarding-complete.v2:${pubkey}`,
-      "true",
-    );
-  }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    {
-      builderlabAuth: {
-        email: "old-owner@example.com",
-        expiresAt: "2099-01-01T00:00:00Z",
-      },
-      builderlabIdentity: { pubkey_hex: "f".repeat(64) },
-    },
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("community-choice-create").click();
-  await expect(
-    page.getByRole("heading", {
-      name: "This account uses a different Buzz identity",
-    }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Use this device's identity" })
-    .click();
-  await expect(
-    page.getByRole("textbox", { name: "Community name" }),
-  ).toBeVisible();
-  await expect
-    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
-    .toEqual(
-      expect.arrayContaining([
-        "delete_builderlab_nostr_identity",
-        "bind_builderlab_nostr_identity",
-      ]),
-    );
-});
-
-test("first-community explains when the local identity belongs to another account", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await page.addInitScript((pubkey) => {
-    window.localStorage.setItem(
-      `buzz-machine-onboarding-complete.v2:${pubkey}`,
-      "true",
-    );
-  }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    {
-      builderlabAuth: {
-        email: "wrong-owner@example.com",
-        expiresAt: "2099-01-01T00:00:00Z",
-      },
-      builderlabIdentity: { pubkey_hex: "e".repeat(64) },
-      builderlabBindError: { code: "pubkey_already_bound" },
-    },
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("community-choice-create").click();
-  await page
-    .getByRole("button", { name: "Use this device's identity" })
-    .click();
-  await expect(
-    page.getByText(
-      "This device's Buzz identity belongs to a different Builderlab account and can't be moved from here. Sign out, then sign in with the account that already owns this identity.",
-    ),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Finish connecting Buzz" }),
-  ).toBeVisible();
-});
-
-test("back clears Builderlab auth before returning to first-community choices", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await page.addInitScript((pubkey) => {
-    window.localStorage.setItem(
-      `buzz-machine-onboarding-complete.v2:${pubkey}`,
-      "true",
-    );
-  }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(
-    page,
-    {
-      builderlabAuth: {
-        email: "owner@example.com",
-        expiresAt: "2099-01-01T00:00:00Z",
-      },
-      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
-    },
-    {
-      relayWsUrl: "ws://localhost:3000",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("community-choice-create").click();
+  await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
   await page.getByRole("button", { name: "Back" }).click();
-  await page.getByTestId("community-choice-create").click();
-  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+
+  // "I own the community" routes to the same local relay/invite surface.
+  await page.getByTestId("community-choice-existing").click();
+  await page.getByTestId("existing-choice-owner").click();
+  await expect(
+    page.getByRole("heading", { name: "Reconnect to your community" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
+
+  // Stage 0 contract: the supported onboarding path never invokes a hosted
+  // (Builderlab) command. The mock bridge throws on unknown commands, so any
+  // stray hosted invoke would surface as an error — this log check documents
+  // the contract explicitly.
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMANDS__ ?? []).filter((command) =>
+          command.includes("builderlab"),
+        ),
+      ),
+    )
+    .toEqual([]);
 });
 
 test("first-community shows the scenario cards for localhost", async ({
@@ -1771,14 +1415,44 @@ test("name-only community profile save preserves an existing avatar", async ({
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
-
   const existingAvatarUrl =
     "https://mock.relay/media/existing-community-avatar.png";
+  // Seed the existing avatar the instant the mock bridge comes online, before
+  // the app's boot reads the profile. e2eBridge assigns the invoke seam during
+  // bundle init; trap that assignment so the seed runs synchronously and the
+  // profile step deterministically loads the avatar into the form. Production
+  // intentionally carries a confirmed avatar through a name-only save — the
+  // final get_profile assertion confirms it is preserved.
+  await page.addInitScript((avatarUrl: string) => {
+    const key = "__BUZZ_E2E_INVOKE_MOCK_COMMAND__";
+    type Invoke = (
+      command: string,
+      payload?: Record<string, unknown>,
+    ) => unknown;
+    let invoke: Invoke | undefined;
+    Object.defineProperty(window, key, {
+      configurable: true,
+      enumerable: true,
+      get: () => invoke,
+      set(next: Invoke) {
+        // Restore a plain data property so the app owns the seam afterwards.
+        Object.defineProperty(window, key, {
+          configurable: true,
+          enumerable: true,
+          value: next,
+          writable: true,
+        });
+        invoke = next;
+        if (typeof next === "function") {
+          next("update_profile", { avatarUrl });
+        }
+      },
+    });
+  }, existingAvatarUrl);
+  await page.goto("/");
   await seedCurrentAvatar(page, existingAvatarUrl);
   await page.getByTestId("community-profile-name-key").fill("Tyler");
   await page.getByTestId("community-profile-next").click();
-
   await expect
     .poll(() =>
       page.evaluate(() =>
@@ -1791,7 +1465,7 @@ test("name-only community profile save preserves an existing avatar", async ({
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
-    .toEqual([undefined]);
+    .toEqual([existingAvatarUrl]);
   const profile = await invokeMockCommand<{ avatar_url: string | null }>(
     page,
     "get_profile",
@@ -2984,7 +2658,7 @@ test("open relay skips membership gating during onboarding", async ({
   await expect(page.getByTestId("membership-denied")).toHaveCount(0);
 });
 
-test("membership denial can import a different invited key", async ({
+test("membership denial stays fail-closed — daemon identity is not swappable via UI", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -3002,32 +2676,20 @@ test("membership denial can import a different invited key", async ({
   await page.getByTestId("onboarding-next").click();
 
   await expect(page.getByTestId("membership-denied")).toBeVisible();
-  await page.getByTestId("membership-denied-change-key").click();
+  // M2 invariant: the daemon owns identity. A gated relay must NOT expose an
+  // in-app key import — npub/nsec swap is retired and identity recovery stays
+  // fail-closed (boot routes to KeyringLocked/RelaunchRequired, never a
+  // membership-screen key field). Membership recovers only via retry /
+  // change-community / redeem-invite, none of which touch the daemon AgentId.
+  await expect(page.getByTestId("membership-denied-change-key")).toHaveCount(0);
+  await expect(page.getByTestId("membership-denied-nsec-input")).toHaveCount(0);
+  await expect(page.getByTestId("membership-denied-npub-preview")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("membership-denied-import-key")).toHaveCount(0);
 
-  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
-  await page.getByTestId("membership-denied-nsec-input").fill(importedNsec);
-  await expect(
-    page.getByTestId("membership-denied-npub-preview"),
-  ).toBeVisible();
-  await page.getByTestId("membership-denied-import-key").click();
-
-  // Alice already has a relay profile with a display name, so after the
-  // identity swap the onboarding gate auto-completes.
-  // The identity swap must tear down the old relay socket through the native
-  // disconnect command before the replacement identity connects.
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (
-            window as Window & {
-              __BUZZ_E2E_COMMANDS__?: string[];
-            }
-          ).__BUZZ_E2E_COMMANDS__?.includes("plugin:websocket|disconnect") ??
-          false,
-      ),
-    )
-    .toBe(true);
+  // The daemon identity override is untouched — no swap occurred from the
+  // denied screen.
   await expect
     .poll(() =>
       page.evaluate((storageKey) => {
@@ -3038,9 +2700,7 @@ test("membership denial can import a different invited key", async ({
         return identity?.pubkey ?? null;
       }, E2E_IDENTITY_OVERRIDE_STORAGE_KEY),
     )
-    .toBe(TEST_IDENTITIES.alice.pubkey);
-  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expectHomeView(page);
+    .toBe(BLANK_TYLER_IDENTITY.pubkey);
 });
 
 test("onboarding relay reconnect — click shows Connected then auto-dismisses", async ({
@@ -3149,7 +2809,9 @@ test("membership denied shows all four affordances and change-community edits no
   await expect(
     denied.getByRole("button", { name: "Change community" }),
   ).toBeVisible();
-  await expect(page.getByTestId("membership-denied-change-key")).toBeVisible();
+  // change-key (user-key import) is retired in M2 — the daemon owns identity
+  // and recovery stays fail-closed. The four affordances below are the full
+  // non-destructive recovery contract; the key path's absence is pinned above.
   await expect(
     page.getByTestId("membership-denied-redeem-invite"),
   ).toBeVisible();

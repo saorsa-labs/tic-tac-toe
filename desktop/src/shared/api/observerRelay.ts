@@ -1,46 +1,82 @@
-import { buildObserverControlEvent } from "@/shared/api/tauriObserver";
-import type { RelayEvent } from "@/shared/api/types";
-import { KIND_AGENT_OBSERVER_FRAME } from "@/shared/constants/kinds";
-import { relayClient } from "./relayClient";
+// Native x0x direct-message transport for managed-agent observer telemetry +
+// control. Replaces the kind:24200 Nostr relay subscribe/publish path.
+//
+// - Telemetry (child→owner) arrives over the owner daemon's `/ws/direct`,
+//   filtered to observer envelopes addressed to the owner from known children.
+// - Control (owner→child) is sent as an x0x direct message to the child AgentId.
+//
+// The relay client is never invoked on this path. See `observerNative.ts` for
+// the decode/filter/send logic and `observerEnvelope.ts` for the wire schema.
 
-// How far back (in seconds) the live subscription looks on connect/reconnect.
-// session/prompt is the first frame emitted at turn start, so it can arrive
-// before the desktop subscribes when the agent was already running. A 5-minute
-// lookback covers long-running active turns (coding/review turns routinely
-// exceed 60s). The archive backfill deduplicates any frames already in the
-// local Tauri archive, so there is no double-processing risk.
-const OBSERVER_LIVE_LOOKBACK_SECS = 300;
+import { getIdentity } from "@/shared/api/tauriIdentity";
+import type { X0xLiveFrame } from "./tauriNativeX0x";
+import { invokeTauri } from "./tauri";
+import {
+  sendObserverControl,
+  subscribeObserverLive,
+  type NativeObserverFrame,
+} from "./observerNative";
 
-export function subscribeToAgentObserverFrames(
-  ownerPubkey: string,
-  onEvent: (event: RelayEvent) => void,
-) {
-  return relayClient.subscribeLive(
-    {
-      kinds: [KIND_AGENT_OBSERVER_FRAME],
-      "#p": [ownerPubkey],
-      // The high `limit` lets reconnect replay recover observer frames missed
-      // during a drop. `since` provides a short lookback window so session/prompt
-      // frames from recently-started turns are not silently dropped when the
-      // subscription starts after the agent has already emitted them. Older
-      // history is served by the archive path (ingestArchivedObserverEvents).
-      // The appendAgentEvent dedup on (seq, timestamp) prevents double-processing.
-      limit: 1000,
-      since: Math.floor(Date.now() / 1_000) - OBSERVER_LIVE_LOOKBACK_SECS,
-    },
-    onEvent,
-  );
+export type { NativeObserverFrame };
+
+/**
+ * Resolve the native x0x AgentId of a managed agent's dedicated child daemon.
+ * Returns `null` when no child is provisioned (the agent predates native
+ * provisioning or the child failed to come up).
+ */
+export async function resolveChildAgentId(
+  agentPubkey: string,
+): Promise<string | null> {
+  return invokeTauri<string | null>("get_managed_agent_native_identity", {
+    pubkey: agentPubkey,
+  });
 }
 
+/**
+ * Send a control command to a managed agent over x0x direct messaging. The
+ * child AgentId is resolved from the managed-agent pubkey; the owner AgentId
+ * from the local daemon identity. Fire-and-forget on the send side — the
+ * outcome arrives asynchronously as a `control_result` observer frame.
+ *
+ * Preserves the legacy call signature so `agentControl.ts` is unchanged.
+ */
 export async function sendAgentObserverControl(
   agentPubkey: string,
   payload: unknown,
-) {
-  await relayClient.preconnect();
-  const event = await buildObserverControlEvent({ agentPubkey, payload });
-  await relayClient.publishEvent(
-    event,
-    "Timed out while sending the agent control command.",
-    "Failed to send the agent control command.",
-  );
+): Promise<void> {
+  const childAgentId = await resolveChildAgentId(agentPubkey);
+  if (!childAgentId) {
+    throw new Error(
+      "managed agent has no native x0x child identity; cannot send observer control",
+    );
+  }
+  const identity = await getIdentity();
+  await sendObserverControl({
+    childAgentId,
+    ownerAgentId: identity.agentId,
+    controlPayload: payload,
+  });
+}
+
+/**
+ * Start the live observer telemetry subscription over the owner daemon's
+ * `/ws/direct`. Returns an unsubscribe function.
+ *
+ * `knownChildAgentIds` is read LIVE by the adapter — pass a mutable `Set` the
+ * store updates as agents register/unregister, so dynamically-added children
+ * are admitted without reopening the stream. `onFrame` receives the decoded
+ * observer frame (or `null` for non-observer/chat/unknown-sender DMs, which the
+ * store drops) plus the raw `X0xLiveFrame`.
+ */
+export async function subscribeToAgentObserverFrames(
+  ownerAgentId: string,
+  knownChildAgentIds: Set<string>,
+  onFrame: (frame: NativeObserverFrame | null, raw: X0xLiveFrame) => void,
+): Promise<() => Promise<void>> {
+  const sub = await subscribeObserverLive({
+    ownerAgentId,
+    knownChildAgentIds,
+    onFrame,
+  });
+  return () => sub.close();
 }

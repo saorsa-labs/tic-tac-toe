@@ -3,31 +3,31 @@ use sha2::{Digest as _, Sha256};
 
 use super::ManagedAgentProcess;
 
-/// Canonical identity of one managed-agent harness on one relay.
+/// Canonical identity of one managed-agent harness in one workspace group.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeKey {
     pub pubkey: String,
-    pub relay_url: String,
+    pub group_id: String,
 }
 
 impl ManagedAgentRuntimeKey {
-    pub fn new(pubkey: impl Into<String>, relay_url: &str) -> Result<Self, String> {
+    pub fn new(pubkey: impl Into<String>, group_id: &str) -> Result<Self, String> {
         let pubkey = pubkey.into();
         if pubkey.len() != 64 || !pubkey.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("managed-agent pubkey must be 64 hexadecimal characters".into());
         }
         Ok(Self {
             pubkey: pubkey.to_ascii_lowercase(),
-            relay_url: buzz_core_pkg::relay::normalize_relay_url(relay_url)
-                .map_err(|error| error.to_string())?,
+            // Group ids are opaque x0x group scopes, not URLs — stored verbatim.
+            group_id: group_id.to_string(),
         })
     }
 
     /// Stable opaque identifier/path suffix derived only from canonical fields.
     pub fn runtime_id(&self) -> String {
-        let relay_hash = hex::encode(Sha256::digest(self.relay_url.as_bytes()));
-        format!("{}__{relay_hash}", self.pubkey)
+        let group_hash = hex::encode(Sha256::digest(self.group_id.as_bytes()));
+        format!("{}__{group_hash}", self.pubkey)
     }
 }
 
@@ -82,11 +82,11 @@ impl ManagedAgentPairRuntime {
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeStatus {
     pub pubkey: String,
-    pub relay_url: String,
-    /// Exact descriptor URL echoed only by reconcile result rows so callers can
-    /// correlate a canonical response without normalizing on the frontend.
+    pub group_id: String,
+    /// Exact group id echoed only by reconcile result rows so callers can
+    /// correlate a response without re-deriving the active group on the frontend.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub requested_relay_url: Option<String>,
+    pub requested_group_id: Option<String>,
     pub local_setup: bool,
     pub lifecycle: ManagedAgentRuntimeLifecycle,
     pub pid: Option<u32>,
@@ -98,16 +98,10 @@ pub struct ManagedAgentRuntimeStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeLifecycleObserverPayload {
     pub pubkey: String,
-    pub relay_url: String,
+    pub group_id: String,
     pub start_nonce: String,
     pub lifecycle: ManagedAgentRuntimeLifecycle,
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManagedAgentCommunityTarget {
-    pub relay_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

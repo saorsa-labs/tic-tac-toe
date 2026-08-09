@@ -1,13 +1,5 @@
 import type * as React from "react";
-import {
-  BellOff,
-  ChevronDown,
-  CircleDot,
-  FileText,
-  Hash,
-  Lock,
-  X,
-} from "lucide-react";
+import { BellOff, ChevronDown, CircleDot, Hash, Lock, X } from "lucide-react";
 
 import {
   ContextMenu,
@@ -236,10 +228,6 @@ function SidebarChannelIcon({
 
   if (channel.visibility === "private") {
     return <Lock className="h-4 w-4" />;
-  }
-
-  if (channel.channelType === "forum") {
-    return <FileText className="h-4 w-4" />;
   }
 
   return <Hash className="h-4 w-4" />;

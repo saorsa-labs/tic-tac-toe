@@ -94,12 +94,12 @@ test("explicit-model providers get no default row (no harness default entry)", (
   );
 });
 
-test("relay-mesh keeps its automatic routing default row", () => {
+test("shared-compute keeps its automatic routing default row", () => {
   const options = getDiscoveredPersonaModelOptions(
     response({
       models: [{ id: "llama-3", name: "Llama 3", description: null }],
     }),
-    "relay-mesh",
+    "shared-compute",
   );
 
   assert.equal(options[0].id, "");

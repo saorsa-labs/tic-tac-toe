@@ -44,13 +44,18 @@ function readLineByRoot(messages, frontiersByRoot) {
   return (id) => lineByMessageId.get(id) ?? null;
 }
 
-const counts = (messages, getReadAt, isNotified = notifiedAll, currentPubkey) =>
+const counts = (
+  messages,
+  getReadAt,
+  isNotified = notifiedAll,
+  currentAgentId,
+) =>
   computeThreadBadgeCounts(
     messages,
     buildRepliesByRootId(messages),
     getReadAt,
     isNotified,
-    currentPubkey,
+    currentAgentId,
   );
 
 // (a) A root's badge counts EVERY descendant in its subtree, at any depth, not

@@ -18,9 +18,13 @@ function msg(over = {}) {
   };
 }
 
-test("estimateRowHeight: short text is near the floor", () => {
+// One-line compact rows hit the MIN_ESTIMATE floor of 46. This is load-bearing:
+// it is the estimate BEFORE TimelineMessageList's 10px item padding, and staying
+// at 46 (not the rendered ~56) is what keeps simple-history prepend anchoring
+// within the 32px tolerance. Drift upward breaks the anchor, so pin it exactly.
+test("estimateRowHeight: one-line short text pins the compact floor at 46", () => {
   const h = estimateRowHeight(msg({ body: "hello" }));
-  assert.ok(h >= 60 && h < 120, `expected small, got ${h}`);
+  assert.equal(h, 46, `expected compact floor 46, got ${h}`);
 });
 
 test("estimateRowHeight: many lines reserve more", () => {

@@ -504,10 +504,7 @@ fn resolve_openai_effort(
         result
     };
 
-    let resolved = candidates
-        .into_iter()
-        .next()
-        .expect("supported is non-empty");
+    let resolved = candidates.into_iter().next().unwrap_or(requested);
 
     tracing::warn!(
         %model,

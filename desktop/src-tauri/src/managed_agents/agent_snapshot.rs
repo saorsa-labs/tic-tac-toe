@@ -18,9 +18,8 @@
 //!
 //! # Secret exclusion
 //!
-//! The following fields are NEVER serialized:
-//!   - `private_key_nsec` / any private key material
-//!   - `auth_tag` (NIP-OA)
+//!   - legacy private-key and authentication-tag fields
+//!   - native x0x child identity (provisioned independently at import time)
 //!   - `env_vars` (API keys / credentials)
 //!   - `relay_url` (machine-local endpoint)
 //!   - `acp_command` / `agent_command` / `agent_command_override` / `agent_args`
@@ -169,9 +168,9 @@ pub struct AgentSnapshot {
 
 /// Materialize a snapshot manifest from a `ManagedAgentRecord`.
 ///
-/// `memory_entries` is the pre-fetched, owner-decrypted set from
-/// `get_agent_memory`; this function does NOT call the Tauri command — that
-/// is the caller's responsibility so this fn stays pure and testable.
+/// `memory_entries` is the caller-supplied memory set (currently always empty:
+/// the relay engram fetch was removed for lack of a native contract). Kept as a
+/// parameter so this fn stays pure and the snapshot format records the section.
 ///
 /// `memory_level` controls what ends up in the `memory` section. `avatar_bytes`
 /// is the raw image for the agent (loaded from disk or fetched); when `None`
@@ -478,9 +477,6 @@ mod tests {
             display_name: Some("Test Agent Display".to_string()),
             persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear in snapshot
             team_id: Some("SENTINEL_TEAM_ID".to_string()),       // MUST NOT appear in snapshot
-            private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear in snapshot
-            auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear in snapshot
-            relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear in snapshot
             avatar_url: Some("https://example.com/avatar.png".to_string()),
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear in snapshot
             agent_command: "goose".to_string(),            // MUST NOT appear in snapshot
@@ -531,7 +527,6 @@ mod tests {
             definition_respond_to: Some("allowlist".to_string()),
             definition_respond_to_allowlist: vec!["abc123def".to_string()],
             definition_parallelism: Some(4),
-            relay_mesh: None,
         }
     }
 

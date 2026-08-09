@@ -4,14 +4,13 @@ import test from "node:test";
 import {
   agentCommunityAvailability,
   agentCommunityStatusDetail,
-  canonicalRelayUrl,
   findManagedAgentRuntime,
   managedAgentRuntimeKey,
 } from "./managedAgentRuntimeStatus.ts";
 
 const runtime = (overrides = {}) => ({
   pubkey: "aa",
-  relayUrl: "wss://relay.example",
+  groupId: "group.example",
   localSetup: true,
   lifecycle: "ready",
   pid: 1,
@@ -57,57 +56,43 @@ test("unavailable detail distinguishes stopped and failed", () => {
 
 test("pair key cannot collide at component boundaries", () => {
   assert.notEqual(
-    managedAgentRuntimeKey(runtime({ pubkey: "ab", relayUrl: "c" })),
-    managedAgentRuntimeKey(runtime({ pubkey: "a", relayUrl: "bc" })),
+    managedAgentRuntimeKey(runtime({ pubkey: "ab", groupId: "c" })),
+    managedAgentRuntimeKey(runtime({ pubkey: "a", groupId: "bc" })),
   );
 });
 
-test("selects one relay without collapsing same-pubkey pairs", () => {
+test("selects one group without collapsing same-pubkey pairs", () => {
   const runtimes = [
-    runtime({ relayUrl: "wss://a.example", lifecycle: "ready" }),
-    runtime({ relayUrl: "wss://b.example", lifecycle: "failed" }),
+    runtime({ groupId: "group-a", lifecycle: "ready" }),
+    runtime({ groupId: "group-b", lifecycle: "failed" }),
   ];
   assert.equal(
-    findManagedAgentRuntime(runtimes, "AA", "wss://b.example")?.lifecycle,
+    findManagedAgentRuntime(runtimes, "AA", "group-b")?.lifecycle,
     "failed",
   );
-  assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "wss://c.example"),
-    undefined,
-  );
+  assert.equal(findManagedAgentRuntime(runtimes, "aa", "group-c"), undefined);
 });
 
-test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
-  // Loopback folding + default-port and trailing-slash stripping — the
-  // standard dev setup that previously broke pair matching.
-  assert.equal(canonicalRelayUrl("ws://localhost:3000"), "ws://127.0.0.1:3000");
-  assert.equal(
-    canonicalRelayUrl("WSS://Relay.Example:443/"),
-    "wss://relay.example",
-  );
-  assert.equal(
-    canonicalRelayUrl("ws://relay.example:80/"),
-    "ws://relay.example",
-  );
-  assert.equal(
-    canonicalRelayUrl("wss://relay.example/path/"),
-    "wss://relay.example/path",
-  );
-  assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://127.0.0.1:3000");
-  assert.equal(canonicalRelayUrl("https://relay.example"), null);
-  assert.equal(canonicalRelayUrl("not a url"), null);
-});
-
-test("matches a stored community URL against canonical backend rows", () => {
+test("matches a requested group id against reconciled runtime rows", () => {
+  // On startup reconcile a runtime row carries the exact submitted group id
+  // (requestedGroupId) alongside the daemon-resolved canonical groupId.
   const runtimes = [
-    runtime({ relayUrl: "ws://127.0.0.1:3000", lifecycle: "ready" }),
+    runtime({
+      groupId: "group-canonical",
+      requestedGroupId: "group-submitted",
+      lifecycle: "ready",
+    }),
   ];
   assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3000")?.lifecycle,
+    findManagedAgentRuntime(runtimes, "aa", "group-submitted")?.lifecycle,
     "ready",
   );
   assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3001"),
+    findManagedAgentRuntime(runtimes, "aa", "group-canonical")?.lifecycle,
+    "ready",
+  );
+  assert.equal(
+    findManagedAgentRuntime(runtimes, "aa", "group-other"),
     undefined,
   );
 });

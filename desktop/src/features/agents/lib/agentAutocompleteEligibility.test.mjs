@@ -20,7 +20,7 @@ const PUB_D = "4".repeat(64);
 
 function coalesce(candidates, options = {}) {
   return coalesceAgentAutocompleteCandidates(candidates, {
-    currentPubkey: CURRENT_PUBKEY,
+    currentAgentId: CURRENT_PUBKEY,
     getLabel: (candidate) => candidate.displayName,
     ...options,
   });
@@ -109,7 +109,7 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
 test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents", () => {
   const result = getMentionableAgentPubkeys({
     managedAgentPubkeys: [PUB_A],
-    currentPubkey: CURRENT_PUBKEY,
+    currentAgentId: CURRENT_PUBKEY,
     relayAgents: [
       {
         pubkey: PUB_B,

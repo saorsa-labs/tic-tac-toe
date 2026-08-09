@@ -14,16 +14,15 @@ const ChannelManagementSheet = React.lazy(async () => {
   return { default: module.ChannelManagementSheet };
 });
 
-export type BrowseDialogType = "stream" | "forum" | null;
+export type BrowseDialogType = "stream" | null;
 
 type AppShellOverlaysProps = {
   activeChannel: Channel | null;
   browseDialogType: BrowseDialogType;
   channels: Channel[];
-  currentPubkey?: string;
+  currentAgentId?: string;
   isChannelManagementOpen: boolean;
   isCreatingBrowseChannel?: boolean;
-  onBrowseChannelJoin: (channelId: string) => Promise<void>;
   onBrowseChannelCreate?: (input: CreateChannelInput) => Promise<void>;
   onBrowseDialogOpenChange: (open: boolean) => void;
   onChannelManagementOpenChange: (open: boolean) => void;
@@ -35,10 +34,9 @@ export function AppShellOverlays({
   activeChannel,
   browseDialogType,
   channels,
-  currentPubkey,
+  currentAgentId,
   isChannelManagementOpen,
   isCreatingBrowseChannel,
-  onBrowseChannelJoin,
   onBrowseChannelCreate,
   onBrowseDialogOpenChange,
   onChannelManagementOpenChange,
@@ -63,18 +61,14 @@ export function AppShellOverlays({
     });
   }, [browseDialogType, cancelDeferredModalOpen, openModalNextFrame]);
 
-  const renderedBrowseDialogType = visibleBrowseDialogType ?? browseDialogType;
-
   return (
     <>
       {browseDialogType !== null ? (
         <React.Suspense fallback={null}>
           <ChannelBrowserDialog
             channels={channels}
-            channelTypeFilter={renderedBrowseDialogType ?? browseDialogType}
             isCreatingChannel={isCreatingBrowseChannel}
             onCreateChannel={onBrowseChannelCreate}
-            onJoinChannel={onBrowseChannelJoin}
             onOpenChange={onBrowseDialogOpenChange}
             onSelectChannel={onSelectChannel}
             open={visibleBrowseDialogType !== null}
@@ -86,7 +80,7 @@ export function AppShellOverlays({
         <React.Suspense fallback={null}>
           <ChannelManagementSheet
             channel={activeChannel}
-            currentPubkey={currentPubkey}
+            currentAgentId={currentAgentId}
             onDeleted={onDeleteActiveChannel}
             onOpenChange={onChannelManagementOpenChange}
             open={true}

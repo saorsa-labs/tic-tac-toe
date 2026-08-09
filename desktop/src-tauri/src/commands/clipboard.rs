@@ -31,6 +31,8 @@ pub fn with_clipboard<T>(
     if stored.is_none() {
         *stored = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?);
     }
-    operation(stored.as_mut().expect("clipboard initialized"))
-        .map_err(|e| format!("clipboard error: {e}"))
+    let Some(clipboard) = stored.as_mut() else {
+        return Err("clipboard unavailable after init".to_string());
+    };
+    operation(clipboard).map_err(|e| format!("clipboard error: {e}"))
 }

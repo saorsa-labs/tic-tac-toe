@@ -7,10 +7,7 @@ import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandle
 import { useMessageEventProfilePubkeys } from "@/features/channels/useMessageEventProfilePubkeys";
 import { useMessageOwnerProfiles } from "@/features/channels/useMessageOwnerProfiles";
 import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
-import {
-  useChannelMembersQuery,
-  useJoinChannelMutation,
-} from "@/features/channels/hooks";
+import { useChannelMembersQuery } from "@/features/channels/hooks";
 import {
   MSG_PREFIX,
   THREAD_PREFIX,
@@ -19,7 +16,6 @@ import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmp
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
 import { ChannelPane } from "@/features/channels/ui/ChannelScreenLazyViews";
 import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
-import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
   useManagedAgentsQuery,
@@ -60,7 +56,6 @@ import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -88,10 +83,6 @@ export function ChannelScreen({
   autoSendDraftKey,
   currentIdentity,
   currentProfile,
-  onCloseForumPost,
-  onSelectForumPost,
-  selectedForumPostId,
-  targetForumReplyId,
   targetMessageEvents,
   targetMessageId,
 }: ChannelScreenProps) {
@@ -106,7 +97,6 @@ export function ChannelScreen({
     setContextParentResolver,
     openBrowseChannels,
     openCreateChannel,
-    openChannelManagement: openGlobalChannelManagement,
     followThread,
     unfollowThread,
     isFollowingThread,
@@ -159,9 +149,9 @@ export function ChannelScreen({
     setOptimisticOpenThreadHeadId(undefined);
   }, []);
   const mainInsetRef = useMainInsetRef();
-  const currentPubkey = currentIdentity?.pubkey;
+  const currentAgentId = currentIdentity?.agentId;
   const activeChannelId = activeChannel?.id ?? null;
-  const relaySelfPubkey = useRelaySelfQuery(activeChannel !== null).data;
+  const eventAuthorityAgentId: undefined = undefined;
   const effectiveOpenThreadHeadId =
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId
@@ -230,7 +220,7 @@ export function ChannelScreen({
     activeDmHeaderParticipants,
     activeDmPresenceStatus,
     activeChannelEphemeralDisplay,
-  } = useActiveChannelHeader(activeChannel, currentPubkey);
+  } = useActiveChannelHeader(activeChannel, currentAgentId);
   const sendMessageMutation = useSendMessageMutation(
     activeChannel,
     currentIdentity,
@@ -238,7 +228,6 @@ export function ChannelScreen({
   const toggleReactionMutation = useToggleReactionMutation();
   const deleteMessageMutation = useDeleteMessageMutation(activeChannel);
   const editMessageMutation = useEditMessageMutation(activeChannel);
-  const joinChannelMutation = useJoinChannelMutation(activeChannelId);
   const [findEvents, setFindEvents] = React.useState<RelayEvent[]>([]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: clear spliced find results exactly when the active channel changes.
   React.useEffect(() => {
@@ -265,7 +254,7 @@ export function ChannelScreen({
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
-    relaySelfPubkey,
+    eventAuthorityAgentId,
   );
   const latestMessageEvent = React.useMemo(
     () => resolvedMessages[resolvedMessages.length - 1] ?? null,
@@ -273,9 +262,9 @@ export function ChannelScreen({
   );
   const typingEntries = useChannelTyping(
     activeChannel,
-    currentPubkey,
+    currentAgentId,
     latestMessageEvent,
-    relaySelfPubkey,
+    eventAuthorityAgentId,
   );
   const activeDmParticipantPubkeys = React.useMemo(
     () =>
@@ -348,7 +337,7 @@ export function ChannelScreen({
   const messageProfiles = useMessageProfiles({
     channelMembers,
     currentProfile,
-    currentPubkey,
+    currentAgentId,
     managedAgents,
     profiles: messageProfilesQuery.data?.profiles,
     relayAgents,
@@ -390,24 +379,23 @@ export function ChannelScreen({
       formatTimelineMessages(
         resolvedMessages,
         activeChannel,
-        currentPubkey,
+        currentAgentId,
         currentProfile?.avatarUrl ?? null,
         messageProfiles,
         channelMembers,
         personaLookup,
         respondToLookup,
-        relaySelfPubkey,
+        eventAuthorityAgentId,
         messageOwnerProfiles,
       ),
     [
       activeChannel,
       channelMembers,
       currentProfile?.avatarUrl,
-      currentPubkey,
+      currentAgentId,
       messageProfiles,
       messageOwnerProfiles,
       personaLookup,
-      relaySelfPubkey,
       respondToLookup,
       resolvedMessages,
     ],
@@ -440,14 +428,14 @@ export function ChannelScreen({
     rootId: effectiveOpenThreadHeadId,
     replyTargetId: threadReplyTargetId,
     expandedReplyIds: expandedThreadReplyIds,
-    currentPubkey,
+    currentAgentId,
     currentAvatarUrl: currentProfile?.avatarUrl ?? null,
     profiles: messageProfiles,
     ownerProfiles: messageOwnerProfiles,
     members: channelMembers,
     personaLookup,
     respondToLookup,
-    relaySelfPubkey,
+    relaySelfPubkey: eventAuthorityAgentId,
   });
   const {
     firstUnreadMessageId,
@@ -466,7 +454,7 @@ export function ChannelScreen({
   } = useChannelUnreadState({
     activeChannelId,
     timelineMessages,
-    currentPubkey,
+    currentAgentId,
     openThreadHeadId: effectiveOpenThreadHeadId,
     threadReplyTargetId,
     expandedThreadReplyIds,
@@ -614,7 +602,6 @@ export function ChannelScreen({
     activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
   const timelineLoadingNow =
     activeChannel !== null &&
-    activeChannel.channelType !== "forum" &&
     selectTimelineLoadingState(
       {
         isPending: messagesQuery.isPending,
@@ -702,10 +689,7 @@ export function ChannelScreen({
   const isNarrowPanelViewport =
     channelContentWidthPx > 0 &&
     channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
-  const isSinglePanelView =
-    isNarrowPanelViewport &&
-    activeChannel?.channelType !== "forum" &&
-    hasAuxiliaryPanel;
+  const isSinglePanelView = isNarrowPanelViewport && hasAuxiliaryPanel;
   const shouldCompactHeaderActions =
     hasAuxiliaryPanel &&
     channelContentWidthPx > 0 &&
@@ -718,11 +702,6 @@ export function ChannelScreen({
   });
 
   const handleManageChannel = React.useCallback(() => {
-    if (activeChannel?.channelType === "forum") {
-      openGlobalChannelManagement();
-      return;
-    }
-
     if (channelManagementOpen) {
       setChannelManagementOpen(false);
       return;
@@ -736,9 +715,7 @@ export function ChannelScreen({
     setProfilePanelPubkey(null);
     setChannelManagementOpen(true);
   }, [
-    activeChannel?.channelType,
     channelManagementOpen,
-    openGlobalChannelManagement,
     setChannelManagementOpen,
     setOpenThreadHeadId,
     handleCloseAgentSession,
@@ -760,15 +737,13 @@ export function ChannelScreen({
         activeDmHeaderParticipants={activeDmHeaderParticipants}
         activeDmPresenceStatus={activeDmPresenceStatus}
         chromeWrapperRef={channelHeaderChromeRef}
-        currentPubkey={currentPubkey}
+        currentAgentId={currentAgentId}
         isAddBotOpen={isAddBotOpen}
-        isJoining={joinChannelMutation.isPending}
         onAddBotOpenChange={setIsAddBotOpen}
-        onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
         onToggleMembers={handleToggleMembers}
         showHeaderContent={!isSinglePanelView}
-        transparentChrome={activeChannel?.channelType !== "forum"}
+        transparentChrome
       />
     ),
     [
@@ -780,10 +755,8 @@ export function ChannelScreen({
       activeDmHeaderParticipants,
       activeDmPresenceStatus,
       channelHeaderChromeRef,
-      currentPubkey,
+      currentAgentId,
       isAddBotOpen,
-      joinChannelMutation.isPending,
-      joinChannelMutation.mutateAsync,
       handleManageChannel,
       handleToggleMembers,
       isSinglePanelView,
@@ -806,171 +779,139 @@ export function ChannelScreen({
           ref={channelContentRef}
         >
           {activeChannel ? (
-            activeChannel.channelType === "forum" ? (
-              <ForumChannelContent
-                canResetPanelWidth={canResetThreadPanelWidth}
-                channel={activeChannel}
-                currentPubkey={currentPubkey}
+            <React.Suspense
+              fallback={<ViewLoadingFallback includeHeader kind="channel" />}
+            >
+              <ChannelPane
+                activeChannel={activeChannel}
+                activityAgents={channelAgentSessionAgents}
+                agentPubkeys={agentPubkeys}
+                agentPubkeysPending={agentPubkeysPending}
+                agentSessionAgents={agentSessionAgents}
+                autoSendDraftKey={autoSendDraftKey}
+                onAutoSendComplete={clearAutoSend}
+                botTypingEntries={botTypingEntries}
+                channelFind={channelFind}
+                channelManagementOpen={channelManagementOpen}
+                currentAgentId={currentAgentId}
+                canResetThreadPanelWidth={canResetThreadPanelWidth}
+                fetchOlder={fetchOlder}
                 header={channelHeader}
-                onClosePost={onCloseForumPost}
-                onCloseProfilePanel={handleCloseProfilePanel}
+                hasOlderMessages={hasOlderMessages}
+                historyExhausted={historyExhausted}
+                onAddAgent={handleOpenAddBot}
+                onBrowseChannels={openBrowseChannels}
+                onCreateChannel={openCreateChannel}
+                onOpenMembers={handleOpenMembersSidebar}
+                isFetchingOlder={isFetchingOlder}
+                entranceMessageId={welcomeEntranceMessageId}
+                onEntranceMessageComplete={handleWelcomeEntranceComplete}
+                welcomeKickoffStage={welcomeKickoffStage}
+                welcomeKickoffSettingUp={welcomeKickoffSettingUp}
+                editTarget={
+                  editTargetMessage
+                    ? {
+                        author: editTargetMessage.author,
+                        body: editTargetMessage.body,
+                        id: editTargetMessage.id,
+                        imetaMedia: imetaMediaFromTags(editTargetMessage.tags),
+                      }
+                    : null
+                }
+                followThreadById={followThread}
+                unfollowThreadById={unfollowThread}
+                isFollowingThreadById={isFollowingThread}
+                isMessageUnreadById={isMessageUnread}
+                isFollowingThread={isNotifiedForEffectiveThread}
+                isSending={sendMessageMutation.isPending}
+                isSinglePanelView={isSinglePanelView}
+                isTimelineLoading={isTimelineLoading}
+                messages={timelineMessages}
+                threadSummaries={threadSummaries}
+                onCancelEdit={handleCancelEdit}
+                onCancelThreadReply={handleCancelThreadReply}
+                onChannelManagementDeleted={handleChannelManagementDeleted}
+                onFollowThread={
+                  effectiveOpenThreadHeadId != null &&
+                  !isNotifiedForEffectiveThread
+                    ? () => followThread(effectiveOpenThreadHeadId)
+                    : undefined
+                }
+                onUnfollowThread={
+                  effectiveOpenThreadHeadId != null &&
+                  isNotifiedForEffectiveThread
+                    ? () => unfollowThread(effectiveOpenThreadHeadId)
+                    : undefined
+                }
+                onCloseAgentSession={handleCloseAgentSession}
+                onBackFromAgentSession={
+                  hasAgentSessionReturnTarget
+                    ? handleBackFromAgentSession
+                    : undefined
+                }
+                onCloseChannelManagement={handleCloseChannelManagement}
+                onCloseThread={handleCloseThread}
+                onDelete={activeChannel?.archivedAt ? undefined : handleDelete}
+                onEdit={activeChannel?.archivedAt ? undefined : handleEdit}
+                onEditSave={
+                  activeChannel?.archivedAt ? undefined : handleEditSave
+                }
+                onMarkUnread={handleMessageMarkUnread}
+                onMarkRead={handleMessageMarkRead}
+                onExpandThreadReplies={handleExpandThreadReplies}
+                onOpenAgentSession={handleOpenAgentSession}
                 onOpenDm={handleOpenDm}
                 onOpenProfilePanel={handleOpenProfilePanel}
-                onPanelResizeStart={handleThreadPanelResizeStart}
-                onProfilePanelTabChange={setProfilePanelTab}
+                onResetThreadPanelWidth={handleThreadPanelWidthReset}
+                onCloseProfilePanel={handleCloseProfilePanel}
+                onOpenThread={handleOpenThreadAndCloseAgentSession}
+                onSelectThreadReplyTarget={handleSelectThreadReplyTarget}
+                onSendMessage={handleSendMessage}
+                onSendVideoReviewComment={effectiveSendVideoReviewComment}
+                onSendThreadReply={handleSendThreadReply}
+                onThreadScrollTargetResolved={handleThreadScrollTargetResolved}
+                onThreadPanelResizeStart={handleThreadPanelResizeStart}
+                onTargetReached={handleTargetReached}
+                onToggleReaction={effectiveToggleReaction}
+                openAgentSessionChannelId={openAgentSessionChannelId}
+                openAgentSessionPubkey={openAgentSessionPubkey}
+                openThreadHeadId={effectiveOpenThreadHeadId}
+                shouldShowThreadSkeleton={shouldShowThreadSkeleton}
                 onProfilePanelViewChange={setProfilePanelView}
-                onResetPanelWidth={handleThreadPanelWidthReset}
-                onSelectPost={onSelectForumPost}
-                panelWidthPx={threadPanelWidthPx}
+                onProfilePanelTabChange={setProfilePanelTab}
                 profilePanelPubkey={profilePanelPubkey}
                 profilePanelTab={profilePanelTab}
                 profilePanelView={profilePanelView}
-                selectedPostId={selectedForumPostId}
-                targetReplyId={targetForumReplyId}
+                personaLookup={personaLookup}
+                profiles={messageProfiles}
+                ownerProfiles={messageOwnerProfiles}
+                firstUnreadMessageId={firstUnreadMessageId}
+                unreadCount={unreadCount}
+                targetMessageId={mainTimelineTargetMessageId}
+                threadHeadMessage={displayedThreadHeadMessage}
+                threadMessages={displayedThreadMessages}
+                threadMessagesPending={threadRepliesQuery.isPending}
+                threadPanelWidthPx={threadPanelWidthPx}
+                threadTypingPubkeys={threadTypingPubkeys}
+                threadReplyTargetMessage={displayedThreadReplyTargetMessage}
+                threadScrollTargetId={threadScrollTargetId}
+                threadUnreadCounts={threadUnreadCounts}
+                threadReplyUnreadCounts={threadReplyUnreadCounts}
+                threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}
+                typingPubkeys={humanTypingPubkeys}
               />
-            ) : (
-              <React.Suspense
-                fallback={<ViewLoadingFallback includeHeader kind="channel" />}
-              >
-                <ChannelPane
-                  activeChannel={activeChannel}
-                  activityAgents={channelAgentSessionAgents}
-                  agentPubkeys={agentPubkeys}
-                  agentPubkeysPending={agentPubkeysPending}
-                  agentSessionAgents={agentSessionAgents}
-                  autoSendDraftKey={autoSendDraftKey}
-                  onAutoSendComplete={clearAutoSend}
-                  botTypingEntries={botTypingEntries}
-                  channelFind={channelFind}
-                  channelManagementOpen={channelManagementOpen}
-                  currentPubkey={currentPubkey}
-                  canResetThreadPanelWidth={canResetThreadPanelWidth}
-                  fetchOlder={fetchOlder}
-                  header={channelHeader}
-                  hasOlderMessages={hasOlderMessages}
-                  historyExhausted={historyExhausted}
-                  onAddAgent={handleOpenAddBot}
-                  onBrowseChannels={openBrowseChannels}
-                  onCreateChannel={openCreateChannel}
-                  onOpenMembers={handleOpenMembersSidebar}
-                  isFetchingOlder={isFetchingOlder}
-                  entranceMessageId={welcomeEntranceMessageId}
-                  onEntranceMessageComplete={handleWelcomeEntranceComplete}
-                  welcomeKickoffStage={welcomeKickoffStage}
-                  welcomeKickoffSettingUp={welcomeKickoffSettingUp}
-                  editTarget={
-                    editTargetMessage
-                      ? {
-                          author: editTargetMessage.author,
-                          body: editTargetMessage.body,
-                          id: editTargetMessage.id,
-                          imetaMedia: imetaMediaFromTags(
-                            editTargetMessage.tags,
-                          ),
-                        }
-                      : null
-                  }
-                  followThreadById={followThread}
-                  unfollowThreadById={unfollowThread}
-                  isFollowingThreadById={isFollowingThread}
-                  isMessageUnreadById={isMessageUnread}
-                  isFollowingThread={isNotifiedForEffectiveThread}
-                  isSending={sendMessageMutation.isPending}
-                  isSinglePanelView={isSinglePanelView}
-                  isTimelineLoading={isTimelineLoading}
-                  messages={timelineMessages}
-                  threadSummaries={threadSummaries}
-                  onCancelEdit={handleCancelEdit}
-                  onCancelThreadReply={handleCancelThreadReply}
-                  onChannelManagementDeleted={handleChannelManagementDeleted}
-                  onFollowThread={
-                    effectiveOpenThreadHeadId != null &&
-                    !isNotifiedForEffectiveThread
-                      ? () => followThread(effectiveOpenThreadHeadId)
-                      : undefined
-                  }
-                  onUnfollowThread={
-                    effectiveOpenThreadHeadId != null &&
-                    isNotifiedForEffectiveThread
-                      ? () => unfollowThread(effectiveOpenThreadHeadId)
-                      : undefined
-                  }
-                  onCloseAgentSession={handleCloseAgentSession}
-                  onBackFromAgentSession={
-                    hasAgentSessionReturnTarget
-                      ? handleBackFromAgentSession
-                      : undefined
-                  }
-                  onCloseChannelManagement={handleCloseChannelManagement}
-                  onCloseThread={handleCloseThread}
-                  onDelete={
-                    activeChannel?.archivedAt ? undefined : handleDelete
-                  }
-                  onEdit={activeChannel?.archivedAt ? undefined : handleEdit}
-                  onEditSave={
-                    activeChannel?.archivedAt ? undefined : handleEditSave
-                  }
-                  onMarkUnread={handleMessageMarkUnread}
-                  onMarkRead={handleMessageMarkRead}
-                  onExpandThreadReplies={handleExpandThreadReplies}
-                  onOpenAgentSession={handleOpenAgentSession}
-                  onOpenDm={handleOpenDm}
-                  onOpenProfilePanel={handleOpenProfilePanel}
-                  onResetThreadPanelWidth={handleThreadPanelWidthReset}
-                  onCloseProfilePanel={handleCloseProfilePanel}
-                  onOpenThread={handleOpenThreadAndCloseAgentSession}
-                  onSelectThreadReplyTarget={handleSelectThreadReplyTarget}
-                  onSendMessage={handleSendMessage}
-                  onSendVideoReviewComment={effectiveSendVideoReviewComment}
-                  onSendThreadReply={handleSendThreadReply}
-                  onThreadScrollTargetResolved={
-                    handleThreadScrollTargetResolved
-                  }
-                  onThreadPanelResizeStart={handleThreadPanelResizeStart}
-                  onTargetReached={handleTargetReached}
-                  onToggleReaction={effectiveToggleReaction}
-                  openAgentSessionChannelId={openAgentSessionChannelId}
-                  openAgentSessionPubkey={openAgentSessionPubkey}
-                  openThreadHeadId={effectiveOpenThreadHeadId}
-                  shouldShowThreadSkeleton={shouldShowThreadSkeleton}
-                  onProfilePanelViewChange={setProfilePanelView}
-                  onProfilePanelTabChange={setProfilePanelTab}
-                  profilePanelPubkey={profilePanelPubkey}
-                  profilePanelTab={profilePanelTab}
-                  profilePanelView={profilePanelView}
-                  personaLookup={personaLookup}
-                  profiles={messageProfiles}
-                  ownerProfiles={messageOwnerProfiles}
-                  firstUnreadMessageId={firstUnreadMessageId}
-                  unreadCount={unreadCount}
-                  targetMessageId={mainTimelineTargetMessageId}
-                  threadHeadMessage={displayedThreadHeadMessage}
-                  threadMessages={displayedThreadMessages}
-                  threadMessagesPending={threadRepliesQuery.isPending}
-                  threadPanelWidthPx={threadPanelWidthPx}
-                  threadTypingPubkeys={threadTypingPubkeys}
-                  threadReplyTargetMessage={displayedThreadReplyTargetMessage}
-                  threadScrollTargetId={threadScrollTargetId}
-                  threadUnreadCounts={threadUnreadCounts}
-                  threadReplyUnreadCounts={threadReplyUnreadCounts}
-                  threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}
-                  isJoining={joinChannelMutation.isPending}
-                  onJoinChannel={joinChannelMutation.mutateAsync}
-                  typingPubkeys={humanTypingPubkeys}
-                />
-              </React.Suspense>
-            )
+            </React.Suspense>
           ) : (
             <ChannelScreenEmptyState />
           )}
         </div>
         <MembersSidebar
           channel={activeChannel}
-          currentPubkey={currentPubkey}
+          currentAgentId={currentAgentId}
           open={isMembersSidebarOpen}
           onOpenChange={setIsMembersSidebarOpen}
           onViewActivity={handleOpenAgentSession}
-          relayUrl={activeCommunity?.relayUrl}
+          groupId={activeCommunity?.groupId}
         />
       </ProfilePanelProvider>
     </AgentSessionProvider>

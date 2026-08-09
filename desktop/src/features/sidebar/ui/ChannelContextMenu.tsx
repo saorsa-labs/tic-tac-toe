@@ -181,7 +181,7 @@ export function ChannelContextMenuItems({
   const canLoadOwnerActions =
     channel.channelType !== "dm" && Boolean(onDeleteChannel);
   const membersQuery = useChannelMembersQuery(channel.id, canLoadOwnerActions);
-  const currentPubkey = useIdentityQuery().data?.pubkey;
+  const currentAgentId = useIdentityQuery().data?.agentId;
   const archiveChannel = useArchiveChannelMutation(channel.id);
   const {
     canDeleteChannel,
@@ -190,7 +190,7 @@ export function ChannelContextMenuItems({
     isLoading: isCapabilityLoading,
   } = useChannelModerationCapabilities(
     membersQuery.data,
-    currentPubkey,
+    currentAgentId,
     canLoadOwnerActions,
   );
   const ownerActionsError = membersQuery.error ?? capabilityError;

@@ -13,7 +13,6 @@ import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRunti
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
-import { setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
 
 /**
@@ -33,26 +32,6 @@ export function useApplyTemplate() {
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const { lastRuntimeId } = useLastRuntime();
-
-  async function applyCanvas(
-    templateId: string | undefined,
-    channelId: string,
-    channelName: string,
-  ) {
-    if (!templateId) return;
-    const template = channelTemplatesQuery.data?.find(
-      (t) => t.id === templateId,
-    );
-    if (!template?.canvasTemplate) return;
-    const content = template.canvasTemplate
-      .replace(/\{channel\.name\}/g, channelName)
-      .replace(/\{template\.name\}/g, template.name);
-    try {
-      await setCanvas({ channelId, content });
-    } catch {
-      // Canvas is best-effort — don't block navigation
-    }
-  }
 
   async function applyAgents(
     templateId: string | undefined,
@@ -153,5 +132,5 @@ export function useApplyTemplate() {
     }
   }
 
-  return { applyCanvas, applyAgents };
+  return { applyAgents };
 }

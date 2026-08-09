@@ -24,7 +24,7 @@ import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { changeChannelMemberRole } from "@/shared/api/tauri";
+import { changeChannelMemberRole } from "@/shared/api/tauriChannels";
 import type {
   AddChannelMembersResult,
   Channel,
@@ -57,7 +57,6 @@ import {
 } from "@/features/agents/managedAgentRuntimeStatus";
 import { EditRespondToDialog } from "./EditRespondToDialog";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
-import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
 const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
@@ -108,7 +107,7 @@ function memberModalRoleRank(member: ChannelMember) {
   return 2;
 }
 function compareMembersForModal(
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   left: ChannelMember,
   right: ChannelMember,
 ) {
@@ -117,28 +116,28 @@ function compareMembersForModal(
     return rankDelta;
   }
 
-  if (currentPubkey && left.pubkey === currentPubkey) return -1;
-  if (currentPubkey && right.pubkey === currentPubkey) return 1;
+  if (currentAgentId && left.pubkey === currentAgentId) return -1;
+  if (currentAgentId && right.pubkey === currentAgentId) return 1;
 
   return formatMemberName(left).localeCompare(formatMemberName(right));
 }
 
 type MembersSidebarProps = {
   channel: Channel | null;
-  currentPubkey?: string;
+  currentAgentId?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onViewActivity?: (pubkey: string) => void;
-  relayUrl?: string;
+  groupId?: string;
 };
 
 export function MembersSidebar({
   channel,
-  currentPubkey,
+  currentAgentId,
   open,
   onOpenChange,
   onViewActivity,
-  relayUrl,
+  groupId,
 }: MembersSidebarProps) {
   const channelId = channel?.id ?? null;
   const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
@@ -174,7 +173,7 @@ export function MembersSidebar({
 
   const rawMembers = membersQuery.data ?? [];
   const selfMember =
-    rawMembers.find((member) => member.pubkey === currentPubkey) ?? null;
+    rawMembers.find((member) => member.pubkey === currentAgentId) ?? null;
   const {
     people,
     bots,
@@ -183,13 +182,13 @@ export function MembersSidebar({
     isMyBot,
     managedAgentsQuery,
     relayAgentsQuery,
-  } = useClassifiedMembers(rawMembers, currentPubkey);
+  } = useClassifiedMembers(rawMembers, currentAgentId);
   const activeMembers = React.useMemo(
     () =>
       [...people, ...bots].sort((left, right) =>
-        compareMembersForModal(currentPubkey, left, right),
+        compareMembersForModal(currentAgentId, left, right),
       ),
-    [bots, currentPubkey, people],
+    [bots, currentAgentId, people],
   );
 
   const allMemberPubkeys = React.useMemo(
@@ -217,7 +216,7 @@ export function MembersSidebar({
       const profile = profiles[normalizedPubkey] ?? null;
       const memberIsBot = isBot(member);
       const labels = [
-        formatMemberName(member, currentPubkey),
+        formatMemberName(member, currentAgentId),
         member.displayName ?? "",
         profile?.displayName ?? "",
         memberIsBot ? "agent" : "",
@@ -231,7 +230,7 @@ export function MembersSidebar({
     });
   }, [
     activeMembers,
-    currentPubkey,
+    currentAgentId,
     isBot,
     memberProfilesQuery.data?.profiles,
     normalizedSearchQuery,
@@ -337,7 +336,7 @@ export function MembersSidebar({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
-        ownerPubkey: currentPubkey ?? null,
+        ownerPubkey: currentAgentId ?? null,
         isAgent: true,
         isManagedAgent: true,
         personaId: agent.personaId,
@@ -347,7 +346,7 @@ export function MembersSidebar({
     const coalescedCandidates = coalesceAgentAutocompleteCandidates(
       [...candidatesByPubkey.values()],
       {
-        currentPubkey,
+        currentAgentId,
         getLabel: formatAddCandidateName,
         preferredPubkeys: memberPubkeys,
       },
@@ -362,7 +361,7 @@ export function MembersSidebar({
   }, [
     canAddMembers,
     isArchivedDiscovery,
-    currentPubkey,
+    currentAgentId,
     managedAgentsQuery.data,
     memberPubkeys,
     normalizedDeferredSearchQuery,
@@ -387,12 +386,12 @@ export function MembersSidebar({
             Boolean(
               pubkey &&
                 pubkey.toLowerCase() !==
-                  identityQuery.data?.pubkey?.toLowerCase(),
+                  identityQuery.data?.agentId?.toLowerCase(),
             ),
           ),
       ),
     ],
-    [addSearchResults, identityQuery.data?.pubkey],
+    [addSearchResults, identityQuery.data?.agentId],
   );
   const addSearchOwnerProfilesQuery = useUsersBatchQuery(
     addSearchOwnerPubkeys,
@@ -413,7 +412,7 @@ export function MembersSidebar({
       const profile = profiles[normalizedPubkey] ?? null;
       const memberIsBot = isBot(member);
       const labels = [
-        formatMemberName(member, currentPubkey),
+        formatMemberName(member, currentAgentId),
         member.displayName ?? "",
         profile?.displayName ?? "",
         memberIsBot ? "agent" : "",
@@ -427,7 +426,7 @@ export function MembersSidebar({
     });
   }, [
     archived,
-    currentPubkey,
+    currentAgentId,
     isBot,
     memberProfilesQuery.data?.profiles,
     normalizedSearchQuery,
@@ -435,16 +434,6 @@ export function MembersSidebar({
 
   const canManageMembers =
     selfMember?.role === "owner" || selfMember?.role === "admin";
-
-  const {
-    canModerate,
-    isModerationPending,
-    moderationStateByPubkey,
-    onBan,
-    onUnban,
-    onTimeout,
-    onUntimeout,
-  } = useMembersSidebarModeration(open);
 
   const isArchived =
     channel?.archivedAt !== null && channel?.archivedAt !== undefined;
@@ -469,13 +458,13 @@ export function MembersSidebar({
   const canRemoveMember = React.useCallback(
     (member: ChannelMember) => {
       return (
-        (selfMember?.role === "admin" && member.pubkey !== currentPubkey) ||
+        (selfMember?.role === "admin" && member.pubkey !== currentAgentId) ||
         (selfMember?.role === "owner" && member.role !== "owner") ||
         Boolean(selfMember && isMyBot(member)) ||
-        member.pubkey === currentPubkey
+        member.pubkey === currentAgentId
       );
     },
-    [currentPubkey, isMyBot, selfMember],
+    [currentAgentId, isMyBot, selfMember],
   );
   const removableManagedBots = React.useMemo(
     () =>
@@ -499,9 +488,9 @@ export function MembersSidebar({
     channelId,
     controllableManagedBots,
     removableManagedBots,
-    currentPubkey,
+    currentAgentId,
     onOpenChange,
-    relayUrl,
+    groupId,
   });
 
   useFeedbackToasts(actionNoticeMessage, actionErrorMessage);
@@ -592,38 +581,34 @@ export function MembersSidebar({
       memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()];
     const viewerIsOwner = Boolean(
       memberProfile?.ownerPubkey &&
-        currentPubkey &&
-        memberProfile.ownerPubkey.toLowerCase() === currentPubkey.toLowerCase(),
+        currentAgentId &&
+        memberProfile.ownerPubkey.toLowerCase() ===
+          currentAgentId.toLowerCase(),
     );
     const managedAgent = memberIsBot
       ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
       : undefined;
     const managedAgentRuntime =
-      memberIsBot && relayUrl
+      memberIsBot && groupId
         ? findManagedAgentRuntime(
             managedAgentRuntimesQuery.data ?? [],
             member.pubkey,
-            relayUrl,
+            groupId,
           )
         : undefined;
     // Mirrors the dispatch condition in useMembersSidebarActions: local
     // agents in a community context act on the pair; provider agents keep
     // the agent-wide deploy/!shutdown action.
     const pairAction =
-      managedAgent?.backend.type === "local" && relayUrl
+      managedAgent?.backend.type === "local" && groupId
         ? managedAgentPairAction(managedAgentRuntime)
         : undefined;
     return (
       <div className="content-visibility-auto" key={member.pubkey}>
         <MembersSidebarMemberCard
-          canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
-          canModerate={canModerate && member.pubkey !== currentPubkey}
+          canChangeRole={canManageMembers && member.pubkey !== currentAgentId}
           canRemoveMember={canRemoveMember(member)}
-          isActionPending={
-            isActionPending ||
-            changeRoleMutation.isPending ||
-            isModerationPending
-          }
+          isActionPending={isActionPending || changeRoleMutation.isPending}
           isArchived={isArchived}
           managedAgent={managedAgent}
           managedAgentRuntime={managedAgentRuntime}
@@ -632,11 +617,7 @@ export function MembersSidebar({
           memberAvatarLabel={
             member.displayName ?? truncatePubkey(member.pubkey)
           }
-          memberLabel={formatMemberName(member, currentPubkey)}
-          moderationState={moderationStateByPubkey.get(
-            normalizePubkey(member.pubkey),
-          )}
-          onBan={onBan}
+          memberLabel={formatMemberName(member, currentAgentId)}
           onChangeRole={(m, role) => {
             void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
           }}
@@ -646,9 +627,6 @@ export function MembersSidebar({
           }}
           onOpenProfile={handleOpenProfile}
           onRemoveMember={handleRemoveMember}
-          onTimeout={onTimeout}
-          onUnban={onUnban}
-          onUntimeout={onUntimeout}
           onViewActivity={
             onViewActivity
               ? (pubkey: string) => {
@@ -760,7 +738,7 @@ export function MembersSidebar({
                             }}
                             ownerLabel={formatOwnerLabel(
                               user.ownerPubkey,
-                              identityQuery.data?.pubkey,
+                              identityQuery.data?.agentId,
                               addSearchOwnerProfilesQuery.data?.profiles,
                             )}
                             user={user}
@@ -865,7 +843,7 @@ export function MembersSidebar({
       </Dialog>
       <EditRespondToDialog
         agent={editRespondToAgent}
-        currentPubkey={currentPubkey}
+        currentAgentId={currentAgentId}
         onOpenChange={(dialogOpen) => {
           if (!dialogOpen) setEditRespondToAgent(null);
         }}

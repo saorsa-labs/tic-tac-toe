@@ -28,9 +28,9 @@ export const TIMEOUT_PRESETS: ReadonlyArray<{
 ];
 
 /**
- * Convert a preset duration into the absolute expiry (epoch **seconds**) the
- * timeout command (`useTimeoutMemberMutation`) expects — `now + seconds`. The
- * relay stamps its own authoritative expiry; this is the client's request.
+ * Convert a preset duration into the absolute expiry (epoch **seconds**) a
+ * timeout command expected — `now + seconds`. The relay stamped its own
+ * authoritative expiry; this is the client's request.
  */
 export function timeoutExpiresAt(
   seconds: number,

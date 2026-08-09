@@ -1,5 +1,4 @@
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 
 /**
  * Build the emoji-mart `custom` prop from the community custom emoji palette.
@@ -17,7 +16,7 @@ export function buildCustomEmojiCategory(customEmoji: CustomEmoji[]) {
         id: e.shortcode,
         name: `:${e.shortcode}:`,
         keywords: [e.shortcode],
-        skins: [{ src: rewriteRelayUrl(e.url) }],
+        skins: [{ src: e.url }],
       })),
     },
   ];

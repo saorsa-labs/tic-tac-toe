@@ -1,6 +1,5 @@
 import * as React from "react";
 
-import { invokeTauri } from "@/shared/api/tauri";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   MediaContextMenu,
@@ -8,8 +7,6 @@ import {
   type MediaContextMenuPosition,
   useDismissMediaContextMenu,
 } from "@/shared/ui/markdown/MediaContextMenu";
-import { resolveVideoDownloadFilename } from "@/shared/ui/videoDownload";
-import { toast } from "sonner";
 
 type UseVideoContextMenu = {
   /** `onContextMenuCapture` handler for the inline video surface. */
@@ -20,19 +17,18 @@ type UseVideoContextMenu = {
 
 /**
  * Owns the inline video right-click menu: open/close state, the pointer-anchor
- * handler, and the Download/Copy actions. Kept out of `VideoPlayer` so that
- * large component stays focused on playback, and out of the pure
- * `videoDownload.ts` helpers so they keep their DOM-free, Node-testable shape.
+ * handler, and the Copy-link action. Kept out of `VideoPlayer` so that large
+ * component stays focused on playback.
  *
  * `downloadUrl` is the original relay `/media/` URL (distinct from a rewritten
- * proxy `src`); when absent the menu omits Download and offers only Copy link,
- * so a non-relay video — which the download command's SSRF gate would reject —
- * never surfaces an action that could only error.
+ * proxy `src`); the menu offers Copy link for it, falling back to `src`.
  */
 export function useVideoContextMenu(
   src: string,
   downloadUrl?: string,
-  filename?: string,
+  // Kept for the VideoPlayer call site's positional signature; the native
+  // transport has no download command, so the filename is no longer used.
+  _filename?: string,
 ): UseVideoContextMenu {
   const [position, setPosition] =
     React.useState<MediaContextMenuPosition | null>(null);
@@ -44,31 +40,18 @@ export function useVideoContextMenu(
     setPosition({ x: event.clientX, y: event.clientY });
   }, []);
 
-  const items = React.useMemo<MediaContextMenuItem[]>(() => {
-    const entries: MediaContextMenuItem[] = [];
-    if (downloadUrl) {
-      entries.push({
-        label: "Download video",
+  const items = React.useMemo<MediaContextMenuItem[]>(
+    () => [
+      {
+        label: "Copy link",
         onSelect: () => {
           close();
-          invokeTauri("download_file", {
-            url: downloadUrl,
-            filename: resolveVideoDownloadFilename(filename),
-          }).catch((err: unknown) => {
-            toast.error(err instanceof Error ? err.message : "Download failed");
-          });
+          copyTextToClipboard(downloadUrl ?? src, "Link copied to clipboard");
         },
-      });
-    }
-    entries.push({
-      label: "Copy link",
-      onSelect: () => {
-        close();
-        copyTextToClipboard(downloadUrl ?? src, "Link copied to clipboard");
       },
-    });
-    return entries;
-  }, [close, downloadUrl, filename, src]);
+    ],
+    [close, downloadUrl, src],
+  );
 
   return {
     onContextMenu,

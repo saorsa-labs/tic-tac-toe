@@ -2,7 +2,6 @@ import type * as React from "react";
 import {
   ArrowRight,
   Bot,
-  FileText,
   Hash,
   MessageCircle,
   Plus,
@@ -87,10 +86,6 @@ export function resultIcon(
         ? channelLookup.get(result.hit.channelId)?.channelType
         : undefined;
 
-  if (channelType === "forum") {
-    return FileText;
-  }
-
   if (channelType === "dm") {
     return MessageCircle;
   }
@@ -161,10 +156,6 @@ function describeSearchHit(hit: SearchHit) {
   switch (hit.kind) {
     case 1:
       return "Note";
-    case 45001:
-      return "Forum post";
-    case 45003:
-      return "Forum reply";
     case 43001:
       return "Agent job";
     case 43003:
@@ -213,17 +204,17 @@ function formatRelativeTime(unixSeconds: number) {
 }
 
 export function MessageResultBody({
-  currentPubkey,
+  currentAgentId,
   hit,
   resultProfiles,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
   hit: SearchHit;
   resultProfiles?: UserProfileLookup;
 }) {
   const authorLabel = resolveUserLabel({
     pubkey: hit.pubkey,
-    currentPubkey,
+    currentAgentId,
     profiles: resultProfiles,
     preferResolvedSelfLabel: true,
   });

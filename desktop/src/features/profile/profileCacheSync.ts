@@ -16,7 +16,6 @@ import type {
   UsersBatchResponse,
 } from "@/shared/api/types";
 import { getAvatarSnapshotUrl } from "@/shared/lib/animatedAvatar";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 
 function queryContainsPubkey(query: Query, pubkey: string): boolean {
   return query.queryKey.includes(pubkey);
@@ -82,7 +81,7 @@ export async function refreshProfileCaches(
 
   const snapshotUrl = getAvatarSnapshotUrl(profile.avatarUrl);
   if (!snapshotUrl) return;
-  const fetched = await fetchAvatarDataUrl(rewriteRelayUrl(snapshotUrl));
+  const fetched = await fetchAvatarDataUrl(snapshotUrl);
   if (!fetched) return;
   writeSelfProfileCache(relayUrl, profile.pubkey, {
     ...baseCache,

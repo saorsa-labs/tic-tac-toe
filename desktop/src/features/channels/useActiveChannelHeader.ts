@@ -16,15 +16,15 @@ export type ActiveDmHeaderParticipant = {
 
 export function useActiveChannelHeader(
   activeChannel: Channel | null,
-  currentPubkey?: string,
+  currentAgentId?: string,
 ) {
   const activeDmParticipants = React.useMemo(() => {
     if (activeChannel?.channelType !== "dm") {
       return [];
     }
 
-    const normalizedCurrentPubkey = currentPubkey
-      ? normalizePubkey(currentPubkey)
+    const normalizedCurrentAgentId = currentAgentId
+      ? normalizePubkey(currentAgentId)
       : null;
 
     return activeChannel.participantPubkeys
@@ -34,9 +34,9 @@ export function useActiveChannelHeader(
       }))
       .filter(
         (participant) =>
-          normalizePubkey(participant.pubkey) !== normalizedCurrentPubkey,
+          normalizePubkey(participant.pubkey) !== normalizedCurrentAgentId,
       );
-  }, [activeChannel, currentPubkey]);
+  }, [activeChannel, currentAgentId]);
   const activeDmParticipantPubkeys = React.useMemo(
     () => activeDmParticipants.map((participant) => participant.pubkey),
     [activeDmParticipants],
@@ -72,7 +72,7 @@ export function useActiveChannelHeader(
         return {
           pubkey: participant.pubkey,
           displayName: resolveUserLabel({
-            currentPubkey,
+            currentAgentId,
             fallbackName: participant.fallbackName,
             profiles: activeDmProfilesQuery.data?.profiles,
             pubkey: participant.pubkey,
@@ -80,14 +80,18 @@ export function useActiveChannelHeader(
           avatarUrl: profile?.avatarUrl ?? null,
         };
       }),
-    [activeDmParticipants, activeDmProfilesQuery.data?.profiles, currentPubkey],
+    [
+      activeDmParticipants,
+      activeDmProfilesQuery.data?.profiles,
+      currentAgentId,
+    ],
   );
 
   return {
     activeChannelTitle: activeChannel
       ? resolveChannelDisplayLabel(
           activeChannel,
-          currentPubkey,
+          currentAgentId,
           activeDmProfilesQuery.data?.profiles,
         )
       : "Channels",

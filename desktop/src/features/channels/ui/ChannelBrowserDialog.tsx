@@ -85,13 +85,11 @@ function BrowseState({
 
 type ChannelBrowserDialogProps = {
   channels: Channel[];
-  channelTypeFilter?: "stream" | "forum";
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onJoinChannel: (channelId: string) => Promise<void>;
   onSelectChannel: (channelId: string) => void;
   /**
-   * Create a new channel/forum from within the browser. When provided, the
+   * Create a new channel from within the browser. When provided, the
    * dialog surfaces a "Create …" affordance (Are.na style) so search and
    * create live behind a single entry point.
    */
@@ -101,10 +99,8 @@ type ChannelBrowserDialogProps = {
 
 export function ChannelBrowserDialog({
   channels,
-  channelTypeFilter,
   open,
   onOpenChange,
-  onJoinChannel,
   onSelectChannel,
   onCreateChannel,
   isCreatingChannel = false,
@@ -113,9 +109,6 @@ export function ChannelBrowserDialog({
   const [activeTab, setActiveTab] = React.useState<BrowserTab>("all");
   const [sort, setSort] = React.useState<ChannelSort>("alpha");
   const [selectedIndex, setSelectedIndex] = React.useState<number | null>(null);
-  const [joiningChannelId, setJoiningChannelId] = React.useState<string | null>(
-    null,
-  );
   const [mode, setMode] = React.useState<"browse" | "create">("browse");
   const [createInitialName, setCreateInitialName] = React.useState("");
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -139,22 +132,16 @@ export function ChannelBrowserDialog({
   // can never disagree for a frame while the fuzzy filter catches up.
   const normalizedQuery = trimmedQuery.toLowerCase();
 
-  const isForumMode = channelTypeFilter === "forum";
   const canCreate = Boolean(onCreateChannel);
-  const createKind = isForumMode ? "forum" : "stream";
-  const browseTitle = isForumMode ? "Add a forum" : "Browse channels";
+  const browseTitle = "Browse channels";
   const searchPlaceholder = canCreate
-    ? isForumMode
-      ? "Search or create a forum"
-      : "Search or create a channel"
-    : isForumMode
-      ? "Search forums by name or description"
-      : "Search channels by name or description";
-  const entityLabel = isForumMode ? "forum" : "channel";
+    ? "Search or create a channel"
+    : "Search channels by name or description";
+  const entityLabel = "channel";
 
   const noopCreate = React.useCallback(async () => {}, []);
   const createForm = useCreateChannelForm({
-    channelKind: createKind,
+    channelKind: "stream",
     active: open && mode === "create",
     initialName: createInitialName,
     isCreating: isCreatingChannel,
@@ -180,8 +167,7 @@ export function ChannelBrowserDialog({
         channel.channelType !== "dm" &&
         (channel.archivedAt
           ? channel.isMember
-          : channel.visibility === "open" || channel.isMember) &&
-        (channelTypeFilter ? channel.channelType === channelTypeFilter : true),
+          : channel.visibility === "open" || channel.isMember),
     );
 
     if (deferredQuery.length === 0) {
@@ -189,7 +175,7 @@ export function ChannelBrowserDialog({
     }
 
     return filtered.filter((channel) => matchScoreById.has(channel.id));
-  }, [channels, channelTypeFilter, deferredQuery, matchScoreById]);
+  }, [channels, deferredQuery, matchScoreById]);
 
   const currentChannels = React.useMemo(
     () => matchingChannels.filter((channel) => channel.archivedAt === null),
@@ -240,7 +226,7 @@ export function ChannelBrowserDialog({
     CHANNEL_SORT_OPTIONS.find((option) => option.value === sort)?.label ??
     "Alphabetical";
 
-  const allTabLabel = isForumMode ? "All forums" : "All channels";
+  const allTabLabel = "All channels";
 
   // Whether an exact name match already exists — if so we don't offer to
   // create a duplicate, mirroring how you'd never make two "#general"s.
@@ -249,12 +235,9 @@ export function ChannelBrowserDialog({
       channels.some(
         (channel) =>
           channel.channelType !== "dm" &&
-          channelNamesMatch(channel.name, normalizedQuery) &&
-          (channelTypeFilter
-            ? channel.channelType === channelTypeFilter
-            : true),
+          channelNamesMatch(channel.name, normalizedQuery),
       ),
-    [channels, channelTypeFilter, normalizedQuery],
+    [channels, normalizedQuery],
   );
 
   // The pinned create row (Are.na style) appears for any non-empty query that
@@ -339,7 +322,6 @@ export function ChannelBrowserDialog({
       setActiveTab("all");
       setSort("alpha");
       setSelectedIndex(null);
-      setJoiningChannelId(null);
       setMode("browse");
       setCreateInitialName("");
       return;
@@ -355,18 +337,6 @@ export function ChannelBrowserDialog({
       return Math.min(current, navItemCount - 1);
     });
   }, [navItemCount]);
-
-  async function handleJoin(channelId: string) {
-    setJoiningChannelId(channelId);
-
-    try {
-      await onJoinChannel(channelId);
-      onOpenChange(false);
-      onSelectChannel(channelId);
-    } catch {
-      setJoiningChannelId(null);
-    }
-  }
 
   function handleSelect(channel: Channel) {
     onOpenChange(false);
@@ -416,9 +386,7 @@ export function ChannelBrowserDialog({
       <DialogContent
         aria-describedby={undefined}
         className="gap-0 overflow-hidden border-0 px-6 pb-0 pt-6"
-        data-testid={
-          isForumMode ? "forum-browser-dialog" : "channel-browser-dialog"
-        }
+        data-testid="channel-browser-dialog"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           if (mode === "browse") {
@@ -626,18 +594,10 @@ export function ChannelBrowserDialog({
                       {orderedVisibleChannels.map((channel, index) => (
                         <ChannelCard
                           channel={channel}
-                          isJoining={joiningChannelId === channel.id}
                           isSelected={
                             index + channelNavOffset === selectedIndex
                           }
                           key={channel.id}
-                          onJoin={
-                            !channel.isMember
-                              ? () => {
-                                  void handleJoin(channel.id);
-                                }
-                              : undefined
-                          }
                           onSelect={() => handleSelect(channel)}
                         />
                       ))}
@@ -756,15 +716,11 @@ function ChannelCreateView({
 
 function ChannelCard({
   channel,
-  isJoining,
   isSelected,
-  onJoin,
   onSelect,
 }: {
   channel: Channel;
-  isJoining: boolean;
   isSelected: boolean;
-  onJoin?: () => void;
   onSelect: () => void;
 }) {
   const memberLabel = `${channel.memberCount} ${
@@ -813,26 +769,6 @@ function ChannelCard({
           </p>
         </div>
       </button>
-
-      {!channel.isMember && onJoin ? (
-        <Button
-          className={
-            isJoining
-              ? "shrink-0"
-              : "shrink-0 opacity-0 transition-opacity duration-150 ease-out group-hover/channel-row:opacity-100 group-focus-within/channel-row:opacity-100"
-          }
-          disabled={isJoining}
-          onClick={(event) => {
-            event.stopPropagation();
-            onJoin();
-          }}
-          size="sm"
-          type="button"
-          variant="default"
-        >
-          {isJoining ? "Joining..." : "Join"}
-        </Button>
-      ) : null}
     </div>
   );
 }

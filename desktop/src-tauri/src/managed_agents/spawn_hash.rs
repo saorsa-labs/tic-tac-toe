@@ -15,9 +15,8 @@
 //!   apply on a plain restart and are hashed via the same prospective
 //!   re-snapshot. Harness command, args/mcp, env layering, and the record
 //!   fields the spawn env writes read are hashed as spawn resolves them.
-//! - The relay URL is hashed in resolved form (`effective_agent_relay_url`):
-//!   every record spawns against the active workspace relay (legacy per-record
-//!   pins are ignored), so a workspace relay change means a restart would
+//! - The active workspace group id is hashed directly: every record spawns
+//!   against the active group, so a group change means a restart would
 //!   change what runs.
 //! - Channel membership is not an input: agents pick up channel changes live
 //!   (#1468), never via restart.
@@ -62,13 +61,13 @@ pub(crate) fn effective_team_instructions(
 }
 
 /// Digest the effective spawn configuration of `record` under the current
-/// `personas`, resolving a blank record relay against `workspace_relay`.
+/// `personas`, keyed to the active workspace `group_id`.
 /// Pure — no `AppHandle`, no disk, no keyring.
 pub(crate) fn spawn_config_hash(
     record: &ManagedAgentRecord,
     personas: &[AgentDefinition],
     teams: &[TeamRecord],
-    workspace_relay: &str,
+    group_id: &str,
     global: &GlobalAgentConfig,
 ) -> u64 {
     // Prospective re-snapshot: apply the same `apply_persona_snapshot` the
@@ -105,16 +104,14 @@ pub(crate) fn spawn_config_hash(
     // BTreeMap iteration is ordered, so this is deterministic.
     effective.env.hash(&mut hasher);
 
-    // Record fields the spawn env writes read directly. The relay is hashed
-    // resolved: every record spawns on the workspace relay (legacy pins
-    // ignored), so a workspace relay change must trip the badge.
-    crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
+    // Active workspace group scope. Every record spawns under the active
+    // group, so a group change must trip the restart badge.
+    group_id.hash(&mut hasher);
     // Prompt and runtime-layered team instructions use the same resolver as spawn.
     effective_spawn_prompt(record).hash(&mut hasher);
     effective_team_instructions(record, teams).hash(&mut hasher);
     record.model.hash(&mut hasher);
     record.provider.hash(&mut hasher);
-    record.auth_tag.hash(&mut hasher);
     record.respond_to.as_str().hash(&mut hasher);
     // The allowlist is hashed as the env receives it: spawn sets
     // BUZZ_ACP_RESPOND_TO_ALLOWLIST only in allowlist mode, and normalized

@@ -3,13 +3,13 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type CanStartHuddleInput = {
   channel: Channel;
-  currentPubkey?: string;
+  currentAgentId?: string;
   selfMember: ChannelMember | null;
 };
 
 export function canStartHuddleInChannel({
   channel,
-  currentPubkey,
+  currentAgentId,
   selfMember,
 }: CanStartHuddleInput): boolean {
   if (channel.archivedAt !== null) {
@@ -21,13 +21,13 @@ export function canStartHuddleInChannel({
       return true;
     }
 
-    if (!currentPubkey) {
+    if (!currentAgentId) {
       return false;
     }
 
-    const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
+    const normalizedCurrentAgentId = normalizePubkey(currentAgentId);
     return channel.participantPubkeys.some(
-      (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+      (pubkey) => normalizePubkey(pubkey) === normalizedCurrentAgentId,
     );
   }
 

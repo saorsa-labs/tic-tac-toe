@@ -143,7 +143,7 @@ test("computeThreadReplyUnreadCounts_selfAuthored_skipsOwnReplies", () => {
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
     getReadAt: uniformReadAt(350),
-    currentPubkey: "me",
+    currentAgentId: "me",
   });
   assert.equal(counts.has("a"), false); // a1 is self-authored, so 0 unread
   assert.equal(counts.get("b"), 2); // b1, b2 are by "other"

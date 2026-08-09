@@ -53,11 +53,11 @@ export function formatDmParticipantDisplayName(
 
 export function buildDirectMessageIntro({
   channel,
-  currentPubkey,
+  currentAgentId,
   profiles,
 }: {
   channel: Channel | null;
-  currentPubkey?: string;
+  currentAgentId?: string;
   profiles?: UserProfileLookup;
 }): DirectMessageIntro | null {
   if (channel?.channelType !== "dm") {
@@ -68,13 +68,13 @@ export function buildDirectMessageIntro({
     fallbackName: channel.participants[index] ?? null,
     pubkey,
   }));
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
-  const otherParticipants = normalizedCurrentPubkey
+  const otherParticipants = normalizedCurrentAgentId
     ? participants.filter(
         (participant) =>
-          normalizePubkey(participant.pubkey) !== normalizedCurrentPubkey,
+          normalizePubkey(participant.pubkey) !== normalizedCurrentAgentId,
       )
     : participants;
   const displayParticipants =
@@ -90,7 +90,7 @@ export function buildDirectMessageIntro({
     return {
       avatarUrl: profile?.avatarUrl ?? null,
       displayName: resolveUserLabel({
-        currentPubkey,
+        currentAgentId,
         fallbackName: participant.fallbackName,
         profiles,
         pubkey: participant.pubkey,

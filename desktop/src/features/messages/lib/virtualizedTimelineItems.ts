@@ -114,3 +114,29 @@ export function didPrependVirtualizedTimeline(
     previousKeys.every((key, index) => key === keys[index + prependedCount])
   );
 }
+
+/**
+ * Distance (CSS px) below which the virtualized scroll position counts as
+ * "at the latest message" for the jump-to-latest affordance and the
+ * semantic-bottom settle decision. Shared by the scroll handler, the
+ * spacer/viewport resize recompute, and the settle-completion recompute so
+ * there is a single at-bottom convention.
+ */
+export const VIRTUALIZED_AT_BOTTOM_THRESHOLD_PX = 32;
+
+/** True when the scroll position is within the at-bottom threshold of the end
+ *  of all virtualized content (including the trailing bottom-spacer). Pure so
+ *  every driver of the affordance — Virtua onScroll, the spacer/composer
+ *  resize recompute, and settle completion — reaches the same verdict for the
+ *  same geometry. A resize that grows the bottom-spacer without a scroll event
+ *  no longer leaves the affordance stale (the bug: DOM distance < threshold
+ *  while the last onScroll reported `false`). */
+export function isVirtualizedAtBottom(
+  scrollSize: number,
+  viewportSize: number,
+  offset: number,
+): boolean {
+  return (
+    scrollSize - viewportSize - offset <= VIRTUALIZED_AT_BOTTOM_THRESHOLD_PX
+  );
+}

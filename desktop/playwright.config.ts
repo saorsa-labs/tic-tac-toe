@@ -18,7 +18,15 @@ export default defineConfig({
   projects: [
     {
       name: "smoke",
+      // M3+ smoke is a MOCK-IPC boundary regression gate. It installs the
+      // in-page mock bridge (no x0xd daemon is booted) and asserts the booted
+      // production paths never invoke a relay/Nostr command. The imported Buzz
+      // specs below remain for feature-by-feature migration, but most still
+      // exercise the retired relay mock dialect and are NOT release gates;
+      // mock smoke must not be cited as live-daemon native acceptance.
+      grep: /native workspace|built-in Company/,
       testMatch: [
+        "**/native-smoke.spec.ts",
         "**/smoke.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
         "**/identity-key-help.spec.ts",
@@ -44,7 +52,6 @@ export default defineConfig({
         "**/core-memory-screenshots.spec.ts",
         "**/activity-scope-label-screenshots.spec.ts",
         "**/welcome-agent-modal-screenshots.spec.ts",
-        "**/local-archive-screenshots.spec.ts",
         "**/agent-readiness-screenshots.spec.ts",
         "**/agent-error-state-screenshots.spec.ts",
         "**/edit-agent.spec.ts",
@@ -109,7 +116,6 @@ export default defineConfig({
         "**/onboarding-backup.spec.ts",
         "**/onboarding-agent-defaults.spec.ts",
         "**/nostr-bind.spec.ts",
-        "**/profile-nsec-reveal.spec.ts",
         "**/signout-confirmation.spec.ts",
         "**/agent-provider-dropdowns.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",
@@ -140,6 +146,7 @@ export default defineConfig({
         "**/agents-everywhere.live.spec.ts",
         "**/relay-restart.live.spec.ts",
         "**/parity-ancestor-island.spec.ts",
+        "**/relay-bridge-acceptance.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

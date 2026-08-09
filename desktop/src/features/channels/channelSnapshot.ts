@@ -1,23 +1,22 @@
 /**
- * Per-relay cache of the last successfully fetched channel list.
+ * Per-group cache of the last successfully fetched channel list.
  *
  * Each community mounts a fresh React-Query client, so switching communities
  * (or switching back to one just visited) starts cold and blocks the sidebar
- * on a multi-round-trip `get_channels()`. This module persists the last-known
- * channel list per relay so the sidebar can paint instantly from the snapshot
- * while the live fetch revalidates in the background.
+ * on a `x0x_list_groups` round-trip. This module persists the last-known
+ * channel list per native group so the sidebar can paint instantly from the
+ * snapshot while the live fetch revalidates in the background.
  *
- * Keyed per relay URL (not community id) so equivalent URL formatting maps to
- * one slot and one relay's list never bleeds into another.
+ * Keyed per native `groupId`. A group id is a stable x0x identifier (not a
+ * URL), so no normalization is applied — the caller's id is the storage slot.
  */
 
 import type { Channel } from "@/shared/api/types";
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 
 const STORAGE_KEY_PREFIX = "buzz-channels.v1";
 
-export function channelSnapshotKey(relayUrl: string): string {
-  return `${STORAGE_KEY_PREFIX}:${normalizeRelayUrl(relayUrl)}`;
+export function channelSnapshotKey(groupId: string): string {
+  return `${STORAGE_KEY_PREFIX}:${groupId}`;
 }
 
 function parseChannelSnapshot(json: unknown): Channel[] | null {
@@ -28,11 +27,11 @@ function parseChannelSnapshot(json: unknown): Channel[] | null {
 }
 
 /**
- * Reads the cached channel list for a relay, or null when absent or malformed.
+ * Reads the cached channel list for a group, or null when absent or malformed.
  */
-export function readChannelSnapshot(relayUrl: string): Channel[] | null {
+export function readChannelSnapshot(groupId: string): Channel[] | null {
   try {
-    const raw = window.localStorage.getItem(channelSnapshotKey(relayUrl));
+    const raw = window.localStorage.getItem(channelSnapshotKey(groupId));
     if (!raw) return null;
     return parseChannelSnapshot(JSON.parse(raw));
   } catch {
@@ -41,16 +40,16 @@ export function readChannelSnapshot(relayUrl: string): Channel[] | null {
 }
 
 /**
- * Persists the channel list for a relay. Skips the write when unchanged so the
+ * Persists the channel list for a group. Skips the write when unchanged so the
  * 60s background refetch does not re-serialize an identical list. Non-fatal on
  * storage failure (e.g. quota exceeded).
  */
 export function writeChannelSnapshot(
-  relayUrl: string,
+  groupId: string,
   channels: Channel[],
 ): void {
   try {
-    const key = channelSnapshotKey(relayUrl);
+    const key = channelSnapshotKey(groupId);
     const serialized = JSON.stringify({ version: 1, channels });
     if (window.localStorage.getItem(key) === serialized) return;
     window.localStorage.setItem(key, serialized);
@@ -60,11 +59,11 @@ export function writeChannelSnapshot(
 }
 
 /**
- * Removes the channel snapshot for a relay. Called when a community is removed.
+ * Removes the channel snapshot for a group. Called when a community is removed.
  */
-export function removeChannelSnapshotForRelay(relayUrl: string): void {
+export function removeChannelSnapshotForGroup(groupId: string): void {
   try {
-    window.localStorage.removeItem(channelSnapshotKey(relayUrl));
+    window.localStorage.removeItem(channelSnapshotKey(groupId));
   } catch {
     // Storage access failures are non-fatal.
   }

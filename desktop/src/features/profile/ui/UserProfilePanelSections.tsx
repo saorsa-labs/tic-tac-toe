@@ -44,7 +44,6 @@ import {
   STATUS_DOT_MASK_CURVE,
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { Spinner } from "@/shared/ui/spinner";
@@ -111,7 +110,6 @@ export type ProfileSummaryViewProps = {
   relayAgent: RelayAgent | undefined;
   tab: ProfilePanelTab;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
-  userStatus: { text: string; emoji: string } | null | undefined;
 };
 
 type RuntimeTabStatus = "running" | "stopped" | "error";
@@ -224,7 +222,6 @@ export function ProfileSummaryView({
   relayAgent,
   tab,
   unfollowMutation,
-  userStatus,
 }: ProfileSummaryViewProps) {
   const activeTurns = useAgentWorking(isBot ? pubkey : null).channels;
 
@@ -342,7 +339,6 @@ export function ProfileSummaryView({
         isBot={isBot}
         presenceStatus={presenceStatus}
         profile={profile}
-        userStatus={userStatus}
       />
 
       {canInstantiateAgent ? (
@@ -470,13 +466,11 @@ function ProfileHero({
   isBot,
   presenceStatus,
   profile,
-  userStatus,
 }: {
   displayName: string;
   isBot: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ProfileSummaryViewProps["profile"];
-  userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
   const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
 
@@ -538,18 +532,6 @@ function ProfileHero({
 
         {profile?.nip05Handle ? (
           <p className="text-sm text-muted-foreground">{profile.nip05Handle}</p>
-        ) : null}
-
-        {userStatus ? (
-          <p className="text-sm text-muted-foreground">
-            {userStatus.emoji ? (
-              <StatusEmoji
-                className="mr-1 inline h-3.5 w-3.5"
-                value={userStatus.emoji}
-              />
-            ) : null}
-            {userStatus.text}
-          </p>
         ) : null}
       </div>
     </div>

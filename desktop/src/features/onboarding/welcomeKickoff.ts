@@ -11,7 +11,7 @@ import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
 import { resolveAgentReadiness } from "@/features/onboarding/ui/agentReadiness";
 import {
   ensureWelcomeTeam,
-  pickWelcomeTeamStarterAgentForRelay,
+  pickWelcomeTeamStarterAgent,
   WELCOME_TEAM_STARTERS,
   type WelcomeTeamStarterDefinition,
 } from "@/features/onboarding/welcomeGuide";
@@ -24,8 +24,11 @@ import {
 } from "@/shared/api/tauriManagedAgents";
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
-import { getPresence, listManagedAgents } from "@/shared/api/tauri";
-import { getProfile } from "@/shared/api/tauriProfiles";
+import { listManagedAgents } from "@/shared/api/tauri";
+import {
+  getNativePresence,
+  getNativeSelfProfile,
+} from "@/features/profile/nativeSocialApi";
 import type { Channel, ManagedAgent, RelayEvent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
@@ -132,7 +135,7 @@ export function resolveWelcomeAgentSet(
   agents: readonly ManagedAgent[],
 ): WelcomeAgentSet | null {
   const ordered = WELCOME_TEAM_STARTERS.map((starter) =>
-    pickWelcomeTeamStarterAgentForRelay([...agents], starter),
+    pickWelcomeTeamStarterAgent([...agents], starter),
   );
   if (ordered.some((agent) => !agent)) return null;
   return {
@@ -141,22 +144,11 @@ export function resolveWelcomeAgentSet(
   };
 }
 
-function normalizeRelayUrl(relayUrl?: string | null) {
-  return relayUrl?.trim().replace(/\/+$/, "") ?? null;
-}
-
 function resolveWelcomeAgentSetForRelay(
   agents: readonly ManagedAgent[],
-  relayUrl?: string | null,
+  _groupId?: string | null,
 ) {
-  const normalizedRelayUrl = normalizeRelayUrl(relayUrl);
-  return resolveWelcomeAgentSet(
-    agents.filter(
-      (agent) =>
-        !normalizedRelayUrl ||
-        normalizeRelayUrl(agent.relayUrl) === normalizedRelayUrl,
-    ),
-  );
+  return resolveWelcomeAgentSet(agents);
 }
 
 export function buildWelcomeKickoffOpener(
@@ -204,12 +196,12 @@ export async function waitForWelcomeTeammatesOnline(
   teammates: readonly ManagedAgent[],
   options: {
     isCancelled: () => boolean;
-    loadPresence?: typeof getPresence;
+    loadPresence?: typeof getNativePresence;
     pollMs?: number;
     waitMs?: number;
   },
 ) {
-  const loadPresence = options.loadPresence ?? getPresence;
+  const loadPresence = options.loadPresence ?? getNativePresence;
   const pollMs = options.pollMs ?? TEAMMATE_READY_POLL_MS;
   const deadline = Date.now() + (options.waitMs ?? TEAMMATE_READY_WAIT_MS);
   const pubkeys = teammates.map((agent) => agent.pubkey);
@@ -540,9 +532,9 @@ export function useWelcomeKickoff(
     () =>
       resolveWelcomeAgentSetForRelay(
         managedAgentsQuery.data ?? [],
-        activeCommunity?.relayUrl,
+        activeCommunity?.groupId,
       ),
-    [activeCommunity?.relayUrl, managedAgentsQuery.data],
+    [activeCommunity?.groupId, managedAgentsQuery.data],
   );
   const readiness = React.useMemo(
     () => resolveAgentReadiness(runtimesQuery.data ?? [], globalConfig),
@@ -567,7 +559,7 @@ export function useWelcomeKickoff(
       try {
         const welcomeTeam = await ensureWelcomeTeam(
           channelId,
-          activeCommunity?.relayUrl,
+          activeCommunity?.groupId,
         );
         await queryClient.invalidateQueries({
           queryKey: managedAgentsQueryKey,
@@ -659,7 +651,7 @@ export function useWelcomeKickoff(
 
         // Best-effort: a missing profile should degrade to an ungreeted,
         // untagged opener, never block the kickoff.
-        const owner = await getProfile()
+        const owner = await getNativeSelfProfile()
           .then((profile) => ({
             pubkey: profile.pubkey,
             displayName: profile.displayName,
@@ -681,7 +673,7 @@ export function useWelcomeKickoff(
       }
     })();
   }, [
-    activeCommunity?.relayUrl,
+    activeCommunity?.groupId,
     channelId,
     configLoading,
     isActiveWelcome,
@@ -758,7 +750,7 @@ export function useWelcomeKickoff(
             const latestAgentSet = await resolveLatestWelcomeAgentSet({
               fallback: agentSet,
               queryClient,
-              relayUrl: activeCommunity?.relayUrl,
+              relayUrl: activeCommunity?.groupId,
             });
             const latestResolution = classifyWelcomeKickoffResolution(
               latestEvents,
@@ -813,7 +805,7 @@ export function useWelcomeKickoff(
       const latestAgentSet = await resolveLatestWelcomeAgentSet({
         fallback: agentSet,
         queryClient,
-        relayUrl: activeCommunity?.relayUrl,
+        relayUrl: activeCommunity?.groupId,
       });
       const latestResolution = classifyWelcomeKickoffResolution(
         latestEvents,
@@ -839,7 +831,7 @@ export function useWelcomeKickoff(
         closerInFlight.delete(channelId);
       });
   }, [
-    activeCommunity?.relayUrl,
+    activeCommunity?.groupId,
     agentSet,
     kickoffEvents,
     kickoffResolved,

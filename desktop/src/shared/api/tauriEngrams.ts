@@ -1,5 +1,3 @@
-import { invokeTauri } from "@/shared/api/tauri";
-
 // ── NIP-AE agent memory (engram) reads ──────────────────────────────────────
 
 /**
@@ -32,23 +30,18 @@ export type AgentMemoryListing = {
 };
 
 /**
- * Owner-gated single-payload engram listing. The Rust side enforces that
- * the requested agent appears in this desktop's `managed_agents` store
- * before deriving the conversation key or attempting decrypt — non-owners
- * receive an `Err` (and the UI hides the section anyway).
+ * Private NIP-AE engrams have no confidentiality-preserving native x0xd API.
+ * The generic `/stores` surface is readable by every joined replica, so mapping
+ * owner-encrypted memory into a KV store would weaken the old access boundary.
  *
- * Throws on:
- * - non-hex agent pubkey
- * - viewer is not the agent's owner
- * - relay query failure
- *
- * Returns `{ core: null, memories: [] }` when the agent has no engrams —
- * that's the legitimate empty state, distinct from a thrown error.
+ * Fail explicitly until x0xd exposes an encrypted owner-scoped store. This is
+ * intentionally NOT an empty listing (which the UI would interpret as “no
+ * memories”) and never falls back to the relay-backed Rust command.
  */
 export async function getAgentMemory(
-  agentPubkey: string,
+  _agentPubkey: string,
 ): Promise<AgentMemoryListing> {
-  return invokeTauri<AgentMemoryListing>("get_agent_memory", {
-    agentPubkey,
-  });
+  throw new Error(
+    "Agent memory is unavailable: x0xd does not yet expose an encrypted owner-scoped engram store, and relay fallback is disabled.",
+  );
 }

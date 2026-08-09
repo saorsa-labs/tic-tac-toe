@@ -47,7 +47,7 @@ export function formatModelDiscoveryErrorStatus(
 ): PersonaModelDiscoveryStatus | null {
   const message = errorMessage(error);
 
-  if (provider.trim() === "relay-mesh") {
+  if (provider.trim() === "shared-compute") {
     if (message.includes("waiting for the current member roster")) {
       return {
         message:

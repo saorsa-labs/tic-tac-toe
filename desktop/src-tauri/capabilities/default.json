@@ -17,7 +17,6 @@
     "core:window:allow-close",
     "notification:default",
     "opener:default",
-    "websocket:default",
     "window-state:default",
     "dialog:default",
     "updater:allow-check",

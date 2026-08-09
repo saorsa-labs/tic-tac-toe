@@ -438,9 +438,6 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         pubkey: String::new(),
         name: name.to_string(),
         persona_id: persona_id.map(|s| s.to_string()),
-        private_key_nsec: String::new(),
-        auth_tag: None,
-        relay_url: String::new(),
         avatar_url: None,
         acp_command: String::new(),
         agent_command: String::new(),
@@ -485,7 +482,6 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
-        relay_mesh: None,
     }
 }
 
@@ -493,15 +489,14 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
 fn test_render_dynamic_section_with_agents() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Kit", Some("p1"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents);
     assert!(output.contains("| Kit | Builder | @Kit |"));
     assert!(output.contains("| Name | Persona | How to address |"));
-    assert!(output.contains("## Workspace"));
 }
 
 #[test]
 fn test_render_dynamic_section_empty() {
-    let output = render_dynamic_section(&[], &[], "ws://example.com:3000");
+    let output = render_dynamic_section(&[], &[]);
     assert!(output.contains("No agents deployed yet"));
 }
 
@@ -509,7 +504,7 @@ fn test_render_dynamic_section_empty() {
 fn test_render_dynamic_section_agent_no_persona() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Scout", Some("nonexistent"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents);
     assert!(output.contains("| Scout | — | @Scout |"));
 }
 
@@ -745,7 +740,7 @@ fn test_upsert_marker_in_code_block() {
 fn test_render_pipe_in_agent_name() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Kit|Pro", Some("p1"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents);
 
     assert!(
         output.contains("Kit\\|Pro"),
@@ -774,7 +769,7 @@ fn test_render_pipe_in_agent_name() {
 fn test_render_newline_in_persona_name() {
     let personas = vec![make_persona("p1", "Builder\nExpert")];
     let agents = vec![make_agent("Scout", Some("p1"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents);
 
     assert!(
         output.contains("Builder Expert"),
@@ -905,41 +900,5 @@ fn refresh_skill_overwrites_on_version_bump() {
     assert_eq!(
         content, BUZZ_CLI_SKILL_MD,
         "SKILL.md must be refreshed on version bump"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_dev_path_returns_true() {
-    let path = std::path::Path::new("/Users/someone/.buzz-dev");
-    assert!(
-        path_is_dev_nest(path),
-        ".buzz-dev path must be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_prod_path_returns_false() {
-    let path = std::path::Path::new("/Users/someone/.buzz");
-    assert!(
-        !path_is_dev_nest(path),
-        ".buzz path must not be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_unrelated_path_returns_false() {
-    let path = std::path::Path::new("/Users/someone/.buzz-staging");
-    assert!(
-        !path_is_dev_nest(path),
-        "unrelated path must not be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_root_returns_false() {
-    let path = std::path::Path::new("/");
-    assert!(
-        !path_is_dev_nest(path),
-        "root path must not be identified as dev nest"
     );
 }

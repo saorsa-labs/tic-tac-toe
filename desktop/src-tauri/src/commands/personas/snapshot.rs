@@ -12,7 +12,6 @@ use tauri::{AppHandle, State};
 use super::super::export_util::save_bytes_with_dialog;
 use crate::{
     app_state::AppState,
-    commands::engrams::get_agent_memory,
     managed_agents::{
         agent_snapshot::{
             build_snapshot, encode_snapshot_json, encode_snapshot_png, AgentSnapshotMemoryEntry,
@@ -37,8 +36,8 @@ pub use import::{confirm_agent_snapshot_import, preview_agent_snapshot_import};
 ///   2. Keyless definitions: match `id` against `slug`.
 ///
 /// Returns `(definition_record, is_definition)`.  `is_definition` is `true`
-/// when the result came from the definitions slice — the caller must not call
-/// `get_agent_memory` against it (definitions have no keypair).
+/// when the result came from the definitions slice — definitions carry no
+/// keypair, so memory-source validation treats them differently.
 pub(crate) fn resolve_from_lists<'a>(
     id: &str,
     instances: &'a [ManagedAgentRecord],
@@ -166,7 +165,7 @@ fn parse_format_is_png(s: &str) -> Result<bool, String> {
 
 /// Shared production encoding path.
 ///
-/// Resolves the agent definition, validates inputs, fetches optional memory,
+/// Resolves the agent definition, validates inputs (incl. memory-source pairing),
 /// builds the snapshot manifest, and encodes to the requested byte format.
 /// Does **not** open any file dialog or write to disk — both the save-to-disk
 /// and native-send commands call this and then apply their own I/O side effect.
@@ -186,7 +185,7 @@ pub(crate) async fn materialize_snapshot_bytes(
     state: State<'_, AppState>,
 ) -> Result<SnapshotPayload, String> {
     // ── Load definition record and memory-source instance under lock ─────────
-    let (record, memory_pubkey) = {
+    let record = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -197,24 +196,20 @@ pub(crate) async fn materialize_snapshot_bytes(
         let (def_record, is_definition) = resolve_from_lists(&id, &instances, &definitions)
             .map(|(r, is_def)| (r.clone(), is_def))?;
 
-        let memory_pubkey = if memory_level != MemoryLevel::None {
+        // Memory-source validation still runs (rejects an empty/unknown/
+        // mismatched source before encoding), but the relay engram fetch was
+        // removed — it had no native contract — so no entries are populated.
+        if memory_level != MemoryLevel::None {
             let mpk = memory_source_pubkey.as_deref().unwrap_or("");
             let def_id = if is_definition {
                 def_record.slug.as_deref().unwrap_or("")
             } else {
                 &def_record.pubkey
             };
-            Some(validate_memory_source(
-                mpk,
-                is_definition,
-                def_id,
-                &instances,
-            )?)
-        } else {
-            None
-        };
+            validate_memory_source(mpk, is_definition, def_id, &instances)?;
+        }
 
-        (def_record, memory_pubkey)
+        def_record
     };
 
     let display_name = record
@@ -230,28 +225,10 @@ pub(crate) async fn materialize_snapshot_bytes(
         .as_deref()
         .and_then(crate::managed_agents::agent_snapshot::decode_avatar_data_url);
 
-    // ── Fetch memory ─────────────────────────────────────────────────────────
-    let memory_entries: Vec<AgentSnapshotMemoryEntry> = if let Some(pubkey) = memory_pubkey {
-        let listing = get_agent_memory(pubkey, app.clone(), state).await?;
-        let mut entries = Vec::new();
-        if let Some(core) = listing.core {
-            entries.push(AgentSnapshotMemoryEntry {
-                slug: core.slug,
-                body: core.body,
-            });
-        }
-        if memory_level == MemoryLevel::Everything {
-            for mem in listing.memories {
-                entries.push(AgentSnapshotMemoryEntry {
-                    slug: mem.slug,
-                    body: mem.body,
-                });
-            }
-        }
-        entries
-    } else {
-        Vec::new()
-    };
+    // Memory entries are no longer populated: the relay engram fetch had no
+    // native contract. The requested `memory_level` is still recorded in the
+    // manifest (see `build_snapshot`), but the entry set is always empty.
+    let memory_entries: Vec<AgentSnapshotMemoryEntry> = Vec::new();
 
     // ── Build manifest ───────────────────────────────────────────────────────
     let snapshot = build_snapshot(

@@ -1,37 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import {
-  Bot,
-  Captions,
-  MessageSquareText,
-  PhoneOff,
-  SmilePlus,
-} from "lucide-react";
+import { Bot, Captions, PhoneOff } from "lucide-react";
 import * as React from "react";
 
-import { useCustomEmoji } from "@/features/custom-emoji/hooks";
-import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
-import { useProfileQuery } from "@/features/profile/hooks";
-import { reactionEmojiUrl } from "@/shared/api/customEmoji";
-import { useIdentityQuery } from "@/shared/api/hooks";
-import { relayClient } from "@/shared/api/relayClient";
-import { signRelayEvent } from "@/shared/api/tauri";
-import type { RelayEvent } from "@/shared/api/types";
-import {
-  KIND_HUDDLE_REACTION,
-  KIND_HUDDLE_STARTED,
-} from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
-import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
-import { truncatePubkey } from "@/shared/lib/pubkey";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
 type HuddleState = {
@@ -61,94 +39,12 @@ type HuddleBarProps = {
 const HUDDLE_DRAWER_EXIT_MS = 260;
 const HUDDLE_STATE_FALLBACK_INTERVAL_MS = 30_000;
 const HUDDLE_MODEL_STATUS_INTERVAL_MS = 10_000;
-const HUDDLE_REACTION_NAME_MAX = 48;
 
 function isVisibleHuddleState(state: HuddleState | null) {
   return state?.phase === "active" || state?.phase === "connected";
 }
 
-function firstTagValue(event: RelayEvent, name: string): string | null {
-  return event.tags.find((tag) => tag[0] === name)?.[1] ?? null;
-}
-
-function parseEphemeralChannelId(content: string): string | null {
-  try {
-    const parsed = JSON.parse(content) as { ephemeral_channel_id?: unknown };
-    return typeof parsed.ephemeral_channel_id === "string"
-      ? parsed.ephemeral_channel_id
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function customEmojiShortcode(emoji: string): string | null {
-  const trimmed = emoji.trim();
-  if (!trimmed.startsWith(":") || !trimmed.endsWith(":")) return null;
-  const shortcode = trimmed.slice(1, -1).trim().toLowerCase();
-  return shortcode.length > 0 ? shortcode : null;
-}
-
-function clampReactionName(name: string): string {
-  const trimmed = name.trim();
-  if (trimmed.length <= HUDDLE_REACTION_NAME_MAX) return trimmed;
-  return `${trimmed.slice(0, HUDDLE_REACTION_NAME_MAX - 1).trimEnd()}…`;
-}
-
-function fallbackNameForPubkey(pubkey?: string | null): string {
-  return pubkey ? `Participant ${truncatePubkey(pubkey)}` : "Someone";
-}
-
-function parseHuddleReactionEvent(event: RelayEvent) {
-  if (event.kind !== KIND_HUDDLE_REACTION) return null;
-
-  const emoji = (firstTagValue(event, "reaction") ?? event.content).trim();
-  if (!emoji) return null;
-
-  const shortcode = customEmojiShortcode(emoji);
-  const emojiUrl =
-    shortcode !== null
-      ? event.tags.find(
-          (tag) =>
-            tag[0] === "emoji" &&
-            tag[1]?.toLowerCase() === shortcode &&
-            typeof tag[2] === "string",
-        )?.[2]
-      : null;
-  const senderName = clampReactionName(
-    firstTagValue(event, "sender_name") ?? fallbackNameForPubkey(event.pubkey),
-  );
-
-  return {
-    emoji,
-    emojiUrl: emojiUrl ? rewriteRelayUrl(emojiUrl) : null,
-    senderName,
-  };
-}
-
-function huddleReactionTags(
-  channelId: string,
-  emoji: string,
-  senderName: string,
-  emojiUrl?: string,
-): string[][] {
-  const tags: string[][] = [
-    ["h", channelId],
-    ["reaction", emoji],
-    ["sender_name", clampReactionName(senderName)],
-  ];
-  const shortcode = customEmojiShortcode(emoji);
-  if (shortcode && emojiUrl) {
-    tags.push(["emoji", shortcode, emojiUrl]);
-  }
-  return tags;
-}
-
-export function HuddleBar({
-  className,
-  onOpenThread,
-  onVisibilityChange,
-}: HuddleBarProps) {
+export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
   const {
     localAudioTrack,
     leaveHuddle,
@@ -169,10 +65,6 @@ export function HuddleBar({
     selectedOutputDevice,
     setSelectedOutputDevice,
   } = useHuddle();
-  const customEmoji = useCustomEmoji();
-  const identityQuery = useIdentityQuery();
-  const profileQuery = useProfileQuery();
-  const { burstHuddleReaction } = useEmojiBurst();
 
   const isPttMode = voiceInputMode === "push_to_talk";
   const [state, setState] = React.useState<HuddleState | null>(null);
@@ -187,14 +79,9 @@ export function HuddleBar({
   const [isLeaving, setIsLeaving] = React.useState(false);
   const [showAddAgent, setShowAddAgent] = React.useState(false);
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
-  const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
-  const [reactionError, setReactionError] = React.useState<string | null>(null);
   const [transcriptError, setTranscriptError] = React.useState<string | null>(
     null,
   );
-  const [huddleThreadEventId, setHuddleThreadEventId] = React.useState<
-    string | null
-  >(null);
   const [modelStatus, setModelStatus] = React.useState<{
     stt: string;
     tts: string;
@@ -337,144 +224,6 @@ export function HuddleBar({
   }, [isHuddleVisible, state]);
 
   const barState = isHuddleVisible && state ? state : renderedState;
-  const reactionChannelId = barState?.ephemeral_channel_id ?? null;
-  const parentChannelId = barState?.parent_channel_id ?? null;
-  const currentPubkey = identityQuery.data?.pubkey ?? null;
-  const reactionSenderName = React.useMemo(
-    () =>
-      clampReactionName(
-        profileQuery.data?.displayName?.trim() ||
-          identityQuery.data?.displayName?.trim() ||
-          fallbackNameForPubkey(currentPubkey),
-      ),
-    [
-      currentPubkey,
-      identityQuery.data?.displayName,
-      profileQuery.data?.displayName,
-    ],
-  );
-
-  React.useEffect(() => {
-    if (!reactionChannelId) {
-      setIsReactionPickerOpen(false);
-      setReactionError(null);
-      return;
-    }
-
-    let disposed = false;
-    let cleanup: (() => void) | null = null;
-    const seenEventIds = new Set<string>();
-
-    void relayClient
-      .subscribeLive(
-        {
-          kinds: [KIND_HUDDLE_REACTION],
-          "#h": [reactionChannelId],
-          limit: 1000,
-          since: Math.floor(Date.now() / 1_000),
-        },
-        (event) => {
-          if (disposed) return;
-          if (seenEventIds.has(event.id)) return;
-          seenEventIds.add(event.id);
-          if (event.pubkey === currentPubkey) return;
-
-          const reaction = parseHuddleReactionEvent(event);
-          if (!reaction) return;
-          burstHuddleReaction(reaction);
-        },
-      )
-      .then((dispose) => {
-        if (disposed) {
-          void dispose();
-          return;
-        }
-        cleanup = () => void dispose();
-      })
-      .catch((error) => {
-        console.error("[huddle] Failed to subscribe to reactions:", error);
-      });
-
-    return () => {
-      disposed = true;
-      cleanup?.();
-    };
-  }, [burstHuddleReaction, currentPubkey, reactionChannelId]);
-
-  React.useEffect(() => {
-    if (!parentChannelId || !reactionChannelId) {
-      setHuddleThreadEventId(null);
-      return;
-    }
-
-    let disposed = false;
-    let cleanup: (() => void) | null = null;
-    setHuddleThreadEventId(null);
-
-    void relayClient
-      .subscribeToHuddleEvents(parentChannelId, (event) => {
-        if (disposed || event.kind !== KIND_HUDDLE_STARTED) return;
-        if (parseEphemeralChannelId(event.content) !== reactionChannelId)
-          return;
-        setHuddleThreadEventId(event.id);
-      })
-      .then((dispose) => {
-        if (disposed) {
-          void dispose();
-          return;
-        }
-        cleanup = () => void dispose();
-      })
-      .catch((error) => {
-        console.error("[huddle] Failed to find huddle thread:", error);
-      });
-
-    return () => {
-      disposed = true;
-      cleanup?.();
-    };
-  }, [parentChannelId, reactionChannelId]);
-
-  const handleHuddleReactionSelect = React.useCallback(
-    (emoji: string) => {
-      const trimmedEmoji = emoji.trim();
-      if (!reactionChannelId || !trimmedEmoji) return;
-
-      const emojiUrl = reactionEmojiUrl(trimmedEmoji, customEmoji);
-      const displayEmojiUrl = emojiUrl ? rewriteRelayUrl(emojiUrl) : null;
-
-      setIsReactionPickerOpen(false);
-      setReactionError(null);
-      burstHuddleReaction({
-        emoji: trimmedEmoji,
-        emojiUrl: displayEmojiUrl,
-        senderName: reactionSenderName,
-      });
-
-      void (async () => {
-        await relayClient.preconnect();
-        const event = await signRelayEvent({
-          kind: KIND_HUDDLE_REACTION,
-          content: trimmedEmoji,
-          tags: huddleReactionTags(
-            reactionChannelId,
-            trimmedEmoji,
-            reactionSenderName,
-            emojiUrl,
-          ),
-        });
-        await relayClient.publishEvent(
-          event,
-          "Timed out while sending huddle reaction.",
-          "Failed to send huddle reaction.",
-        );
-      })().catch((error) => {
-        setReactionError("Reaction failed");
-        console.error("[huddle] Failed to send reaction:", error);
-      });
-    },
-    [burstHuddleReaction, customEmoji, reactionChannelId, reactionSenderName],
-  );
 
   if (!barState) {
     return null;
@@ -529,11 +278,6 @@ export function HuddleBar({
     }
   }
 
-  function handleOpenThread() {
-    if (!parentChannelId || !huddleThreadEventId) return;
-    onOpenThread?.(parentChannelId, huddleThreadEventId);
-  }
-
   return (
     <div
       aria-hidden={isDrawerClosing}
@@ -583,12 +327,6 @@ export function HuddleBar({
         {agentAddError && (
           <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
             {agentAddError}
-          </span>
-        )}
-
-        {reactionError && (
-          <span className="max-w-[160px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
-            {reactionError}
           </span>
         )}
 
@@ -659,25 +397,6 @@ export function HuddleBar({
             selectedOutputDevice={selectedOutputDevice}
             onSelectOutputDevice={setSelectedOutputDevice}
           />
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="View huddle thread"
-                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                disabled={!parentChannelId || !huddleThreadEventId}
-                onClick={handleOpenThread}
-                size="icon"
-                type="button"
-                variant="secondary"
-              >
-                <MessageSquareText className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              View thread
-            </TooltipContent>
-          </Tooltip>
         </div>
 
         <div className="flex items-center gap-2">
@@ -713,42 +432,6 @@ export function HuddleBar({
               }
             }}
           />
-
-          <Popover
-            onOpenChange={setIsReactionPickerOpen}
-            open={isReactionPickerOpen}
-          >
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <PopoverTrigger asChild>
-                  <Button
-                    aria-label="Emoji reactions"
-                    aria-pressed={isReactionPickerOpen}
-                    className={cn(
-                      "buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md",
-                      isReactionPickerOpen && "text-foreground",
-                    )}
-                    size="icon"
-                    type="button"
-                    variant="secondary"
-                  >
-                    <SmilePlus className="h-4 w-4" />
-                  </Button>
-                </PopoverTrigger>
-              </TooltipTrigger>
-              <TooltipContent className="buzz-huddle-tooltip" side="top">
-                Emoji reactions
-              </TooltipContent>
-            </Tooltip>
-            <PopoverContent
-              align="center"
-              className="w-auto overflow-hidden rounded-2xl border-0 bg-transparent p-0 shadow-none"
-              side="top"
-              sideOffset={10}
-            >
-              <EmojiPicker autoFocus onSelect={handleHuddleReactionSelect} />
-            </PopoverContent>
-          </Popover>
 
           <Tooltip>
             <TooltipTrigger asChild>

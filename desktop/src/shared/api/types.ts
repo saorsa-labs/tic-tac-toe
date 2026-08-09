@@ -104,23 +104,42 @@ export type AddChannelMembersResult = {
 };
 
 export type Identity = {
-  pubkey: string;
-  displayName: string;
-  /** True when the app booted in "identity lost" recovery mode — the OS
-   *  keyring was empty despite a prior successful migration. The frontend
-   *  should route to nsec re-import instead of normal onboarding.
+  /** x0x AgentId — exact 64-hex (`GET x0xd /agent.agent_id`). This is the
+   *  ONLY user-facing identity: current-user comparisons, mentions,
+   *  profile/session selection, onboarding, member actions, and message
+   *  authorship all key off this canonical AgentId. Never render any bech32
+   *  (npub/nsec) form. Only available in normal mode — fetch `RecoveryState`
+   *  first; when any flag is true the daemon could not resolve an identity and
+   *  `getIdentity` must not be called. */
+  agentId: string;
+  /** Four speakable words derived from `agentId` via the
+   *  `four-word-networking` IdentityEncoder (4096-word dictionary, first 48
+   *  bits). These are the human-readable identity — the canonical display
+   *  form. Source of truth is the Rust command (the crate); the frontend never
+   *  re-derives them. */
+  identityWords: string[];
+};
+
+/**
+ * Boot-time recovery state, fetched via `get_recovery_state` BEFORE
+ * `get_identity`. The command always succeeds (no daemon dependency). When any
+ * flag is true the daemon could not resolve the identity this boot, and the
+ * frontend routes to a recovery screen instead of calling `getIdentity` (which
+ * fail-closes without a resolved AgentId). No identity fields, no sentinels.
+ */
+export type RecoveryState = {
+  /** True when the OS keyring was empty despite a prior successful migration.
    *  Mutually exclusive with `locked`. */
-  lost?: boolean;
-  /** True when the app booted with an ephemeral key because the OS keyring
-   *  holding the real identity is UNREACHABLE (e.g. GNOME Keyring / KWallet
-   *  locked). The real key still exists; no in-app recovery is possible —
-   *  the user must unlock the keyring externally and relaunch.
-   *  Mutually exclusive with `lost`. */
-  locked?: boolean;
+  lost: boolean;
+  /** True when the OS keyring holding the real identity is unreachable
+   *  (e.g. GNOME Keyring / KWallet locked). The real key still exists; no
+   *  in-app recovery is possible — the user must unlock the keyring externally
+   *  and relaunch. Mutually exclusive with `lost`. */
+  locked: boolean;
   /** True when the boot-time Phase 2 reset attempted a wipe but verification
-   *  failed. Identity resolution was skipped; the sentinel is preserved so
-   *  the next relaunch retries the wipe automatically. */
-  resetFailed?: boolean;
+   *  failed. Identity resolution was skipped; the sentinel is preserved so the
+   *  next relaunch retries the wipe automatically. */
+  resetFailed: boolean;
 };
 
 export type Profile = {
@@ -291,13 +310,13 @@ export type SearchMessagesResponse = {
   found: number;
 };
 
-// ── Relay Members ────────────────────────────────────────────────────────────
+// ── Community members ───────────────────────────────────────────────────────
 
-export type RelayMemberRole = "owner" | "admin" | "member";
+export type CommunityMemberRole = "owner" | "admin" | "member";
 
-export type RelayMember = {
+export type CommunityMember = {
   pubkey: string;
-  role: RelayMemberRole;
+  role: CommunityMemberRole;
   addedBy: string | null;
   createdAt: string;
 };
@@ -324,10 +343,10 @@ export type ManagedAgentRuntimeLifecycle =
 
 export type ManagedAgentRuntimeStatus = {
   pubkey: string;
-  /** Exact submitted descriptor, present only on startup reconcile results. */
-  requestedRelayUrl?: string;
-  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
-  relayUrl: string;
+  /** Exact submitted group ID, present only on startup reconcile results. */
+  requestedGroupId?: string;
+  /** Canonical daemon-owned native group identity. */
+  groupId: string;
   localSetup: boolean;
   lifecycle: ManagedAgentRuntimeLifecycle;
   pid: number | null;
@@ -344,7 +363,6 @@ export type ManagedAgent = {
   name: string;
   personaId: string | null;
   teamId?: string | null;
-  relayUrl: string;
   acpCommand: string;
   /** Resolved/effective harness command (persona-wins, override-honored). */
   agentCommand: string;
@@ -430,16 +448,11 @@ export type BackendProviderProbeResult = {
   config_schema?: Record<string, unknown>;
 };
 
-export type RelayMeshConfig = {
-  modelRef: string;
-};
-
 export type CreateManagedAgentInput = {
   name: string;
   personaId?: string;
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;
-  relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
   /**
@@ -470,12 +483,10 @@ export type CreateManagedAgentInput = {
    * normalized server-side (must be 64 hex chars each).
    */
   respondToAllowlist?: string[];
-  relayMesh?: RelayMeshConfig;
 };
 
 export type CreateManagedAgentResponse = {
   agent: ManagedAgent;
-  privateKeyNsec: string;
   profileSyncError: string | null;
   spawnError: string | null;
 };
@@ -624,83 +635,18 @@ export type AgentModelInfo = {
   description: string | null;
 };
 
-// ── Config bridge types ──────────────────────────────────────────────────────
-
-export type ConfigOrigin =
-  | "buzzExplicit"
-  | "acpNativeRead"
-  | "acpConfigOption"
-  | "envVar"
-  | "configFile"
-  | "personaDefault"
-  | "globalDefault"
-  | "runtimeOverride"
-  | "harnessConstraint";
-
-export type ConfigWriteMechanism =
-  | { type: "respawnWithEnvVar"; envKey: string }
-  | { type: "acpSetConfigOption"; configId: string }
-  | { type: "acpSetSessionModel" }
-  | { type: "gooseNativeConfigWrite"; configKey: string }
-  | { type: "readOnly" };
-
-export type NormalizedField = {
-  value: string | null;
-  origin: ConfigOrigin;
-  writeVia: ConfigWriteMechanism;
-  overriddenValue: string | null;
-  overriddenOrigin: ConfigOrigin | null;
-  /** True if this field must be set for the harness to function. */
-  isRequired: boolean;
-};
-
-export type ConfigFieldType =
-  | { type: "string" }
-  | { type: "number" }
-  | { type: "boolean" }
-  | { type: "enum"; options: string[] };
-
-export type ConfigField = {
-  key: string;
-  label: string;
-  value: string | null;
-  origin: ConfigOrigin;
-  schemaType: ConfigFieldType;
-  writeVia: ConfigWriteMechanism;
-};
-
-export type ConfigTierStatus = "available" | "pending" | "notApplicable";
-
-export type ConfigSourceReport = {
-  acpNative: ConfigTierStatus;
-  acpConfigOptions: ConfigTierStatus;
-  envVars: ConfigTierStatus;
-  configFile: ConfigTierStatus;
-  configFilePath: string | null;
-  mcpConfigFilePath: string | null;
-};
-
-export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
-
-export type NormalizedConfig = {
-  model: NormalizedField | null;
-  provider: NormalizedField | null;
-  mode: NormalizedField | null;
-  thinkingEffort: NormalizedField | null;
-  maxOutputTokens: NormalizedField | null;
-  contextLimit: NormalizedField | null;
-  systemPrompt: NormalizedField | null;
-};
-
-export type RuntimeConfigSurface = {
-  runtimeId: string | null;
-  runtimeLabel: string | null;
-  isPreSpawn: boolean;
-  normalized: NormalizedConfig;
-  advanced: ConfigField[];
-  extensions: ExtensionEntry[];
-  sources: ConfigSourceReport;
-};
+export type {
+  ConfigField,
+  ConfigFieldType,
+  ConfigOrigin,
+  ConfigSourceReport,
+  ConfigTierStatus,
+  ConfigWriteMechanism,
+  ExtensionEntry,
+  NormalizedConfig,
+  NormalizedField,
+  RuntimeConfigSurface,
+} from "./configBridgeTypes";
 
 export type UpdateManagedAgentInput = {
   pubkey: string;
@@ -712,7 +658,6 @@ export type UpdateManagedAgentInput = {
   envVars?: Record<string, string>;
   parallelism?: number;
   turnTimeoutSeconds?: number;
-  relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
   /**
@@ -911,49 +856,6 @@ export type {
   UserNotesCursor,
   UserNotesResponse,
 } from "./socialTypes";
-
-export type ThreadSummary = {
-  replyCount: number;
-  descendantCount: number;
-  lastReplyAt: number | null;
-  participants: string[];
-};
-
-export type ForumPost = {
-  eventId: string;
-  pubkey: string;
-  content: string;
-  kind: number;
-  createdAt: number;
-  channelId: string;
-  tags: string[][];
-  threadSummary: ThreadSummary | null;
-};
-
-export type ForumPostsResponse = {
-  posts: ForumPost[];
-  nextCursor: number | null;
-};
-
-export type ThreadReply = {
-  eventId: string;
-  pubkey: string;
-  content: string;
-  kind: number;
-  createdAt: number;
-  channelId: string;
-  tags: string[][];
-  parentEventId: string | null;
-  rootEventId: string | null;
-  depth: number;
-};
-
-export type ForumThreadResponse = {
-  post: ForumPost;
-  replies: ThreadReply[];
-  totalReplies: number;
-  nextCursor: string | null;
-};
 
 /**
  * Forward keyset cursor for the server-side thread read (`get_thread_replies`).

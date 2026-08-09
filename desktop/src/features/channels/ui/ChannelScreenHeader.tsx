@@ -1,4 +1,3 @@
-import { LogIn } from "lucide-react";
 import type * as React from "react";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
@@ -13,7 +12,6 @@ import {
   ProfileAvatarWithStatus,
   scaleProfileAvatarStatusGeometry,
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
-import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -32,13 +30,11 @@ type ChannelScreenHeaderProps = {
   activeDmHeaderParticipants: ActiveDmHeaderParticipant[];
   activeDmPresenceStatus: PresenceStatus | null;
   chromeWrapperRef?: React.Ref<HTMLDivElement>;
-  currentPubkey?: string;
+  currentAgentId?: string;
   isAddBotOpen?: boolean;
-  isJoining?: boolean;
   showHeaderContent?: boolean;
   transparentChrome?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
-  onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
   onToggleMembers: () => void;
 };
@@ -52,48 +48,27 @@ export function ChannelScreenHeader({
   activeDmHeaderParticipants,
   activeDmPresenceStatus,
   chromeWrapperRef,
-  currentPubkey,
+  currentAgentId,
   isAddBotOpen,
-  isJoining = false,
   onAddBotOpenChange,
   showHeaderContent = true,
   transparentChrome = false,
-  onJoinChannel,
   onManageChannel,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
     activeDmHeaderParticipants.length > 1;
-  const showJoinButton =
-    activeChannel !== null &&
-    !activeChannel.isMember &&
-    activeChannel.visibility === "open" &&
-    !activeChannel.archivedAt &&
-    onJoinChannel;
-
   const actions = activeChannel ? (
-    showJoinButton ? (
-      <Button
-        disabled={isJoining}
-        onClick={() => void onJoinChannel()}
-        size="sm"
-        variant="default"
-      >
-        <LogIn className="mr-1.5 h-4 w-4" />
-        {isJoining ? "Joining…" : "Join"}
-      </Button>
-    ) : (
-      <ChannelMembersBar
-        channel={activeChannel}
-        currentPubkey={currentPubkey}
-        isAddBotOpen={isAddBotOpen}
-        onAddBotOpenChange={onAddBotOpenChange}
-        onManageChannel={onManageChannel}
-        onToggleMembers={onToggleMembers}
-        variant={actionsVariant}
-      />
-    )
+    <ChannelMembersBar
+      channel={activeChannel}
+      currentAgentId={currentAgentId}
+      isAddBotOpen={isAddBotOpen}
+      onAddBotOpenChange={onAddBotOpenChange}
+      onManageChannel={onManageChannel}
+      onToggleMembers={onToggleMembers}
+      variant={actionsVariant}
+    />
   ) : null;
 
   if (!showHeaderContent) {

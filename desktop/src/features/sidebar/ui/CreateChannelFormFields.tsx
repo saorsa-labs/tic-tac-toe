@@ -8,7 +8,6 @@ import {
   CHANNEL_FORM_FIELD_CONTROL_CLASS,
   CHANNEL_FORM_FIELD_SHELL_CLASS,
 } from "@/features/channels/ui/channelFormStyles";
-import { ChannelPermissionsSettings } from "@/features/channels/ui/ChannelPermissionsSettings";
 import { ChannelTypeSettings } from "@/features/channels/ui/ChannelTypeSettings";
 import type { CreateChannelFormState } from "@/features/sidebar/lib/useCreateChannelForm";
 
@@ -28,7 +27,7 @@ export function CreateChannelFormFields({
 }: {
   form: CreateChannelFormState;
 }) {
-  const { channelKind, kindLabel, isCreating } = form;
+  const { kindLabel, isCreating } = form;
 
   return (
     <div className="space-y-5">
@@ -57,9 +56,7 @@ export function CreateChannelFormFields({
             disabled={isCreating}
             id="create-channel-name"
             onChange={(event) => form.setName(event.target.value)}
-            placeholder={
-              channelKind === "forum" ? "design-discussions" : "release-notes"
-            }
+            placeholder="release-notes"
             ref={form.nameInputRef}
             spellCheck={false}
             value={form.name}
@@ -129,13 +126,6 @@ export function CreateChannelFormFields({
           </select>
         </div>
       ) : null}
-
-      <ChannelPermissionsSettings
-        disabled={isCreating}
-        onVisibilityChange={form.setVisibility}
-        testIdPrefix="create-channel"
-        visibility={form.visibility}
-      />
 
       {form.errorMessage ? (
         <p className="text-sm text-destructive">{form.errorMessage}</p>

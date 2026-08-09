@@ -1,7 +1,6 @@
 import {
   ChevronRight,
   Copy,
-  FileText,
   Hash,
   MessageSquare,
   type LucideIcon,
@@ -14,9 +13,6 @@ import { cn } from "@/shared/lib/cn";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 function getChannelIcon(channelType: Channel["channelType"]): LucideIcon {
-  if (channelType === "forum") {
-    return FileText;
-  }
   if (channelType === "dm") {
     return MessageSquare;
   }

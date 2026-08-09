@@ -1,12 +1,18 @@
 import * as React from "react";
 
-import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
-import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
+import {
+  resolveChildAgentId,
+  subscribeToAgentObserverFrames,
+} from "@/shared/api/observerRelay";
+import {
+  coldLoadObserverHistory,
+  type NativeObserverFrame,
+} from "@/shared/api/observerNative";
+import type { ManagedAgent } from "@/shared/api/types";
 import type { ControlResultFrame } from "@/shared/api/types";
 import { putAgentSessionConfig } from "@/shared/api/tauri";
 import { putManagedAgentRuntimeLifecycle } from "@/shared/api/tauriManagedAgents";
 import { getIdentity } from "@/shared/api/tauriIdentity";
-import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import {
   parseAgentManagementRequest,
   type AgentManagementRequest,
@@ -27,7 +33,12 @@ import {
 } from "./ui/agentSessionTranscript";
 
 const MAX_OBSERVER_EVENTS = 3000;
-const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
+// Native cold-load replay paging. Each `fetchOlderAgentArchived` call pages
+// the child's dm:<child> history in ARCHIVE_PAGE_SIZE-row pages, stopping
+// once it ingests at least one channel frame or after ARCHIVE_PAGE_HOPS pages
+// (bounds a channel with sparse frames).
+const ARCHIVE_PAGE_SIZE = 100;
+const ARCHIVE_PAGE_HOPS = 20;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -60,11 +71,11 @@ const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 
 // Per-agent, per-channel latest-live-session-id.
 // Key: `${normalizePubkey(agentPubkey)}:${channelId}`.
-// Set when a live relay observer event with a sessionId arrives.
+// Set when a live native observer event with a sessionId arrives.
 // Cleared in resetAgentObserverStore.
 //
 // "Latest-live" means: the sessionId that most recently appeared via the
-// live relay path (handleRelayObserverEvent). It is NOT derived from
+// live native x0x DM path (ingestObserverEvent). It is NOT derived from
 // connectionState or an ever-live Set — an ever-live Set would incorrectly
 // mark session A as "current" after session B has started (Thufir Pass 3).
 //
@@ -115,7 +126,18 @@ const agentManagementListeners = new Set<
 // recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
-const pendingUnknownAgentFrames: RelayEvent[] = [];
+// Per-child cold-load paging state for the native observer replay. The cursor
+// is the rowid keyset for the next older `dm:<child>` page; absent = first
+// page. Exhausted children have no older history to load on scroll.
+const archiveChildCursor = new Map<string, number | undefined>();
+const archiveChildExhausted = new Set<string>();
+// Native x0x child AgentId → managed-agent pubkey. Populated asynchronously
+// when agents register (each child is provisioned in Rust). Read live by the
+// native subscriber to attribute inbound frames to a known agent.
+const childAgentIdToPubkey = new Map<string, string>();
+// Mutable set passed BY REFERENCE to the native adapter so dynamically-added
+// children are admitted without reopening the /ws/direct stream.
+const knownChildAgentIds = new Set<string>();
 
 // Callback invoked when session_config_captured is received, so React Query
 // can invalidate the config-surface query for the affected agent. Wired up
@@ -137,6 +159,28 @@ function recomputeKnownAgentPubkeys() {
   }
 }
 
+// Asynchronously rebuild childAgentIdToPubkey + knownChildAgentIds from the
+// current knownAgentPubkeys union. Best-effort: a child that isn't provisioned
+// yet simply isn't admitted until its id resolves on a later registration.
+async function refreshChildAgentIdMap() {
+  const pubkeys = [...knownAgentPubkeys];
+  const nextChildToPubkey = new Map<string, string>();
+  await Promise.all(
+    pubkeys.map(async (pubkey) => {
+      const childId = await resolveChildAgentId(pubkey);
+      if (childId) nextChildToPubkey.set(childId, pubkey);
+    }),
+  );
+  childAgentIdToPubkey.clear();
+  for (const [childId, pubkey] of nextChildToPubkey) {
+    childAgentIdToPubkey.set(childId, pubkey);
+  }
+  knownChildAgentIds.clear();
+  for (const childId of nextChildToPubkey.keys()) {
+    knownChildAgentIds.add(childId);
+  }
+}
+
 function registerKnownAgents(
   subscriptionId: string,
   pubkeys: readonly string[],
@@ -146,19 +190,13 @@ function registerKnownAgents(
     new Set(pubkeys.map((pubkey) => normalizePubkey(pubkey))),
   );
   recomputeKnownAgentPubkeys();
-  if (knownAgentPubkeys.size > 0 && pendingUnknownAgentFrames.length > 0) {
-    const pending = pendingUnknownAgentFrames.splice(0);
-    for (const event of pending) {
-      eventProcessingQueue = eventProcessingQueue.then(() =>
-        handleRelayObserverEvent(event, generation),
-      );
-    }
-  }
+  void refreshChildAgentIdMap();
 }
 
 function unregisterKnownAgents(subscriptionId: string) {
   if (knownAgentsBySubscription.delete(subscriptionId)) {
     recomputeKnownAgentPubkeys();
+    void refreshChildAgentIdMap();
   }
 }
 
@@ -187,10 +225,6 @@ function setConnectionState(
   errorMessage = nextErrorMessage;
   snapshotByAgent.clear();
   notifyListeners();
-}
-
-function observerTag(event: RelayEvent, tagName: string) {
-  return event.tags.find((tag) => tag[0] === tagName)?.[1] ?? null;
 }
 
 function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
@@ -338,87 +372,45 @@ export function isObserverEventAfter(
   return candidate.seq > stored.seq;
 }
 
-async function handleRelayObserverEvent(
-  event: RelayEvent,
+// Ingest one decoded ObserverEvent into the store: latest-live-session
+// tracking, append, and side-effect dispatch by kind. Shared by the live
+// native x0x DM path and the cold-load replay path.
+async function ingestObserverEvent(
+  agentPubkey: string,
+  parsed: ObserverEvent,
   activeGeneration: number,
 ) {
-  const agentPubkey = observerTag(event, "agent");
-  const frame = observerTag(event, "frame");
-  if (!agentPubkey || frame !== "telemetry") {
+  if (activeGeneration !== generation) {
     return;
   }
-
-  // Ownership data arrives asynchronously during startup. Buffer raw signed
-  // frames until the first trusted-agent set is registered, then re-run this
-  // same gate. Once initialized, unknown agents are rejected immediately.
-  if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
-    if (knownAgentsBySubscription.size === 0 || knownAgentPubkeys.size === 0) {
-      pendingUnknownAgentFrames.push(event);
-      if (pendingUnknownAgentFrames.length > MAX_PENDING_UNKNOWN_AGENT_FRAMES) {
-        pendingUnknownAgentFrames.shift();
-      }
+  if (parsed.sessionId && parsed.channelId) {
+    const key = liveSessionKey(agentPubkey, parsed.channelId);
+    const stored = latestLiveSessionByAgentChannel.get(key);
+    if (!stored || isObserverEventAfter(parsed, stored)) {
+      latestLiveSessionByAgentChannel.set(key, {
+        sessionId: parsed.sessionId,
+        timestamp: parsed.timestamp,
+        seq: parsed.seq,
+      });
     }
-    return;
   }
-
-  // Defense-in-depth: verify the event sender matches the claimed agent pubkey.
-  // The relay gates on is_agent_owner, but a compromised relay could misroute.
-  if (normalizePubkey(event.pubkey) !== normalizePubkey(agentPubkey)) {
-    return;
+  appendAgentEvent(agentPubkey, parsed);
+  const managementRequest = parseAgentManagementRequest(parsed.payload);
+  if (managementRequest) {
+    for (const listener of agentManagementListeners) {
+      listener(agentPubkey, managementRequest);
+    }
   }
-
-  try {
-    const parsed = (await decryptObserverEvent(event)) as ObserverEvent;
-    if (activeGeneration !== generation) {
-      return;
-    }
-    // Track the latest-live-session-id per (agent, channel) on the live path.
-    // Only set when the parsed event carries both a sessionId and channelId,
-    // so we never attribute a session to the wrong channel.
-    if (parsed.sessionId && parsed.channelId) {
-      const key = liveSessionKey(agentPubkey, parsed.channelId);
-      const stored = latestLiveSessionByAgentChannel.get(key);
-      // Advance only when this event sorts strictly AFTER the stored one via
-      // isObserverEventAfter (timestamp then seq — same ordering as
-      // compareObserverEvents). This prevents late-arriving live frames from
-      // older sessions from regressing the latest-live id, while also
-      // correctly advancing on a same-timestamp frame with a higher seq.
-      if (!stored || isObserverEventAfter(parsed, stored)) {
-        latestLiveSessionByAgentChannel.set(key, {
-          sessionId: parsed.sessionId,
-          timestamp: parsed.timestamp,
-          seq: parsed.seq,
-        });
-      }
-    }
-    appendAgentEvent(agentPubkey, parsed);
-    const managementRequest = parseAgentManagementRequest(parsed.payload);
-    if (managementRequest) {
-      for (const listener of agentManagementListeners) {
-        listener(agentPubkey, managementRequest);
-      }
-    }
-    if (parsed.kind === "session_config_captured") {
-      void putAgentSessionConfig(agentPubkey, parsed.payload);
-      onSessionConfigCaptured?.(agentPubkey);
-    } else if (parsed.kind === "control_result") {
-      dispatchControlResult(agentPubkey, parsed.payload);
-    } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
-      void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
-        (error) => {
-          console.debug("Late/untracked lifecycle frame dropped:", error);
-        },
-      );
-    }
-  } catch (error) {
-    if (activeGeneration !== generation) {
-      return;
-    }
-    setConnectionState(
-      "error",
-      error instanceof Error
-        ? `Observer event decrypt failed: ${error.message}`
-        : "Observer event decrypt failed.",
+  if (parsed.kind === "session_config_captured") {
+    void putAgentSessionConfig(agentPubkey, parsed.payload);
+    onSessionConfigCaptured?.(agentPubkey);
+  } else if (parsed.kind === "control_result") {
+    dispatchControlResult(agentPubkey, parsed.payload);
+  } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
+    void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
+      (error) => {
+        console.debug("Late/untracked lifecycle frame dropped:", error);
+      },
     );
   }
 }
@@ -436,10 +428,20 @@ export function ensureRelayObserverSubscription() {
   startPromise = (async () => {
     const identity = await getIdentity();
     const unsubscribe = await subscribeToAgentObserverFrames(
-      identity.pubkey,
-      (event) => {
+      identity.agentId,
+      knownChildAgentIds,
+      (frame) => {
+        if (!frame) {
+          return; // non-observer / chat / unknown-owner DM — drop
+        }
+        const pubkey = childAgentIdToPubkey.get(frame.agent);
+        if (!pubkey) {
+          return; // unknown child AgentId — drop (defense-in-depth)
+        }
         eventProcessingQueue = eventProcessingQueue
-          .then(() => handleRelayObserverEvent(event, activeGeneration))
+          .then(() =>
+            ingestObserverEvent(pubkey, frame.observerEvent, activeGeneration),
+          )
           .catch((error) => {
             if (activeGeneration !== generation) {
               return;
@@ -637,70 +639,81 @@ export function useManagedAgentObserverBridge(
 }
 
 /**
- * Ingest a batch of raw archived observer events from the local archive into
- * the store. Applies the same security guards as the live relay path:
- *
- * - Event must have an `agent` tag pointing to a known/trusted pubkey
- *   (registered via `useManagedAgentObserverBridge`).
- * - The event sender (`pubkey`) must match the `agent` tag value.
- * - Event must decrypt successfully via `decryptObserverEvent`.
- *
- * Routes through `appendAgentEvent` so dedup on `(seq, timestamp)` and
- * sort are reused — archived events that are already present (live-delivered)
- * are silently skipped. Failed decryptions are silently dropped (same as
- * live path error handling).
- *
- * Note: events for agents not currently registered in `knownAgentPubkeys`
- * (e.g. an agent that is stopped but has archived history) are dropped.
- * The caller should ensure the agent is registered before calling.
- *
- * `_decryptFn` is only used by tests to inject a mock decryption function.
- * Production callers must always omit it.
+ * Ingest a batch of decoded observer frames (from the native x0x cold-load)
+ * into the store. Frames with a channelId are routed to the channel-scoped
+ * archive window (no cap); frames without one fall through to the live store.
+ * Dedup on `(seq, timestamp)` is reused via `appendArchivedChannelEvent` /
+ * `appendAgentEvent`, so frames already present (live-delivered) are skipped.
  */
-export async function ingestArchivedObserverEvents(
-  rawEvents: RelayEvent[],
-  _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
-): Promise<void> {
+export function ingestArchivedObserverFrames(
+  agentPubkey: string,
+  frames: readonly NativeObserverFrame[],
+): void {
   let archiveChanged = false;
-  for (const event of rawEvents) {
-    const agentPubkey = observerTag(event, "agent");
-    const frame = observerTag(event, "frame");
-    if (!agentPubkey || frame !== "telemetry") {
-      continue;
-    }
-    if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
-      continue;
-    }
-    if (normalizePubkey(event.pubkey) !== normalizePubkey(agentPubkey)) {
-      continue;
-    }
-    try {
-      const parsed = (await _decryptFn(event)) as ObserverEvent;
-      // Route archived events to the channel-scoped archive window (no cap)
-      // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
-      // Events without a channelId fall through to the live store so they
-      // remain visible in the agent's general transcript.
-      if (parsed.channelId) {
-        const added = appendArchivedChannelEvent(
-          agentPubkey,
-          parsed.channelId,
-          parsed,
-        );
-        if (added) archiveChanged = true;
-      } else {
-        // Live path already calls notifyListeners() inside appendAgentEvent.
-        appendAgentEvent(agentPubkey, parsed);
-      }
-    } catch {
-      // Silently drop decrypt failures — same as live path error handling.
+  for (const frame of frames) {
+    const event = frame.observerEvent;
+    if (event.channelId) {
+      const added = appendArchivedChannelEvent(
+        agentPubkey,
+        event.channelId,
+        event,
+      );
+      if (added) archiveChanged = true;
+    } else {
+      appendAgentEvent(agentPubkey, event);
     }
   }
-  // Batch-notify once for the whole page of archive events. appendAgentEvent
-  // already notifies individually for live/no-channelId events above, so we
-  // only need one extra notify here for the archive path.
   if (archiveChanged) {
     notifyListeners();
   }
+}
+
+/**
+ * Cold-load one page of older observer history for a managed agent's child and
+ * ingest the frames scoped to `channelId`. Pages the child's `dm:<child>` x0x
+ * history via `coldLoadObserverHistory` (the single decode boundary), advancing
+ * a per-child rowid cursor, until at least one channel frame is ingested or the
+ * history is exhausted. Returns `true` when more history remains for the child.
+ *
+ * Cold replay is an x0x direct-message history read filtered to observer
+ * envelopes — no relay, no decrypt, no local archive. `channelId == null`
+ * admits every frame.
+ */
+export async function fetchOlderAgentArchived(
+  agentPubkey: string,
+  channelId: string | null,
+): Promise<boolean> {
+  const childAgentId = await resolveChildAgentId(agentPubkey);
+  if (!childAgentId) return false;
+  if (archiveChildExhausted.has(childAgentId)) return false;
+  const ownerAgentId = (await getIdentity()).agentId;
+  let cursor = archiveChildCursor.get(childAgentId);
+  let ingestedChannelFrame = false;
+  for (let hop = 0; hop < ARCHIVE_PAGE_HOPS; hop++) {
+    const { frames, nextBeforeId, hasMore } = await coldLoadObserverHistory({
+      childAgentId,
+      ownerAgentId,
+      knownChildAgentIds,
+      limit: ARCHIVE_PAGE_SIZE,
+      beforeId: cursor,
+    });
+    const channelFrames =
+      channelId == null
+        ? frames
+        : frames.filter((f) => f.observerEvent.channelId === channelId);
+    if (channelFrames.length > 0) {
+      ingestArchivedObserverFrames(agentPubkey, channelFrames);
+      ingestedChannelFrame = true;
+    }
+    cursor = nextBeforeId;
+    archiveChildCursor.set(childAgentId, cursor);
+    if (!hasMore || cursor === undefined) {
+      archiveChildExhausted.add(childAgentId);
+      break;
+    }
+    if (ingestedChannelFrame) break;
+  }
+  return ingestedChannelFrame && !archiveChildExhausted.has(childAgentId);
 }
 
 /**
@@ -747,7 +760,8 @@ export function resetAgentObserverStore() {
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
-  pendingUnknownAgentFrames.length = 0;
+  archiveChildCursor.clear();
+  archiveChildExhausted.clear();
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;

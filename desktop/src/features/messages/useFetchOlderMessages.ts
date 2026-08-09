@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
+import { useResolvedHistoryScope } from "@/features/messages/lib/useResolvedHistoryScope";
 import {
   channelWindowHasMore,
   channelWindowHistoryExhausted,
@@ -14,6 +15,9 @@ import type { Channel } from "@/shared/api/types";
 export function useFetchOlderMessages(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
+  // Subscribe to the resolved scope so the scope-aware window keys recompute
+  // (and the observers re-read) when the group's stable historyScope arrives.
+  useResolvedHistoryScope(channelId);
   const [isFetchingOlder, setIsFetchingOlder] = useState(false);
   const isFetchingOlderRef = useRef(false);
 
@@ -64,10 +68,11 @@ export function useFetchOlderMessages(channel: Channel | null) {
     isFetchingOlderRef.current = true;
     setIsFetchingOlder(true);
     try {
+      if (!channel) return;
       await pageOlderMessagesUntilRowFloor(
         queryClient,
-        channelId,
-        () => channelId === channel?.id,
+        channel,
+        () => channelId === channel.id,
       );
     } catch (error) {
       console.error("Failed to fetch older messages", channelId, error);
@@ -75,7 +80,7 @@ export function useFetchOlderMessages(channel: Channel | null) {
       isFetchingOlderRef.current = false;
       setIsFetchingOlder(false);
     }
-  }, [channel?.id, channelId, queryClient]);
+  }, [channel, channelId, queryClient]);
 
   return { fetchOlder, isFetchingOlder, hasOlderMessages, historyExhausted };
 }

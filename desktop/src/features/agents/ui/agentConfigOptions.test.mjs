@@ -178,12 +178,12 @@ test("resetConfigForHarnessChange preserves compatible provider selection", () =
   });
 });
 
-test("resetConfigForHarnessChange does not carry relay mesh to Goose", () => {
+test("resetConfigForHarnessChange does not carry shared compute to Goose", () => {
   const config = {
     env_vars: {},
     model: "auto",
     preferred_runtime: "buzz-agent",
-    provider: "relay-mesh",
+    provider: "shared-compute",
   };
 
   assert.equal(resetConfigForHarnessChange(config, "goose").provider, null);

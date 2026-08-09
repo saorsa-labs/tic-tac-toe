@@ -1,18 +1,19 @@
 //! Shared git subprocess plumbing for the project commands.
 //!
-//! Runs the system `git` with an ephemeral, env-only auth configuration:
-//! the identity nsec is handed to `git-credential-nostr` via environment
-//! variables so nothing key-related ever touches disk or global git config.
+//! Runs the system `git` in a hardened, env-scrubbed subprocess: no inherited
+//! credential helpers, no repo-local hooks, and no global/system git config,
+//! with a wall-clock cap per invocation. Authentication is left to git's
+//! native transports (ssh-agent, OS keychain) — the packaged app carries no
+//! signing identity to inject.
 
-use crate::{app_state::AppState, managed_agents::resolve_command};
-use nostr::{Keys, ToBech32};
+use crate::managed_agents::resolve_command;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use url::Url;
 
 /// Wall-clock cap for a single git invocation. Remote operations talk to
-/// relay-supplied clone URLs, so a slow or adversarial remote must not pin
+/// external clone URLs, so a slow or adversarial remote must not pin
 /// `spawn_blocking` threads indefinitely.
 const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -46,8 +47,6 @@ fn git_needs_credentials(args: &[&str]) -> bool {
 
 pub(crate) struct GitAuthConfig {
     git_path: std::path::PathBuf,
-    credential_helper: Option<std::path::PathBuf>,
-    nsec: String,
     allow_file_transport: bool,
 }
 
@@ -76,7 +75,7 @@ pub(crate) fn run_git(
     } else {
         LOCAL_GIT_TIMEOUT
     };
-    configure_git_auth(&mut command, auth, needs_credentials);
+    configure_git_auth(&mut command, auth);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -128,7 +127,7 @@ pub(crate) fn run_git(
     Ok(stdout)
 }
 
-fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credentials: bool) {
+fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig) {
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     for key in [
@@ -146,11 +145,12 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
     // disables the global config file on every platform.
     command.env("GIT_CONFIG_GLOBAL", "/dev/null");
 
-    // Base entries: disable any inherited credential helper, and neutralize
-    // repo-local hooks — every process git spawns inherits our environment
-    // (including NOSTR_PRIVATE_KEY below), and a cloned repository's hooks
-    // must never run with the identity key in reach.
-    let mut entries: Vec<(&str, String)> = vec![
+    // Harden the environment: disable any inherited credential helper and
+    // neutralize repo-local hooks — every process git spawns inherits this
+    // environment, and a cloned repository's hooks must never run here. No
+    // identity key is injected: authentication is left to git's native
+    // transports (ssh-agent, OS keychain).
+    let entries: Vec<(&str, String)> = vec![
         ("credential.helper", String::new()),
         ("core.hooksPath", "/dev/null".to_string()),
         ("core.fsmonitor", "false".to_string()),
@@ -168,14 +168,6 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
             .to_string(),
         ),
     ];
-    if needs_credentials {
-        let Some(cred_helper) = &auth.credential_helper else {
-            return apply_git_config(command, &entries);
-        };
-        command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
-        entries.push(("credential.helper", cred_helper.display().to_string()));
-        entries.push(("credential.useHttpPath", "true".to_string()));
-    }
     apply_git_config(command, &entries);
 }
 
@@ -187,34 +179,22 @@ fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
     }
 }
 
-pub(crate) fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, String> {
-    let keys = state.signing_keys()?;
-    build_git_auth_config_for_keys(&keys)
-}
-
-pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfig, String> {
+pub(crate) fn build_git_auth_config() -> Result<GitAuthConfig, String> {
     let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
-    let credential_helper = resolve_command("git-credential-nostr");
-    let nsec = keys
-        .secret_key()
-        .to_bech32()
-        .map_err(|error| format!("encode identity key: {error}"))?;
     Ok(GitAuthConfig {
         git_path,
-        credential_helper,
-        nsec,
         allow_file_transport: false,
     })
 }
 
 #[cfg(test)]
 pub(crate) fn build_test_git_auth_config() -> Result<GitAuthConfig, String> {
-    let mut auth = build_git_auth_config_for_keys(&Keys::generate())?;
+    let mut auth = build_git_auth_config()?;
     auth.allow_file_transport = true;
     Ok(auth)
 }
 
-/// Normalizes and validates a relay-supplied branch name. Strips a
+/// Normalizes and validates a remote-supplied branch name. Strips a
 /// `refs/heads/` prefix, then rejects anything outside a conservative
 /// character allowlist, path traversal (`..`), leading/trailing `/`, and
 /// flag-shaped values (leading `-`) so a branch can never reach git as an
@@ -240,75 +220,31 @@ pub(crate) fn clean_branch(value: Option<String>) -> Option<String> {
 
 pub(crate) fn clean_target_ref(value: Option<String>) -> Option<String> {
     let value = value?.trim().to_string();
-    for prefix in ["refs/tags/", "refs/nostr/"] {
-        if let Some(name) = value.strip_prefix(prefix) {
-            let clean_name = clean_branch(Some(name.to_string()))?;
-            return (clean_name == name).then_some(format!("{prefix}{clean_name}"));
-        }
-    }
-    None
+    let name = value.strip_prefix("refs/tags/")?;
+    let clean_name = clean_branch(Some(name.to_string()))?;
+    (clean_name == name).then_some(format!("refs/tags/{clean_name}"))
 }
 
 pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
     let parsed = Url::parse(clone_url).map_err(|error| format!("invalid clone URL: {error}"))?;
+    // Scheme allowlist is the security boundary: only http/https remotes are
+    // permitted, so `file://`, `ssh://`, and `ext::` transports can never
+    // reach git here. Authentication is delegated to git's native transports
+    // (ssh-agent, OS keychain) — no identity is injected by the app.
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("clone URL must be http or https".into());
     }
-    // Buzz git remotes are served at `…/git/<owner-pubkey>/<repo-id>` — a
-    // literal `git` segment followed by the 64-hex owner pubkey and a
-    // non-empty repository id (the relay may live under a path prefix).
-    let segments = parsed
+    if parsed.host_str().map(str::is_empty).unwrap_or(true) {
+        return Err("clone URL must name a repository host".into());
+    }
+    // Require at least one non-empty path segment so the URL names a concrete
+    // repository rather than a bare host.
+    let names_repository = parsed
         .path_segments()
-        .map(|segments| segments.filter(|s| !s.is_empty()).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let is_buzz_repo_path = segments
-        .iter()
-        .rposition(|segment| *segment == "git")
-        .filter(|index| segments.len() == index + 3)
-        .map(|index| {
-            segments[index + 1].len() == 64
-                && segments[index + 1].chars().all(|c| c.is_ascii_hexdigit())
-                && !segments[index + 2].is_empty()
-        })
+        .map(|mut segments| segments.any(|segment| !segment.is_empty()))
         .unwrap_or(false);
-    if !is_buzz_repo_path {
-        return Err("clone URL must point at a Buzz git repository".into());
-    }
-    Ok(())
-}
-
-pub(crate) fn clone_url_owner(clone_url: &str) -> Option<String> {
-    let parsed = Url::parse(clone_url).ok()?;
-    let segments = parsed
-        .path_segments()?
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    let index = segments.iter().rposition(|segment| *segment == "git")?;
-    (segments.len() == index + 3).then(|| segments[index + 1].to_ascii_lowercase())
-}
-
-pub(crate) fn validate_workspace_clone_url(
-    clone_url: &str,
-    state: &AppState,
-) -> Result<(), String> {
-    let relay_base = crate::relay::relay_api_base_url_with_override(state);
-    validate_clone_url_against_relay(clone_url, &relay_base)
-}
-
-fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result<(), String> {
-    validate_clone_url(clone_url)?;
-    let clone = Url::parse(clone_url).map_err(|error| format!("invalid clone URL: {error}"))?;
-    let relay = Url::parse(relay_base)
-        .map_err(|error| format!("configured relay URL is invalid: {error}"))?;
-    if clone.scheme() != relay.scheme()
-        || clone.host_str() != relay.host_str()
-        || clone.port_or_known_default() != relay.port_or_known_default()
-    {
-        return Err("clone URL must use the active workspace relay".into());
-    }
-    let relay_path = relay.path().trim_end_matches('/');
-    if !relay_path.is_empty() && !clone.path().starts_with(&format!("{relay_path}/")) {
-        return Err("clone URL must use the active workspace relay path".into());
+    if !names_repository {
+        return Err("clone URL must point at a repository path".into());
     }
     Ok(())
 }
@@ -317,7 +253,6 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 mod tests {
     use super::{
         clean_branch, clean_target_ref, git_needs_credentials, git_subcommand, validate_clone_url,
-        validate_clone_url_against_relay,
     };
 
     #[test]
@@ -375,49 +310,27 @@ mod tests {
     }
 
     #[test]
-    fn clean_target_ref_accepts_only_tags_and_pull_request_refs() {
+    fn clean_target_ref_accepts_only_tag_refs() {
         assert_eq!(
             clean_target_ref(Some("refs/tags/v1.0.0".into())),
             Some("refs/tags/v1.0.0".to_string())
         );
-        assert_eq!(
-            clean_target_ref(Some("refs/nostr/abc123".into())),
-            Some("refs/nostr/abc123".to_string())
-        );
         assert_eq!(clean_target_ref(Some("refs/heads/main".into())), None);
         assert_eq!(clean_target_ref(Some("refs/tags/../main".into())), None);
+        assert_eq!(clean_target_ref(Some("refs/tags/-flag".into())), None);
     }
 
     #[test]
-    fn validate_clone_url_requires_buzz_repo_shape() {
-        let owner = "a".repeat(64);
-        assert!(validate_clone_url(&format!("https://relay.example/git/{owner}/repo")).is_ok());
-        assert!(
-            validate_clone_url(&format!("https://relay.example/prefix/git/{owner}/repo")).is_ok()
-        );
-        assert!(validate_clone_url("https://relay.example/git/short/repo").is_err());
-        assert!(validate_clone_url("https://evil.example/has/git/inpath").is_err());
-        assert!(validate_clone_url(&format!("ssh://relay.example/git/{owner}/repo")).is_err());
-        assert!(validate_clone_url(&format!(
-            "https://relay.example/git/{owner}/repo/unexpected"
-        ))
-        .is_err());
-    }
-
-    #[test]
-    fn workspace_clone_url_requires_exact_relay_origin_and_prefix() {
-        let owner = "a".repeat(64);
-        let valid = format!("https://relay.example/prefix/git/{owner}/repo");
-        assert!(validate_clone_url_against_relay(&valid, "https://relay.example/prefix").is_ok());
-        assert!(validate_clone_url_against_relay(&valid, "http://relay.example/prefix").is_err());
-        assert!(
-            validate_clone_url_against_relay(&valid, "https://relay.example:8443/prefix").is_err()
-        );
-        assert!(validate_clone_url_against_relay(&valid, "https://relay.example/other").is_err());
-        assert!(validate_clone_url_against_relay(
-            &format!("https://evil.example/prefix/git/{owner}/repo"),
-            "https://relay.example/prefix",
-        )
-        .is_err());
+    fn validate_clone_url_accepts_http_https_repo_urls() {
+        assert!(validate_clone_url("https://example.com/owner/repo").is_ok());
+        assert!(validate_clone_url("http://example.com/owner/repo.git").is_ok());
+        assert!(validate_clone_url("https://example.com/prefix/owner/repo").is_ok());
+        // Bare host with no repository path is rejected.
+        assert!(validate_clone_url("https://example.com").is_err());
+        assert!(validate_clone_url("https://example.com/").is_err());
+        // Non-http(s) schemes never reach git.
+        assert!(validate_clone_url("ssh://example.com/owner/repo").is_err());
+        assert!(validate_clone_url("file:///srv/owner/repo").is_err());
+        assert!(validate_clone_url("not a url").is_err());
     }
 }

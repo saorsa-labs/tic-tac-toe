@@ -131,18 +131,6 @@ type MockBridgeOptions = {
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
   relaySelf?: string | null;
-  /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
-  builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
-  /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
-  builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
-  /** Communities owned by the mocked Builderlab account. */
-  builderlabCommunities?: Array<{
-    id?: string;
-    name?: string;
-    slug?: string;
-    normalized_host?: string;
-    archived_at?: string | null;
-  }>;
   acpRuntimesCatalog?: Record<string, unknown>[];
   /** Catalog returned after a successful mocked install. */
   acpRuntimesCatalogAfterInstall?: Record<string, unknown>[];
@@ -261,29 +249,10 @@ type MockBridgeOptions = {
   autoUpdateSupported?: boolean;
   /** Reject browser opener calls to exercise manual pairing fallback UI. */
   openerError?: string;
-  /** Delay binding signatures so specs can exercise request supersession. */
-  nostrBindSignDelayMs?: number;
   /** Reject successive mock WebSocket connect attempts, then resume. */
   websocketConnectErrors?: string[];
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
-  /**
-   * Value returned by the `observer_archive_default_enabled` mock command.
-   * `true` = internal-policy build (toggle locked ON); `false`/omitted = OSS
-   * build (toggle functional). Drives LocalArchiveSettingsCard policy state.
-   */
-  observerArchiveDefaultEnabled?: boolean;
-  /**
-   * Delay (ms) applied to `observer_archive_default_enabled` so specs can
-   * assert the pending-reconciliation state (toggle disabled, no
-   * `list_save_subscriptions` call yet) before the policy resolves.
-   */
-  observerArchiveDefaultEnabledDelayMs?: number;
-  /**
-   * When set, `observer_archive_default_enabled` throws with this message —
-   * drives the fail-closed path when the policy check itself fails.
-   */
-  observerArchiveDefaultEnabledError?: string;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**
@@ -318,11 +287,8 @@ type MockBridgeOptions = {
   /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
    *  fail-closed race: DMs are withheld while classification is unresolved. */
   relaySelfDelayMs?: number;
-  /**
-   * Sequenced results for `confirm_team_snapshot_import`. String = throw
-   * with that message; null = succeed. Call N uses results[N]; last entry
-   * repeats when exhausted. Follows the `nsecErrors` precedent.
-   */
+  /** Sequenced results for `confirm_team_snapshot_import`. String = throw;
+   * null = succeed. Call N uses results[N]; last entry repeats. */
   teamSnapshotConfirmErrors?: (string | null)[];
   /**
    * When true, `preview_team_snapshot_import` returns a preview with
@@ -349,16 +315,6 @@ type MockBridgeOptions = {
     filename?: string;
   }[];
   /**
-   * Seed rows returned by the mocked `list_save_subscriptions` command.
-   * Drives the LocalArchiveSettingsCard subscription list view in screenshot
-   * and UI tests without a real SQLite backend.
-   */
-  saveSubscriptions?: Array<{
-    scope_type: string;
-    scope_value: string;
-    kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
-  }>;
-  /**
    * Event IDs that `get_event` should report as definitively not found.
    * Causes `useDraftRootStatus` to map the draft to `deleted` state so specs
    * can exercise the "Thread deleted" label / disabled-send path.
@@ -374,18 +330,6 @@ type MockBridgeOptions = {
    * invoked. Drives the keyring-locked screen in tests.
    */
   identityLocked?: boolean;
-  /**
-   * Pending community deep links seeded into the mocked Rust-side queue.
-   * The frontend drains these on boot into onboarding or an editable Add
-   * Community prefill.
-   */
-  pendingCommunityDeepLinks?: Array<{
-    id: string;
-    kind: "connect" | "join" | "add-community";
-    relayUrl: string;
-    code?: string | null;
-    name?: string | null;
-  }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.
@@ -407,16 +351,6 @@ type MockBridgeOptions = {
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;
-  /**
-   * When set, `get_nsec` throws with this message. For a single always-fail
-   * scenario. Use `nsecErrors` for sequenced fail/succeed.
-   */
-  nsecError?: string;
-  /**
-   * Sequenced results for `get_nsec`. String = throw with that message;
-   * null = succeed. Call N uses results[N]; last entry repeats when exhausted.
-   */
-  nsecErrors?: (string | null)[];
   /**
    * The `restarted_count` returned by `set_global_agent_config`. Defaults to
    * 0 (no agents restarted). Set to a positive integer to drive the
@@ -479,7 +413,11 @@ type BridgeOptions = {
 const WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX =
   "buzz-welcome-channel-ensured.v2:";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
+const MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
+  "buzz-machine-onboarding-complete.v2:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
+const DEFAULT_MOCK_AGENT_ID =
+  "dd6530452610619d468e4e82be82107e86384365c58efa6e3018d7762c7368da";
 // The relay HTTP/WS URLs follow BUZZ_E2E_RELAY_URL (same env var seed.ts reads),
 // so a suite pointed at an isolated relay (e.g. the read-model harness on :3030)
 // uses it without per-spec wiring. Falls back to the shared dev relay when unset.
@@ -601,13 +539,24 @@ async function seedOnboardingCompletionForKnownIdentities(
   relayWsUrl?: string,
 ) {
   const pubkeys = [
+    DEFAULT_MOCK_AGENT_ID,
     DEFAULT_MOCK_PUBKEY,
     ...Object.values(TEST_IDENTITIES).map(({ pubkey }) => pubkey),
   ];
   await page.addInitScript(
-    ({ onboardingPrefix, pubkeys: pubkeysToSeed, relayUrl, welcomePrefix }) => {
+    ({
+      machineOnboardingPrefix,
+      onboardingPrefix,
+      pubkeys: pubkeysToSeed,
+      relayUrl,
+      welcomePrefix,
+    }) => {
       const welcomeScope = encodeURIComponent(relayUrl);
       for (const pubkey of pubkeysToSeed) {
+        window.localStorage.setItem(
+          `${machineOnboardingPrefix}${pubkey}`,
+          "true",
+        );
         window.localStorage.setItem(`${onboardingPrefix}${pubkey}`, "true");
         window.localStorage.setItem(
           `${welcomePrefix}${welcomeScope}:${pubkey}`,
@@ -616,6 +565,7 @@ async function seedOnboardingCompletionForKnownIdentities(
       }
     },
     {
+      machineOnboardingPrefix: MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX,
       onboardingPrefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX,
       pubkeys,
       relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL,
@@ -700,9 +650,9 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   // The community is stamped with the active identity's pubkey so the strict
   // migrateMachineOnboardingCompletion voucher recognises it. The init script
   // reads the seedActiveIdentity override key (if present) and falls back to
-  // the bridge identity's pubkey or DEFAULT_MOCK_PUBKEY for mock mode.
+  // the bridge identity's pubkey or native mock AgentId.
   if (!options.skipCommunitySeed) {
-    const activePubkey = identity?.pubkey ?? DEFAULT_MOCK_PUBKEY;
+    const activePubkey = identity?.pubkey ?? DEFAULT_MOCK_AGENT_ID;
     await seedDefaultCommunity(page, activePubkey, options.relayWsUrl);
   }
   if (!options.skipOnboardingSeed) {

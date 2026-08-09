@@ -8,24 +8,23 @@ import {
   Trash2,
   UserPlus,
 } from "lucide-react";
-import { nip19 } from "nostr-tools";
 import * as React from "react";
 import { toast } from "sonner";
 
-import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
-  useAddRelayMemberMutation,
-  useChangeRelayMemberRoleMutation,
-  useMyRelayMembershipQuery,
-  useRelayMembersQuery,
-  useRemoveRelayMemberMutation,
+  useAddNativeMemberMutation,
+  useChangeNativeMemberRoleMutation,
+  useMyNativeMembershipQuery,
+  useNativeMembersQuery,
+  useRemoveNativeMemberMutation,
+  type NativeGroupMemberView,
 } from "@/features/community-members/hooks";
-import type { RelayMember, RelayMemberRole } from "@/shared/api/types";
-import type { UserProfileSummary } from "@/shared/api/types";
+import type { CommunityMemberRole } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,45 +36,20 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
-import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
-import { InviteLinkSection } from "./InviteLinkSection";
 
-type AssignableRelayRole = Exclude<RelayMemberRole, "owner">;
+type AssignableCommunityRole = Exclude<CommunityMemberRole, "owner">;
 
-function normalizeRelayPubkeyInput(value: string): string {
-  const trimmed = value.trim();
-  const withoutPrefix = trimmed.toLowerCase().startsWith("nostr:")
-    ? trimmed.slice("nostr:".length)
-    : trimmed;
-  const normalized = normalizePubkey(withoutPrefix);
-  if (normalized.startsWith("npub1")) {
-    try {
-      const decoded = nip19.decode(normalized);
-      if (decoded.type === "npub" && typeof decoded.data === "string") {
-        return decoded.data.toLowerCase();
-      }
-    } catch {
-      // fall through to return the normalized npub so validation can flag it
-    }
-  }
-  return normalized;
+function normalizeAgentIdInput(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function isValidHexPubkey(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
 }
 
-function formatDisplayName(member: RelayMember, displayName?: string | null) {
-  return displayName?.trim() || truncatePubkey(member.pubkey);
-}
-
-function npubFromPubkey(pubkey: string): string | null {
-  try {
-    return nip19.npubEncode(pubkey);
-  } catch {
-    return null;
-  }
+function formatDisplayName(member: NativeGroupMemberView) {
+  return member.displayName?.trim() || truncatePubkey(member.pubkey);
 }
 
 function formatDate(dateString: string): string {
@@ -86,7 +60,7 @@ function formatDate(dateString: string): string {
   });
 }
 
-function roleBadgeClass(role: RelayMemberRole): string {
+function roleBadgeClass(role: CommunityMemberRole): string {
   switch (role) {
     case "owner":
       return "bg-amber-500/10 text-amber-500";
@@ -97,7 +71,7 @@ function roleBadgeClass(role: RelayMemberRole): string {
   }
 }
 
-function RoleBadge({ role }: { role: RelayMemberRole }) {
+function RoleBadge({ role }: { role: CommunityMemberRole }) {
   return (
     <span
       className={cn(
@@ -110,21 +84,19 @@ function RoleBadge({ role }: { role: RelayMemberRole }) {
   );
 }
 
-function RelayMemberRow({
+function CommunityMemberRow({
   currentRole,
-  currentPubkey,
-  profile,
+  currentAgentId,
   member,
 }: {
-  currentRole: RelayMemberRole;
-  currentPubkey?: string;
-  profile?: UserProfileSummary;
-  member: RelayMember;
+  currentRole: CommunityMemberRole;
+  currentAgentId?: string;
+  member: NativeGroupMemberView;
 }) {
-  const removeMutation = useRemoveRelayMemberMutation();
-  const changeRoleMutation = useChangeRelayMemberRoleMutation();
-  const isSelf = currentPubkey
-    ? normalizePubkey(currentPubkey) === normalizePubkey(member.pubkey)
+  const removeMutation = useRemoveNativeMemberMutation();
+  const changeRoleMutation = useChangeNativeMemberRoleMutation();
+  const isSelf = currentAgentId
+    ? currentAgentId.trim().toLowerCase() === member.pubkey.toLowerCase()
     : false;
   const isBusy = removeMutation.isPending || changeRoleMutation.isPending;
   const canRemove =
@@ -134,8 +106,7 @@ function RelayMemberRow({
   const canPromote = currentRole === "owner" && member.role === "member";
   const canDemote = currentRole === "owner" && member.role === "admin";
 
-  const displayName = formatDisplayName(member, profile?.displayName);
-  const npub = npubFromPubkey(member.pubkey);
+  const displayName = formatDisplayName(member);
 
   async function mutateWithToast(
     action: () => Promise<unknown>,
@@ -159,7 +130,7 @@ function RelayMemberRow({
       data-testid={`relay-member-row-${member.pubkey}`}
     >
       <ProfileAvatar
-        avatarUrl={profile?.avatarUrl ?? null}
+        avatarUrl={null}
         className="h-9 w-9 text-xs"
         label={displayName}
       />
@@ -177,9 +148,6 @@ function RelayMemberRow({
           ) : null}
           <RoleBadge role={member.role} />
         </div>
-        <p className="truncate font-mono text-xs text-muted-foreground">
-          {npub ?? member.pubkey}
-        </p>
         <p className="text-xs text-muted-foreground">
           Added {formatDate(member.createdAt)}
         </p>
@@ -256,7 +224,7 @@ function RelayMemberRow({
 const ROLE_OPTIONS: {
   description: string;
   label: string;
-  value: AssignableRelayRole;
+  value: AssignableCommunityRole;
 }[] = [
   {
     value: "member",
@@ -271,53 +239,43 @@ const ROLE_OPTIONS: {
 ];
 
 export function CommunityMembersSettingsCard({
-  currentPubkey,
+  currentAgentId: _currentAgentId,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
 }) {
-  const myMembershipQuery = useMyRelayMembershipQuery();
+  const identityQuery = useIdentityQuery();
+  const currentAgentId = identityQuery.data?.agentId;
+  const myMembershipQuery = useMyNativeMembershipQuery();
   const currentRole = myMembershipQuery.data?.role ?? null;
   const canManageRelay = currentRole === "owner" || currentRole === "admin";
-  const membersQuery = useRelayMembersQuery(canManageRelay);
+  const membersQuery = useNativeMembersQuery(canManageRelay);
   const members = React.useMemo(
     () => membersQuery.data ?? [],
     [membersQuery.data],
   );
-  const profilesQuery = useUsersBatchQuery(
-    members.map((member) => member.pubkey),
-    {
-      enabled: canManageRelay && members.length > 0,
-    },
-  );
-  const profiles = profilesQuery.data?.profiles;
-  const addMutation = useAddRelayMemberMutation();
+  const addMutation = useAddNativeMemberMutation();
   const [pubkeyInput, setPubkeyInput] = React.useState("");
-  const [role, setRole] = React.useState<AssignableRelayRole>("member");
+  const [role, setRole] = React.useState<AssignableCommunityRole>("member");
   const [search, setSearch] = React.useState("");
 
   const filteredMembers = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return members;
     return members.filter((member) => {
-      const profile = profiles?.[normalizePubkey(member.pubkey)];
-      const displayName = profile?.displayName?.toLowerCase() ?? "";
-      const nip05 = profile?.nip05Handle?.toLowerCase() ?? "";
-      const npub = npubFromPubkey(member.pubkey)?.toLowerCase() ?? "";
+      const displayName = member.displayName?.toLowerCase() ?? "";
       return (
         displayName.includes(q) ||
-        nip05.includes(q) ||
-        npub.includes(q) ||
         member.pubkey.toLowerCase().includes(q) ||
         member.role.includes(q)
       );
     });
-  }, [members, profiles, search]);
+  }, [members, search]);
 
   if (myMembershipQuery.isLoading) {
     return (
       <section className="min-w-0" data-testid="settings-community-members">
         <p className="text-sm text-muted-foreground">
-          Checking relay permissions…
+          Checking group permissions…
         </p>
       </section>
     );
@@ -327,7 +285,7 @@ export function CommunityMembersSettingsCard({
     return null;
   }
 
-  const normalizedInput = normalizeRelayPubkeyInput(pubkeyInput);
+  const normalizedInput = normalizeAgentIdInput(pubkeyInput);
   const canGrantAdmin = currentRole === "owner";
   const canAdd =
     isValidHexPubkey(normalizedInput) &&
@@ -357,14 +315,13 @@ export function CommunityMembersSettingsCard({
         title="Community access"
         description={
           <>
-            Manage who can connect to this relay. Owners can invite admins or
-            members; admins can invite members.
+            Manage the x0x group roster. Owners can invite admins or members;
+            admins can invite members.
           </>
         }
       />
 
       <div className="space-y-6">
-        <CommunityIconSettingsCard />
         <form className="space-y-1.5" onSubmit={handleAddMember}>
           <label className="text-sm font-medium" htmlFor="relay-member-pubkey">
             Invite a person
@@ -374,7 +331,7 @@ export function CommunityMembersSettingsCard({
               className="flex-1"
               id="relay-member-pubkey"
               onChange={(event) => setPubkeyInput(event.target.value)}
-              placeholder="npub1… or 64-char hex pubkey"
+              placeholder="64-character x0x Agent ID"
               value={pubkeyInput}
             />
             <div className="inline-flex shrink-0 self-stretch sm:self-auto">
@@ -410,7 +367,7 @@ export function CommunityMembersSettingsCard({
                     <DropdownMenuSeparator />
                     <DropdownMenuRadioGroup
                       onValueChange={(value) =>
-                        setRole(value as AssignableRelayRole)
+                        setRole(value as AssignableCommunityRole)
                       }
                       value={role}
                     >
@@ -439,12 +396,10 @@ export function CommunityMembersSettingsCard({
           {pubkeyInput.trim().length > 0 &&
           !isValidHexPubkey(normalizedInput) ? (
             <p className="text-xs text-destructive">
-              Enter a valid npub or 64-character hex pubkey.
+              Enter a valid 64-character x0x Agent ID.
             </p>
           ) : null}
         </form>
-
-        <InviteLinkSection />
 
         {membersQuery.error instanceof Error ? (
           <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -472,7 +427,7 @@ export function CommunityMembersSettingsCard({
               className="w-full rounded-lg border border-border/70 bg-background/70 py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="community-members-search"
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search members by name, npub, or role…"
+              placeholder="Search members by name or role…"
               spellCheck={false}
               type="text"
               value={search}
@@ -499,11 +454,10 @@ export function CommunityMembersSettingsCard({
               items={filteredMembers}
               renderItem={(member) => (
                 <div className="pb-2">
-                  <RelayMemberRow
-                    currentPubkey={currentPubkey}
+                  <CommunityMemberRow
+                    currentAgentId={currentAgentId}
                     currentRole={currentRole}
                     member={member}
-                    profile={profiles?.[normalizePubkey(member.pubkey)]}
                   />
                 </div>
               )}

@@ -10,8 +10,6 @@ import type { AgentAiConfigurationMode } from "./agentAiConfigurationPolicy";
 export type PersonaSubmitBlockInput = {
   /** A save/create request is in flight (button shows "Saving..."). */
   isPending: boolean;
-  /** The avatar upload is in flight (button shows "Uploading..."). */
-  isAvatarUploadPending: boolean;
   /** Trimmed display name is empty. */
   displayNameEmpty: boolean;
   /** Create (new definition) vs edit (existing). Some gates are create-only. */
@@ -75,7 +73,7 @@ function describeMissingAiPieces(
 export function personaSubmitBlock(
   input: PersonaSubmitBlockInput,
 ): string | null {
-  if (input.isPending || input.isAvatarUploadPending) {
+  if (input.isPending) {
     return null;
   }
 

@@ -40,13 +40,13 @@ function readLineByRoot(messages, frontiersByRoot) {
   return (id) => lineByMessageId.get(id) ?? null;
 }
 
-const counts = (messages, getReadAt, isNotified = countAll, currentPubkey) =>
+const counts = (messages, getReadAt, isNotified = countAll, currentAgentId) =>
   computeThreadBadgeCounts(
     messages,
     buildRepliesByRootId(messages),
     getReadAt,
     isNotified,
-    currentPubkey,
+    currentAgentId,
   );
 
 test("computeThreadBadgeCounts_directRepliesOnly_countsEach", () => {

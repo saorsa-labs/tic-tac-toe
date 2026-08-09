@@ -34,22 +34,22 @@ test("conversation scopes isolate identities, channels, and threads", async () =
   const store = await loadStore();
   const scopes = [
     store.getPersistentAgentAudienceScope({
-      ownerPubkey: ownerA,
+      ownerAgentId: ownerA,
       channelId: "channel-a",
       threadRootId: "root-1",
     }),
     store.getPersistentAgentAudienceScope({
-      ownerPubkey: ownerA,
+      ownerAgentId: ownerA,
       channelId: "channel-a",
       threadRootId: "root-2",
     }),
     store.getPersistentAgentAudienceScope({
-      ownerPubkey: ownerA,
+      ownerAgentId: ownerA,
       channelId: "channel-b",
       threadRootId: "root-1",
     }),
     store.getPersistentAgentAudienceScope({
-      ownerPubkey: ownerB,
+      ownerAgentId: ownerB,
       channelId: "channel-a",
       threadRootId: "root-1",
     }),
@@ -66,7 +66,7 @@ test("conversation scopes isolate identities, channels, and threads", async () =
 test("successful fast send promotes without a persisted draft key", async () => {
   const store = await loadStore(1);
   const scope = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerA,
+    ownerAgentId: ownerA,
     channelId: "channel-a",
     threadRootId: "root",
   });
@@ -211,7 +211,7 @@ test("timeline scope is intentionally unsupported", async () => {
   const store = await loadStore(7);
   assert.equal(
     store.getPersistentAgentAudienceScope({
-      ownerPubkey: ownerA,
+      ownerAgentId: ownerA,
       channelId: "channel-a",
     }),
     null,

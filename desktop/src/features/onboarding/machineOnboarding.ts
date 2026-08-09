@@ -1,13 +1,13 @@
 import * as React from "react";
 import { type QueryStatus, useQueryClient } from "@tanstack/react-query";
 
-import { useIdentityQuery } from "@/shared/api/hooks";
+import { useIdentityQuery, useRecoveryStateQuery } from "@/shared/api/hooks";
 
 const MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY =
   "buzz-machine-onboarding-complete.v2";
 const LEGACY_ONBOARDING_COMPLETION_STORAGE_KEY = "buzz-onboarding-complete.v1";
 
-type MachineOnboardingStage =
+export type MachineOnboardingStage =
   | "blocking"
   | "keyring-locked"
   | "onboarding"
@@ -95,6 +95,57 @@ export function migrateMachineOnboardingCompletion(
 function identitySettled(status: QueryStatus, isFetching: boolean) {
   return !isFetching && (status === "success" || status === "error");
 }
+export type MachineOnboardingStageInput = {
+  identity: { status: QueryStatus; isFetching: boolean };
+  recovery: {
+    status: QueryStatus;
+    isFetching: boolean;
+    lost: boolean;
+    locked: boolean;
+    resetFailed: boolean;
+  };
+  currentAgentId: string | null;
+  hasCompletedCurrentAgentId: boolean;
+  evaluatedCurrentAgentId: boolean;
+  continuingCurrentAgentId: boolean;
+  bootedLost: boolean;
+  bootedLocked: boolean;
+};
+
+/**
+ * Pure stage resolver for the machine-onboarding gate. Extracted from the hook
+ * so the recovery-gate decision is unit-testable: an unsettled recovery query
+ * (or any recovery flag) must NEVER short-circuit to `ready` when the identity
+ * query errors. The one allowed `ready` path is recovery settled to `success`
+ * with all flags false.
+ */
+export function resolveMachineOnboardingStage(
+  input: MachineOnboardingStageInput,
+): MachineOnboardingStage {
+  const recoveryReady = input.recovery.status === "success";
+  const { lost, locked, resetFailed } = input.recovery;
+  const relaunchRequired =
+    ((input.bootedLost && !lost) || (input.bootedLocked && !locked)) &&
+    input.identity.status === "success";
+
+  if (!recoveryReady) return "blocking";
+  if (resetFailed) return "reset-failed";
+  if (locked) return "keyring-locked";
+  if (relaunchRequired) return "relaunch-required";
+  if (lost) return "onboarding";
+  if (input.identity.status === "error") return "ready";
+  if (
+    !identitySettled(input.identity.status, input.identity.isFetching) ||
+    !input.currentAgentId ||
+    (!input.hasCompletedCurrentAgentId &&
+      !input.evaluatedCurrentAgentId &&
+      !input.continuingCurrentAgentId)
+  ) {
+    return "blocking";
+  }
+  if (lost || !input.hasCompletedCurrentAgentId) return "onboarding";
+  return "ready";
+}
 
 export function useMachineOnboardingState({
   activeCommunityPubkey,
@@ -104,18 +155,23 @@ export function useMachineOnboardingState({
   isSharedIdentity: boolean;
 }) {
   const queryClient = useQueryClient();
-  const identityQuery = useIdentityQuery();
+  const recoveryStateQuery = useRecoveryStateQuery();
+  const recovery = recoveryStateQuery.data;
+  const recoveryReady = recoveryStateQuery.status === "success";
+  const identityLost = recovery?.lost === true;
+  const identityLocked = recovery?.locked === true;
+  const identityResetFailed = recovery?.resetFailed === true;
+  const identityQuery = useIdentityQuery(
+    recoveryReady && !identityLost && !identityLocked && !identityResetFailed,
+  );
   const identity = identityQuery.data;
-  const currentPubkey = identity?.pubkey ?? null;
-  const identityLost = identity?.lost === true;
-  const identityLocked = identity?.locked === true;
-  const identityResetFailed = identity?.resetFailed === true;
+  const currentAgentId = identity?.agentId ?? null;
   const [completedPubkey, setCompletedPubkey] = React.useState<string | null>(
     () =>
-      currentPubkey &&
+      currentAgentId &&
       !forceMachineOnboarding() &&
-      readMachineOnboardingCompletion(currentPubkey)
-        ? currentPubkey
+      readMachineOnboardingCompletion(currentAgentId)
+        ? currentAgentId
         : null,
   );
   const [evaluatedPubkey, setEvaluatedPubkey] = React.useState<string | null>(
@@ -131,9 +187,9 @@ export function useMachineOnboardingState({
       identityQuery.status === "success" &&
       startupPubkeyRef.current === null
     ) {
-      startupPubkeyRef.current = currentPubkey;
+      startupPubkeyRef.current = currentAgentId;
     }
-  }, [currentPubkey, identityQuery.status]);
+  }, [currentAgentId, identityQuery.status]);
   React.useEffect(() => {
     if (identityLost) setBootedLost(true);
   }, [identityLost]);
@@ -143,8 +199,8 @@ export function useMachineOnboardingState({
 
   React.useEffect(() => {
     if (
-      !currentPubkey ||
-      currentPubkey !== startupPubkeyRef.current ||
+      !currentAgentId ||
+      currentAgentId !== startupPubkeyRef.current ||
       identityQuery.status !== "success" ||
       identityLost
     ) {
@@ -152,16 +208,16 @@ export function useMachineOnboardingState({
     }
     if (
       migrateMachineOnboardingCompletion(
-        currentPubkey,
+        currentAgentId,
         activeCommunityPubkey,
         isSharedIdentity,
       )
     ) {
-      setCompletedPubkey(currentPubkey);
+      setCompletedPubkey(currentAgentId);
     }
-    setEvaluatedPubkey(currentPubkey);
+    setEvaluatedPubkey(currentAgentId);
   }, [
-    currentPubkey,
+    currentAgentId,
     activeCommunityPubkey,
     identityLost,
     identityQuery.status,
@@ -170,7 +226,7 @@ export function useMachineOnboardingState({
 
   const complete = React.useCallback(
     (completedIdentityPubkey?: string) => {
-      const pubkey = completedIdentityPubkey ?? currentPubkey;
+      const pubkey = completedIdentityPubkey ?? currentAgentId;
       if (!pubkey) return;
       window.localStorage.setItem(
         completionKey(MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
@@ -178,7 +234,7 @@ export function useMachineOnboardingState({
       );
       setCompletedPubkey(pubkey);
     },
-    [currentPubkey],
+    [currentAgentId],
   );
 
   const continueWithIdentity = React.useCallback((pubkey: string) => {
@@ -186,54 +242,40 @@ export function useMachineOnboardingState({
   }, []);
 
   const reopen = React.useCallback(() => {
-    clearMachineOnboardingCompletion(currentPubkey);
-    setCompletedPubkey((pubkey) => (pubkey === currentPubkey ? null : pubkey));
-    setEvaluatedPubkey(currentPubkey);
-  }, [currentPubkey]);
+    clearMachineOnboardingCompletion(currentAgentId);
+    setCompletedPubkey((pubkey) => (pubkey === currentAgentId ? null : pubkey));
+    setEvaluatedPubkey(currentAgentId);
+  }, [currentAgentId]);
 
-  const relaunchRequired =
-    ((bootedLost && !identityLost) || (bootedLocked && !identityLocked)) &&
-    identityQuery.status === "success";
-  const hasCompletedCurrentPubkey =
-    completedPubkey === currentPubkey ||
+  const hasCompletedCurrentAgentId =
+    completedPubkey === currentAgentId ||
     (!forceMachineOnboarding() &&
-      readMachineOnboardingCompletion(currentPubkey));
+      readMachineOnboardingCompletion(currentAgentId));
 
-  let stage: MachineOnboardingStage;
-  if (identityResetFailed && identityQuery.status === "success") {
-    stage = "reset-failed";
-  } else if (identityLocked && identityQuery.status === "success") {
-    stage = "keyring-locked";
-  } else if (relaunchRequired) {
-    stage = "relaunch-required";
-  } else if (identityLost && identityQuery.status === "success") {
-    stage = "onboarding";
-  } else if (identityQuery.status === "error") {
-    stage = "ready";
-  } else if (
-    !identitySettled(
-      identityQuery.status,
-      identityQuery.fetchStatus === "fetching",
-    ) ||
-    !currentPubkey ||
-    // Imported identities are published before the flow can advance to setup.
-    // Keep that explicitly requested identity switch in onboarding; only the
-    // startup identity needs the one-render evaluation gate above.
-    (!hasCompletedCurrentPubkey &&
-      evaluatedPubkey !== currentPubkey &&
-      continuingPubkeyRef.current !== currentPubkey)
-  ) {
-    stage = "blocking";
-  } else if (identityLost || !hasCompletedCurrentPubkey) {
-    stage = "onboarding";
-  } else {
-    stage = "ready";
-  }
+  const stage = resolveMachineOnboardingStage({
+    identity: {
+      status: identityQuery.status,
+      isFetching: identityQuery.fetchStatus === "fetching",
+    },
+    recovery: {
+      status: recoveryStateQuery.status,
+      isFetching: recoveryStateQuery.fetchStatus === "fetching",
+      lost: identityLost,
+      locked: identityLocked,
+      resetFailed: identityResetFailed,
+    },
+    currentAgentId,
+    hasCompletedCurrentAgentId,
+    evaluatedCurrentAgentId: evaluatedPubkey === currentAgentId,
+    continuingCurrentAgentId: continuingPubkeyRef.current === currentAgentId,
+    bootedLost,
+    bootedLocked,
+  });
 
   return {
     complete,
     continueWithIdentity,
-    currentPubkey,
+    currentAgentId,
     identityLost,
     queryClient,
     reopen,

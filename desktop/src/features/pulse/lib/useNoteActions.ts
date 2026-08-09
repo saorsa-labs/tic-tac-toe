@@ -12,12 +12,10 @@ import {
 } from "@/features/pulse/hooks";
 import {
   applyReactionState,
-  buildNoteShareUri,
   isDuplicateReactionError,
   toggleNoteIdInSet,
 } from "@/features/pulse/lib/noteActions";
 import type { UserNote } from "@/shared/api/socialTypes";
-import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 export type PulseNoteActions = {
   isReplySending: boolean;
@@ -30,17 +28,16 @@ export type PulseNoteActions = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
   ) => Promise<void>;
-  share: (note: UserNote) => Promise<void>;
   startDm: (pubkey: string) => Promise<void>;
   toggleUpvote: (note: UserNote, remove: boolean) => Promise<void>;
 };
 
 export function usePulseNoteActions({
-  currentPubkey,
+  currentAgentId,
   reactionQueryKey,
   reactions,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
   reactionQueryKey: ReturnType<typeof pulseQueryKeys.reactions>;
   reactions: Map<string, PulseReactionState>;
 }): PulseNoteActions {
@@ -49,7 +46,7 @@ export function usePulseNoteActions({
   >(() => new Set());
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const replyMutation = usePublishNoteMutation(currentPubkey);
+  const replyMutation = usePublishNoteMutation(currentAgentId);
   const toggleReactionMutation = useToggleReactionMutation();
   const openDmMutation = useOpenDmMutation();
 
@@ -77,9 +74,9 @@ export function usePulseNoteActions({
           emoji: "+",
           remove,
         });
-        if (currentPubkey) {
+        if (currentAgentId) {
           void queryClient.invalidateQueries({
-            queryKey: pulseQueryKeys.likedNotes(currentPubkey),
+            queryKey: pulseQueryKeys.likedNotes(currentAgentId),
           });
         }
       } catch (error) {
@@ -88,9 +85,9 @@ export function usePulseNoteActions({
             reactionQueryKey,
             (current) => applyReactionState(current, note.id, true),
           );
-          if (currentPubkey) {
+          if (currentAgentId) {
             void queryClient.invalidateQueries({
-              queryKey: pulseQueryKeys.likedNotes(currentPubkey),
+              queryKey: pulseQueryKeys.likedNotes(currentAgentId),
             });
           }
           return;
@@ -107,7 +104,7 @@ export function usePulseNoteActions({
       }
     },
     [
-      currentPubkey,
+      currentAgentId,
       pendingUpvoteNoteIds,
       queryClient,
       reactionQueryKey,
@@ -143,15 +140,6 @@ export function usePulseNoteActions({
     [replyMutation],
   );
 
-  const share = React.useCallback(async (note: UserNote) => {
-    try {
-      await writeTextToClipboard(buildNoteShareUri(note));
-      toast.success("Copied note link");
-    } catch {
-      toast.error("Failed to copy note link");
-    }
-  }, []);
-
   const startDm = React.useCallback(
     async (pubkey: string) => {
       try {
@@ -177,7 +165,6 @@ export function usePulseNoteActions({
     reactionCount: (noteId) => reactions.get(noteId)?.count ?? 0,
     isUpvoted: (noteId) => reactions.get(noteId)?.reactedByCurrentUser ?? false,
     reply,
-    share,
     startDm,
     toggleUpvote,
   };

@@ -11,9 +11,7 @@ import {
   type InboxFilter,
   type InboxContextMessage,
   type InboxItem,
-  type InboxReply,
   buildInboxItems,
-  formatInboxFullTimestamp,
   getInboxConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
@@ -43,26 +41,13 @@ import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
 import { DraftDetailPane } from "@/features/messages/ui/DraftDetailPane";
-import {
-  useChannelMessagesQuery,
-  useToggleReactionMutation,
-} from "@/features/messages/hooks";
+import { useChannelMessagesQuery } from "@/features/messages/hooks";
 import {
   collectMessageMentionPubkeys,
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
-import { formatTime } from "@/features/messages/lib/dateFormatters";
-import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { useRelaySelfQuery } from "@/features/moderation/hooks";
-import { resolveUserLabel } from "@/features/profile/lib/identity";
-import {
-  countDueReminders,
-  useRemindersQuery,
-} from "@/features/reminders/hooks";
-import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
-import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
@@ -107,7 +92,7 @@ type HomeViewProps = {
   feed?: HomeFeedResponse;
   isLoading?: boolean;
   errorMessage?: string;
-  currentPubkey?: string;
+  currentAgentId?: string;
   availableChannelIds: ReadonlySet<string>;
   onOpenContext: (
     channelId: string,
@@ -121,12 +106,12 @@ export function HomeView({
   feed,
   isLoading = false,
   errorMessage,
-  currentPubkey,
+  currentAgentId,
   availableChannelIds,
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
-  const relaySelfPubkey = useRelaySelfQuery().data;
+  const eventAuthorityAgentId: undefined = undefined;
   const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
   const isNarrowHomeViewport =
     homeInboxWidthPx > 0 &&
@@ -139,11 +124,8 @@ export function HomeView({
   // background data loads must never trigger navigations.
   const { applyPatch: applyInboxSearchPatch, values: inboxSearchValues } =
     useHistorySearchState(INBOX_SEARCH_KEYS);
-  const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
-  const isMessagesMode = !isReminders && !isDrafts;
-  const remindersQuery = useRemindersQuery(currentPubkey);
-  const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
+  const isMessagesMode = !isDrafts;
   const {
     activeCount: activeDraftCount,
     deleteDraft: handleDeleteDraft,
@@ -236,8 +218,6 @@ export function HomeView({
       ),
     [applyInboxSearchPatch],
   );
-  const [isDeletingMessage, setIsDeletingMessage] = React.useState(false);
-  const [isSendingReply, setIsSendingReply] = React.useState(false);
   const handleOpenDm = React.useCallback(
     async (pubkeys: string[]) => {
       const dm = await openDmMutation.mutateAsync({ pubkeys });
@@ -245,10 +225,6 @@ export function HomeView({
     },
     [goChannel, openDmMutation],
   );
-  const { activeReminderEventIds, openReminder } = useRemindLater();
-  const [localRepliesByItemId, setLocalRepliesByItemId] = React.useState<
-    Record<string, InboxReply[]>
-  >({});
   const {
     canReset: canResetThreadPanelWidth,
     onResetWidth: handleThreadPanelWidthReset,
@@ -316,7 +292,6 @@ export function HomeView({
     homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
 
   const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
-  const toggleReactionMutation = useToggleReactionMutation();
   const channelMessages = channelMessagesQuery.data;
   const threadContext = useInboxThreadContext(
     threadContextFeedItem,
@@ -333,10 +308,10 @@ export function HomeView({
         ...(channelMessages ?? [])
           .filter((event) => event.kind === KIND_REACTION)
           .map((event) => event.pubkey),
-        ...(currentPubkey ? [currentPubkey] : []),
+        ...(currentAgentId ? [currentAgentId] : []),
       ]),
     ],
-    [channelMessages, currentPubkey, feedItems, threadContext.events],
+    [channelMessages, currentAgentId, feedItems, threadContext.events],
   );
   const feedProfilesQuery = useUsersBatchQuery(feedProfilePubkeys, {
     enabled: feedProfilePubkeys.length > 0,
@@ -374,11 +349,11 @@ export function HomeView({
     () =>
       buildInboxItems({
         channels,
-        currentPubkey,
+        currentAgentId,
         feed,
         profiles: feedProfiles,
       }),
-    [channels, currentPubkey, feed, feedProfiles],
+    [channels, currentAgentId, feed, feedProfiles],
   );
   const { effectiveDoneSet, markItemRead, markItemUnread } =
     useHomeInboxReadState({
@@ -476,10 +451,7 @@ export function HomeView({
       threadContext.events.map((event) => [event.id, event]),
     );
     const contextEventIds = new Set(eventById.keys());
-    const reactionEvents = [
-      ...(channelMessages ?? []),
-      ...threadContext.reactionEvents,
-    ].filter((event) => {
+    const reactionEvents = [...(channelMessages ?? [])].filter((event) => {
       if (event.kind !== KIND_REACTION) {
         return false;
       }
@@ -487,19 +459,19 @@ export function HomeView({
       const targetId = getReactionTargetId(event.tags);
       return Boolean(targetId && contextEventIds.has(targetId));
     });
-    const currentUserAvatarUrl = currentPubkey
-      ? (feedProfiles?.[currentPubkey.toLowerCase()]?.avatarUrl ?? null)
+    const currentUserAvatarUrl = currentAgentId
+      ? (feedProfiles?.[currentAgentId.toLowerCase()]?.avatarUrl ?? null)
       : null;
     const timelineMessages = formatTimelineMessages(
       [...threadContext.events, ...reactionEvents],
       selectedChannel,
-      currentPubkey,
+      currentAgentId,
       currentUserAvatarUrl,
       feedProfiles,
       undefined,
       undefined,
       undefined,
-      relaySelfPubkey,
+      eventAuthorityAgentId,
       feedOwnerProfiles,
     );
 
@@ -513,23 +485,15 @@ export function HomeView({
     );
   }, [
     channelMessages,
-    currentPubkey,
+    currentAgentId,
     feedProfiles,
     feedOwnerProfiles,
-    relaySelfPubkey,
     selectedChannel,
     selectedEventId,
     selectedItem,
     threadContext.events,
-    threadContext.reactionEvents,
   ]);
-  const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
-    if (!selectedItem) return [];
-    const localReplies =
-      localRepliesByItemId[selectedItem.conversationId] ?? [];
-    const contextIds = new Set(contextMessages.map((message) => message.id));
-    return localReplies.filter((reply) => !contextIds.has(reply.id));
-  }, [contextMessages, localRepliesByItemId, selectedItem]);
+  const selectedItemReplies = React.useMemo(() => [], []);
   React.useEffect(() => {
     // Auto-selection is Messages-mode-only: in Reminders mode no FeedItem is
     // ever selected, so default-selecting one behind the reminders list would
@@ -598,12 +562,6 @@ export function HomeView({
     urlSelectedItemId,
   ]);
 
-  React.useEffect(() => {
-    void selectedConversationId;
-    setIsDeletingMessage(false);
-    setIsSendingReply(false);
-  }, [selectedConversationId]);
-
   if (isLoading && !feed) {
     return <HomeLoadingState />;
   }
@@ -629,14 +587,7 @@ export function HomeView({
     );
   }
 
-  const canReact =
-    selectedItem !== null &&
-    selectedItem.item.channelId !== null &&
-    availableChannelIds.has(selectedItem.item.channelId);
-  const canReply =
-    canReact &&
-    selectedItem.item.kind !== 45001 &&
-    selectedItem.item.kind !== 45003;
+  const canReply = false;
   const disabledReplyReason =
     canReply || !selectedItem
       ? null
@@ -645,10 +596,7 @@ export function HomeView({
           ? "This item does not support inline replies yet."
           : "Open the linked channel to reply."
         : "This inbox item does not have a reply target.";
-  const canDelete =
-    selectedItem !== null &&
-    currentPubkey?.trim().toLowerCase() ===
-      selectedItem.item.pubkey.trim().toLowerCase();
+  const canDelete = false;
   const isSinglePanelDetailView =
     isMessagesMode &&
     isNarrowHomeViewport &&
@@ -722,12 +670,10 @@ export function HomeView({
 
           {showListPane ? (
             <InboxListPane
-              activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
               draftItems={draftItems}
               doneSet={effectiveDoneSet}
-              dueReminderCount={dueReminderCount}
               filter={filter}
               items={filteredItems}
               onDeleteDraft={handleDeleteDraft}
@@ -745,25 +691,12 @@ export function HomeView({
                   getThreadReference(item.item.tags).rootId,
                 );
               }}
-              onRemindLater={(item) => {
-                const channelId = item.item.channelId;
-                if (!channelId) {
-                  return;
-                }
-                openReminder({
-                  authorPubkey: item.item.pubkey,
-                  channelId,
-                  eventId: item.id,
-                  preview: item.preview.slice(0, 100),
-                });
-              }}
               onSelect={(itemId) => {
                 handleUserSelectItem(itemId);
                 markItemRead(itemId);
               }}
               onSelectDraft={setSelectedDraftKey}
               onUnreadOnlyChange={setUnreadOnly}
-              reminderPubkey={currentPubkey}
               selectedConversationId={selectedConversationId}
               selectedDraftKey={selectedDraftKey}
               showRightDivider={showListPane && showDetailPane}
@@ -805,12 +738,12 @@ export function HomeView({
               canReply={canReply}
               channel={selectedChannel}
               contextChannelName={selectedChannel?.name ?? null}
-              currentPubkey={currentPubkey}
+              currentAgentId={currentAgentId}
               disabledReplyReason={disabledReplyReason}
-              isDeletingMessage={isDeletingMessage}
-              isSendingReply={isSendingReply}
+              isDeletingMessage={false}
+              isSendingReply={false}
               isSinglePanelView={isSinglePanelDetailView}
-              isThreadContextLoading={threadContext.isLoading}
+              isThreadContextLoading={false}
               item={selectedItem}
               latchedDefaultParentId={latchedDefaultParentId}
               messages={contextMessages}
@@ -823,111 +756,16 @@ export function HomeView({
                     }
                   : undefined
               }
-              onDelete={() => {
-                if (!selectedItem || !canDelete) {
-                  return;
-                }
-                const channelId = selectedItem.item.channelId;
-                if (!channelId) {
-                  return;
-                }
-
-                setIsDeletingMessage(true);
-                void deleteMessage(channelId, selectedItem.id)
-                  .then(() => {
-                    onRefresh();
-                  })
-                  .finally(() => {
-                    setIsDeletingMessage(false);
-                  });
-              }}
+              onDelete={() => undefined}
               onManageChannel={(channelId) => {
                 handleCloseProfilePanel();
                 setManagedChannelId(channelId);
               }}
               onOpenContext={onOpenContext}
-              onSendReply={async ({
-                content,
-                mediaTags,
-                mentionPubkeys,
-                parentEventId,
-              }) => {
-                const channelId = selectedItem?.item.channelId;
-                if (!selectedItem || !channelId || !canReply) {
-                  throw new Error("Replies are not available for this item.");
-                }
-
-                const itemToReply = selectedItem;
-                setIsSendingReply(true);
-                try {
-                  const {
-                    mediaTags: imetaTags,
-                    emojiTags,
-                    mentionTags,
-                  } = splitOutgoingTags(mediaTags);
-                  const result = await sendChannelMessage(
-                    channelId,
-                    content,
-                    parentEventId,
-                    imetaTags,
-                    mentionPubkeys,
-                    undefined,
-                    emojiTags,
-                    mentionTags,
-                  );
-                  const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
-                  const reply: InboxReply = {
-                    authorLabel: currentPubkey
-                      ? resolveUserLabel({
-                          currentPubkey,
-                          profiles: feedProfiles,
-                          pubkey: authorPubkey,
-                        })
-                      : "You",
-                    authorPubkey,
-                    avatarUrl:
-                      currentPubkey && feedProfiles
-                        ? (feedProfiles[currentPubkey.trim().toLowerCase()]
-                            ?.avatarUrl ?? null)
-                        : null,
-                    content,
-                    createdAt: result.createdAt,
-                    depth: result.depth,
-                    fullTimestampLabel: formatInboxFullTimestamp(
-                      result.createdAt,
-                    ),
-                    id: result.eventId,
-                    parentId: result.parentEventId,
-                    rootId: result.rootEventId,
-                    tags: emojiTags,
-                    timeLabel: formatTime(result.createdAt),
-                  };
-                  setLocalRepliesByItemId((current) => ({
-                    ...current,
-                    [itemToReply.conversationId]: [
-                      ...(current[itemToReply.conversationId] ?? []),
-                      reply,
-                    ],
-                  }));
-                  onRefresh();
-                } finally {
-                  setIsSendingReply(false);
-                }
+              onSendReply={async () => {
+                throw new Error("Native thread replies are not available.");
               }}
-              onToggleReaction={
-                canReact
-                  ? async (message, emoji, remove) => {
-                      await toggleReactionMutation.mutateAsync({
-                        emoji,
-                        eventId: message.id,
-                        remove,
-                      });
-                      await threadContext.refreshReactions();
-                      await channelMessagesQuery.refetch();
-                      onRefresh();
-                    }
-                  : undefined
-              }
+              onToggleReaction={undefined}
               replies={selectedItemReplies}
             />
           ) : null}
@@ -953,7 +791,7 @@ export function HomeView({
               widthPx={auxiliaryPaneWidthPx}
             >
               <UserProfilePanel
-                currentPubkey={currentPubkey}
+                currentAgentId={currentAgentId}
                 isSinglePanelView={isSinglePanelAuxiliaryView}
                 layout="split"
                 onClose={handleCloseProfilePanel}
@@ -980,7 +818,7 @@ export function HomeView({
             >
               <ChannelManagementSheet
                 channel={managedChannel}
-                currentPubkey={currentPubkey}
+                currentAgentId={currentAgentId}
                 layout="split"
                 onOpenChange={(nextOpen) => {
                   if (!nextOpen) {

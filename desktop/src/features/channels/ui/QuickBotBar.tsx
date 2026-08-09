@@ -3,7 +3,7 @@ import { Spinner } from "@/shared/ui/spinner";
 
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 type QuickBotBarProps = {
@@ -72,7 +72,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                       alt={persona.displayName}
                       className="h-full w-full rounded-lg object-cover"
                       referrerPolicy="no-referrer"
-                      src={rewriteRelayUrl(persona.avatarUrl)}
+                      src={persona.avatarUrl}
                     />
                   ) : (
                     <span className="text-2xs font-semibold text-primary">

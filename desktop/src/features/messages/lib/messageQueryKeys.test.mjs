@@ -1,10 +1,23 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach, afterEach } from "node:test";
 
 import {
+  channelMessagesKey,
+  channelWindowKey,
   mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
+  threadRepliesKey,
 } from "./messageQueryKeys.ts";
+import {
+  setResolvedHistoryScope,
+  clearAllResolvedHistoryScopes,
+} from "./nativeHistoryScopeStore.ts";
+
+// The cache-key functions fold the resolved durable-history scope into every
+// history key, so resolving/rotating a scope yields a fresh partition. Each
+// key-partition test starts from a clean registry.
+beforeEach(() => clearAllResolvedHistoryScopes());
+afterEach(() => clearAllResolvedHistoryScopes());
 
 const CHANNEL_ID = "timeline-window-test";
 const PUBKEY = "a".repeat(64);
@@ -147,4 +160,105 @@ test("sortMessages tiebreaks same-second events on id, order-independent", () =>
 
   assert.deepEqual(forward, reverse);
   assert.deepEqual(forward, [a.id, b.id, c.id]);
+});
+
+// ── Resolved-scope cache-key partition ──────────────────────────────────────
+// Every history cache key carries the channel's resolved durable-history scope
+// as its partition axis. A held group (unresolved -> null), a scope arrival
+// (null -> stable), and a rotation (stable -> rotated) each yield a distinct
+// partition, so prior/pending data is never displayed after the scope changes
+// and the old partition is orphaned for GC. DM channel ids are never registered
+// so they keep a stable null partition.
+
+test("an unresolved group's keys carry a null scope partition (stable while held)", () => {
+  assert.deepEqual(channelMessagesKey("g-1"), [
+    "channel-messages",
+    "g-1",
+    null,
+  ]);
+  assert.deepEqual(channelWindowKey("g-1"), ["channel-window", "g-1", null]);
+  assert.deepEqual(threadRepliesKey("g-1", "root-a"), [
+    "thread-replies",
+    "g-1",
+    "root-a",
+    null,
+  ]);
+});
+
+test("scope arrival (null -> stable) yields a fresh partition for every history key", () => {
+  const beforeMsg = channelMessagesKey("g-1");
+  const beforeWin = channelWindowKey("g-1");
+  const beforeThread = threadRepliesKey("g-1", "root-a");
+  setResolvedHistoryScope("g-1", "group:stable-1");
+  assert.notDeepEqual(channelMessagesKey("g-1"), beforeMsg);
+  assert.notDeepEqual(channelWindowKey("g-1"), beforeWin);
+  assert.notDeepEqual(threadRepliesKey("g-1", "root-a"), beforeThread);
+  // The resolved scope is the partition value actually carried.
+  assert.deepEqual(channelMessagesKey("g-1"), [
+    "channel-messages",
+    "g-1",
+    "group:stable-1",
+  ]);
+});
+
+test("scope rotation (stable -> rotated) yields a fresh partition, orphaning the old for GC", () => {
+  setResolvedHistoryScope("g-1", "group:stable-1");
+  const first = channelMessagesKey("g-1");
+  setResolvedHistoryScope("g-1", "group:stable-1-rotated");
+  assert.notDeepEqual(channelMessagesKey("g-1"), first);
+  assert.deepEqual(channelMessagesKey("g-1"), [
+    "channel-messages",
+    "g-1",
+    "group:stable-1-rotated",
+  ]);
+});
+
+test("a DM channel id keeps a stable null partition (DMs are never registered)", () => {
+  const dmPeer = "c".repeat(64);
+  // DM scopes are deterministic and never enter the registry, so the DM key is
+  // a stable null partition — it does not churn on any group scope change.
+  assert.deepEqual(channelMessagesKey(dmPeer)[2], null);
+  setResolvedHistoryScope("g-1", "group:stable-1");
+  assert.deepEqual(channelMessagesKey(dmPeer)[2], null);
+});
+
+test("per-channel isolation: each channel's key carries its own scope, and rotating one never moves another", () => {
+  setResolvedHistoryScope("g-a", "group:stable-a");
+  setResolvedHistoryScope("g-b", "group:stable-b");
+  assert.deepEqual(channelMessagesKey("g-a")[2], "group:stable-a");
+  assert.deepEqual(channelMessagesKey("g-b")[2], "group:stable-b");
+  assert.notDeepEqual(channelMessagesKey("g-a"), channelMessagesKey("g-b"));
+  // Rotating g-a's scope does not touch g-b's partition.
+  const bBefore = channelMessagesKey("g-b");
+  setResolvedHistoryScope("g-a", "group:stable-a-rotated");
+  assert.deepEqual(channelMessagesKey("g-b"), bBefore);
+});
+
+test("the three key families are distinct and cannot collide for one channel", () => {
+  setResolvedHistoryScope("g-1", "group:stable-1");
+  const msg = channelMessagesKey("g-1");
+  const win = channelWindowKey("g-1");
+  const thread = threadRepliesKey("g-1", "root-a");
+  assert.notDeepEqual(msg, win);
+  assert.notDeepEqual(msg, thread);
+  assert.notDeepEqual(win, thread);
+});
+
+test("threadRepliesKey is partitioned by root id, independently of scope", () => {
+  setResolvedHistoryScope("g-1", "group:stable-1");
+  assert.notDeepEqual(
+    threadRepliesKey("g-1", "root-a"),
+    threadRepliesKey("g-1", "root-b"),
+  );
+});
+
+test("one channel's scope rotation repartitions all three of its key families at once", () => {
+  setResolvedHistoryScope("g-1", "group:stable-1");
+  const msg = channelMessagesKey("g-1");
+  const win = channelWindowKey("g-1");
+  const thread = threadRepliesKey("g-1", "root-a");
+  setResolvedHistoryScope("g-1", "group:rotated");
+  assert.notDeepEqual(channelMessagesKey("g-1"), msg);
+  assert.notDeepEqual(channelWindowKey("g-1"), win);
+  assert.notDeepEqual(threadRepliesKey("g-1", "root-a"), thread);
 });

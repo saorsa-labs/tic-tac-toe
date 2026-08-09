@@ -256,9 +256,6 @@ mod tests {
             name: name.to_string(),
             display_name: Some(format!("{name} Display")),
             persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear
-            private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear
-            auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear
-            relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear
             avatar_url: Some(format!("https://example.com/{name}.png")),
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear
             agent_command: "goose".to_string(),            // MUST NOT appear
@@ -306,7 +303,6 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: vec![],
             definition_parallelism: None,
-            relay_mesh: None,
         }
     }
 

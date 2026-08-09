@@ -4,11 +4,7 @@
 
 use tauri::AppHandle;
 
-use crate::{
-    app_state::AppState,
-    managed_agents::{load_personas, AgentDefinition, ManagedAgentRecord},
-    relay::relay_ws_url_with_override,
-};
+use crate::managed_agents::{load_personas, AgentDefinition, ManagedAgentRecord};
 
 /// Resolve the deploy-specific structured model/provider for a managed agent.
 ///
@@ -44,31 +40,13 @@ pub(crate) fn resolve_deploy_model_provider<'a>(
 
 /// Build the standard agent JSON payload for provider deploy calls.
 ///
-/// Like local spawn, provider deploy re-reads live persona env vars and
-/// structured model/provider so remote agents receive current credentials
-/// and the same authoritative values that local spawn derives from
-/// `runtime_metadata_env_vars`. The only field still pinned is
-/// `agent_command`/`agent_args` — those were captured at create time.
-/// The only read-time resolution is `relay_url`: a blank pin resolves to
-/// the active workspace relay here, matching the create-path contract.
-///
-/// Fails closed when the private key is unavailable (keyring outage leaves
-/// it empty after hydration): without this guard a provider deploy would
-/// serialize `"private_key_nsec": ""` and launch the agent with no
-/// identity — the same hazard the local spawn path refuses via
-/// `spawn_key_refusal`.
+/// Provider deploy re-reads live persona environment variables and structured
+/// model/provider settings. Cryptographic identity is owned by the provider's
+/// native x0x runtime and is never serialized by the desktop.
 pub(super) fn build_deploy_payload(
     app: &AppHandle,
-    state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
-    // Fails closed when the private key is unavailable — same guard as local
-    // spawn. Without this, a keyring outage would serialize `"private_key_nsec": ""`
-    // and launch the agent with no identity.
-    if let Some(err) = crate::managed_agents::spawn_key_refusal(record) {
-        return Err(err);
-    }
-
     // Merge global + persona + agent env_vars for provider deploy — the same
     // live-persona-under-overrides semantics as local spawn. Global env vars
     // are the lowest user-settable layer: global < persona < agent (last-wins
@@ -96,10 +74,6 @@ pub(super) fn build_deploy_payload(
 
     Ok(deploy_payload_json(
         record,
-        crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &relay_ws_url_with_override(state),
-        ),
         effective_model,
         effective_provider,
         merged_env,
@@ -111,21 +85,12 @@ pub(super) fn build_deploy_payload(
 /// completeness is testable without an `AppHandle`.
 pub(super) fn deploy_payload_json(
     record: &ManagedAgentRecord,
-    relay_url: String,
     effective_model: Option<String>,
     effective_provider: Option<String>,
     merged_env: std::collections::BTreeMap<String, String>,
 ) -> serde_json::Value {
     serde_json::json!({
         "name": &record.name,
-        // Resolve the per-agent pin against the active workspace relay here:
-        // this payload crosses the host boundary to a remote provider harness
-        // that has no notion of the desktop's workspace, so the blank→workspace
-        // fallback (otherwise applied at read-time in `effective_agent_relay_url`)
-        // must be materialized into a concrete URL before serializing.
-        "relay_url": relay_url,
-        "private_key_nsec": &record.private_key_nsec,
-        "auth_tag": &record.auth_tag,
         "agent_command": &record.agent_command,
         "agent_args": &record.agent_args,
         "system_prompt": &record.system_prompt,

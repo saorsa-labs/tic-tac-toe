@@ -1,4 +1,3 @@
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { TimelineMessage } from "../types";
 import { parseImetaTags } from "./parseImeta";
 
@@ -10,7 +9,7 @@ import { parseImetaTags } from "./parseImeta";
 export function timelineImageUrls(message: TimelineMessage): string[] {
   const urls = new Set<string>();
   const add = (url: string | null | undefined) => {
-    if (url) urls.add(rewriteRelayUrl(url));
+    if (url) urls.add(url);
   };
 
   add(message.avatarUrl);

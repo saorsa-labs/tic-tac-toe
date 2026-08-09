@@ -194,11 +194,7 @@ export function useAgentManagement() {
         throw new Error("Choose an available runtime for this agent.");
       }
 
-      const avatarUrl = await resolveManagedAgentAvatarUrl(
-        input.avatarUrl,
-        undefined,
-        runtime.avatarUrl,
-      );
+      const avatarUrl = await resolveManagedAgentAvatarUrl(input.avatarUrl);
       const persona = await createPersonaMutation.mutateAsync({
         ...input,
         avatarUrl,
@@ -209,7 +205,6 @@ export function useAgentManagement() {
           await buildInstanceInputForDefinition(
             persona,
             runtime,
-            undefined,
             backendIntent ?? undefined,
           ),
         );

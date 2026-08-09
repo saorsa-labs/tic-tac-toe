@@ -29,7 +29,7 @@ type TopbarSearchProps = {
   channelLabels?: Record<string, string>;
   channels: Channel[];
   className?: string;
-  currentPubkey?: string;
+  currentAgentId?: string;
   focusRequest?: number;
   onOpenChannel: (channelId: string) => void;
   onOpenResult: (hit: SearchHit) => void;
@@ -199,7 +199,7 @@ function getSearchHitContextLabel(
     };
   }
 
-  const isThread = hit.kind === 45003 || Boolean(hit.threadRootId);
+  const isThread = Boolean(hit.threadRootId);
 
   return {
     channelLabel: channelName,
@@ -389,7 +389,7 @@ export function TopbarSearch({
   channelLabels,
   channels,
   className,
-  currentPubkey,
+  currentAgentId,
   focusRequest = 0,
   onOpenChannel,
   onOpenResult,
@@ -418,8 +418,8 @@ export function TopbarSearch({
   } = useSearchResults({ channelLabels, channels, enabled: isOpen, limit: 8 });
   const trimmedQuery = query.trim();
   const isIconVariant = variant === "icon";
-  const currentPubkeyNormalized = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const currentAgentIdNormalized = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
   const suggestedResults = React.useMemo(
     () => getSuggestedSearchResults(suggestionChannels ?? channels),
@@ -472,9 +472,9 @@ export function TopbarSearch({
       results.filter(
         (result) =>
           result.kind !== "user" ||
-          normalizePubkey(result.user.pubkey) !== currentPubkeyNormalized,
+          normalizePubkey(result.user.pubkey) !== currentAgentIdNormalized,
       ),
-    [currentPubkeyNormalized, results],
+    [currentAgentIdNormalized, results],
   );
   const searchResultSections = React.useMemo(
     () => groupSearchResults(searchableResults),
@@ -627,7 +627,7 @@ export function TopbarSearch({
     const messageAuthorLabel =
       result.kind === "message"
         ? resolveUserLabel({
-            currentPubkey,
+            currentAgentId,
             profiles: resultProfiles,
             pubkey: result.hit.pubkey,
             preferResolvedSelfLabel: true,
@@ -686,7 +686,7 @@ export function TopbarSearch({
             }
             className="h-8 w-8"
             displayName={resolveUserLabel({
-              currentPubkey,
+              currentAgentId,
               profiles: resultProfiles,
               pubkey: result.hit.pubkey,
               preferResolvedSelfLabel: true,

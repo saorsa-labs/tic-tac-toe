@@ -97,8 +97,8 @@ export function useMentions(
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople = mentionSearchQuery.length > 0;
   const identityQuery = useIdentityQuery();
-  const currentPubkey = identityQuery.data?.pubkey
-    ? normalizePubkey(identityQuery.data.pubkey)
+  const currentAgentId = identityQuery.data?.agentId
+    ? normalizePubkey(identityQuery.data.agentId)
     : null;
   const membersQuery = useChannelMembersQuery(channelId);
   const members = externalMembers ?? membersQuery.data;
@@ -195,13 +195,13 @@ export function useMentions(
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
-        currentPubkey,
+        currentAgentId,
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
       }),
     [
-      currentPubkey,
+      currentAgentId,
       managedAgentPubkeys,
       relayAgentsQuery.data,
       sharedChannelIds,
@@ -357,7 +357,7 @@ export function useMentions(
         personaId: agent.personaId ?? undefined,
         personaName:
           personaNameByPubkey.get(normalizePubkey(agent.pubkey)) ?? null,
-        ownerPubkey: currentPubkey,
+        ownerPubkey: currentAgentId,
       });
     }
 
@@ -404,7 +404,7 @@ export function useMentions(
         globalSearchIdentityKey,
       ),
       {
-        currentPubkey,
+        currentAgentId,
         getLabel: mentionCandidateLabel,
         preferredPubkeys: memberPubkeys,
       },
@@ -414,7 +414,7 @@ export function useMentions(
     activePersonas,
     userSearchResults,
     canSearchGlobalUsers,
-    currentPubkey,
+    currentAgentId,
     directoryAgentPubkeys,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
@@ -549,14 +549,14 @@ export function useMentions(
           candidate,
           label,
           channelType: options?.channelType,
-          currentPubkey,
+          currentAgentId,
           ownerProfiles: ownerProfilesQuery.data?.profiles,
           profiles,
         }),
       );
   }, [
     activePersonaIds,
-    currentPubkey,
+    currentAgentId,
     mentionCandidatesWithTeams,
     mentionQuery,
     options?.channelType,
@@ -928,7 +928,7 @@ export function useMentions(
             candidates: mentionCandidatesWithTeams,
             activePersonaIds,
             channelType: options?.channelType,
-            currentPubkey,
+            currentAgentId,
             ownerProfiles: ownerProfilesQuery.data?.profiles,
             profiles,
           });
@@ -957,7 +957,7 @@ export function useMentions(
     [
       activePersonaIds,
       cancelMentionAutocomplete,
-      currentPubkey,
+      currentAgentId,
       isMentionOpen,
       mentionCandidatesWithTeams,
       mentionSelectedIndex,

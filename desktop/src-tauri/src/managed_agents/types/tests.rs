@@ -22,73 +22,33 @@ fn persona_record_defaults_active_when_field_is_missing() {
     assert!(record.name_pool.is_empty());
 }
 
-/// Legacy agent records (created before NIP-OA) lack the `auth_tag` field.
-/// `#[serde(default)]` must ensure they deserialize with `auth_tag: None`.
+/// Legacy records may still contain Nostr secret/auth fields. Serde accepts
+/// those unknown fields for a clean migration, but native records never
+/// retain or serialize them again.
 #[test]
-fn managed_agent_record_without_auth_tag_deserializes() {
+fn managed_agent_record_drops_legacy_secret_fields() {
     let record: ManagedAgentRecord = serde_json::from_str(
         r#"{
             "pubkey": "abcd1234",
             "name": "test-agent",
             "private_key_nsec": "nsec1fake",
+            "auth_tag": "legacy-auth",
             "relay_url": "wss://localhost:3000",
             "acp_command": "buzz-acp",
             "agent_command": "goose",
             "agent_args": [],
             "mcp_command": "",
             "turn_timeout_seconds": 320,
-            "system_prompt": null,
             "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
+            "updated_at": "2026-01-01T00:00:00Z"
         }"#,
     )
-    .expect("legacy agent record without auth_tag should deserialize");
+    .expect("legacy agent record should deserialize");
 
-    assert_eq!(record.auth_tag, None);
-    assert_eq!(record.avatar_url, None);
+    let migrated = serde_json::to_string(&record).expect("migrated record should serialize");
+    assert!(!migrated.contains("private_key_nsec"));
+    assert!(!migrated.contains("auth_tag"));
     assert_eq!(record.pubkey, "abcd1234");
-}
-
-/// Agent records WITH an auth_tag round-trip correctly through serde.
-#[test]
-fn managed_agent_record_with_auth_tag_round_trips() {
-    let json = r#"{
-        "pubkey": "abcd1234",
-        "name": "test-agent",
-        "private_key_nsec": "nsec1fake",
-        "auth_tag": "[\"auth\",\"deadbeef\",\"\",\"cafebabe\"]",
-        "relay_url": "wss://localhost:3000",
-        "acp_command": "buzz-acp",
-        "agent_command": "goose",
-        "agent_args": [],
-        "mcp_command": "",
-        "turn_timeout_seconds": 320,
-        "system_prompt": null,
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:00Z",
-        "last_started_at": null,
-        "last_stopped_at": null,
-        "last_exit_code": null,
-        "last_error": null
-    }"#;
-
-    let record: ManagedAgentRecord =
-        serde_json::from_str(json).expect("record with auth_tag should deserialize");
-
-    assert_eq!(
-        record.auth_tag.as_deref(),
-        Some(r#"["auth","deadbeef","","cafebabe"]"#)
-    );
-
-    // Round-trip: serialize and deserialize again.
-    let serialized = serde_json::to_string(&record).expect("should serialize");
-    let record2: ManagedAgentRecord =
-        serde_json::from_str(&serialized).expect("round-trip should deserialize");
-    assert_eq!(record.auth_tag, record2.auth_tag);
 }
 
 // ── Inbound author gate tests ────────────────────────────────────────
@@ -249,44 +209,6 @@ fn update_request_provider_tristate_value_means_set() {
     );
 }
 
-use super::{CreateManagedAgentRequest, RelayMeshConfig};
-
-/// Wire-shape test: the create request arrives from TS as camelCase
-/// (`relayMesh: { modelRef }`). `rename_all = "camelCase"` on
-/// `CreateManagedAgentRequest` does NOT recurse into nested structs, so
-/// `RelayMeshConfig` needs its own `alias = "modelRef"`. This test pins
-/// the exact JSON the frontend sends; if the alias is dropped, creating
-/// a relay-mesh agent fails to deserialize at the Tauri boundary.
-#[test]
-fn create_request_deserializes_camel_case_relay_mesh() {
-    let request: CreateManagedAgentRequest = serde_json::from_str(
-        r#"{
-            "name": "mesh-agent",
-            "relayMesh": { "modelRef": "Qwen3" }
-        }"#,
-    )
-    .expect("camelCase relayMesh payload from TS should deserialize");
-    assert_eq!(
-        request.relay_mesh,
-        Some(RelayMeshConfig {
-            model_ref: "Qwen3".to_string()
-        })
-    );
-}
-
-/// Persisted records use snake_case; the camelCase alias must not break
-/// the stored-record round trip.
-#[test]
-fn relay_mesh_config_round_trips_snake_case() {
-    let config = RelayMeshConfig {
-        model_ref: "Qwen3".to_string(),
-    };
-    let json = serde_json::to_string(&config).unwrap();
-    assert_eq!(json, r#"{"model_ref":"Qwen3"}"#);
-    let back: RelayMeshConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, config);
-}
-
 // ── Packs → Teams serde alias backward compatibility ────────────────
 
 #[test]
@@ -388,60 +310,13 @@ fn team_record_deserializes_without_new_fields() {
     assert_eq!(record.version, None);
 }
 
-/// A record whose in-memory key was blanked (because it lives in the
-/// keyring) must NOT serialize `private_key_nsec` into JSON.
 #[test]
-fn managed_agent_record_omits_empty_key_from_json() {
-    let mut record = sample_agent_record();
-    record.private_key_nsec = String::new();
-
+fn managed_agent_record_json_never_contains_secret_material() {
+    let record = sample_agent_record();
     let json = serde_json::to_string(&record).expect("serialize");
-    assert!(
-        !json.contains("private_key_nsec"),
-        "blanked key must be skipped from JSON, got: {json}"
-    );
-}
-
-/// A record with an inline key (the keyringless `0o600` JSON fallback)
-/// serializes the key and round-trips it back.
-#[test]
-fn managed_agent_record_serializes_inline_key_for_fallback() {
-    let mut record = sample_agent_record();
-    record.private_key_nsec = "nsec1fallback".to_string();
-
-    let json = serde_json::to_string(&record).expect("serialize");
-    assert!(json.contains("nsec1fallback"));
-
-    let back: ManagedAgentRecord = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(back.private_key_nsec, "nsec1fallback");
-}
-
-/// A keyring-backed record on disk lacks `private_key_nsec`; it must
-/// deserialize with an empty key (to be hydrated from the keyring).
-#[test]
-fn managed_agent_record_without_key_deserializes_empty() {
-    let record: ManagedAgentRecord = serde_json::from_str(
-        r#"{
-            "pubkey": "abcd1234",
-            "name": "test-agent",
-            "relay_url": "wss://localhost:3000",
-            "acp_command": "buzz-acp",
-            "agent_command": "goose",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": null,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }"#,
-    )
-    .expect("keyring-backed record without inline key should deserialize");
-
-    assert_eq!(record.private_key_nsec, "");
+    assert!(!json.contains("private_key_nsec"));
+    assert!(!json.contains("auth_tag"));
+    assert!(!json.contains("nsec1fake"));
 }
 
 fn sample_agent_record() -> ManagedAgentRecord {
@@ -497,7 +372,6 @@ fn sample_persona() -> AgentDefinition {
 fn persona_into_agent_record_is_keyless_and_slugged() {
     let record = sample_persona().into_agent_record();
     assert!(record.pubkey.is_empty(), "fold must not mint identity");
-    assert!(record.private_key_nsec.is_empty());
     assert_eq!(record.slug.as_deref(), Some("custom:helper"));
     assert_eq!(record.display_name.as_deref(), Some("Helper"));
     assert_eq!(record.system_prompt.as_deref(), Some("You help."));

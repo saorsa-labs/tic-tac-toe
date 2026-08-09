@@ -51,7 +51,7 @@ function HoverRecipientIdentity({
           TEXT_SWAP_HOVER_VISIBLE_CLASS,
           "absolute inset-y-0 left-0 font-mono text-2xs text-muted-foreground",
         )}
-        data-testid={`new-dm-npub-${pubkey}`}
+        data-testid={`new-dm-key-${pubkey}`}
       >
         {identityLabel}
       </span>
@@ -65,7 +65,7 @@ function HoverRecipientIdentity({
  * rows (avatar, agent badge, owner label, and a name-to-pubkey hover swap).
  */
 export function NewMessageResultRow({
-  currentPubkey,
+  currentAgentId,
   disabled,
   isAlreadySelected = false,
   isKeyboardHighlighted = false,
@@ -73,7 +73,7 @@ export function NewMessageResultRow({
   ownerProfiles,
   user,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
   disabled: boolean;
   isAlreadySelected?: boolean;
   isKeyboardHighlighted?: boolean;
@@ -84,7 +84,7 @@ export function NewMessageResultRow({
   const name = formatRecipientName(user);
   const ownerLabel = formatOwnerLabel(
     user.ownerPubkey,
-    currentPubkey,
+    currentAgentId,
     ownerProfiles,
   );
 

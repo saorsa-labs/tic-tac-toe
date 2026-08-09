@@ -1,73 +1,21 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
-  collectMessageIdsForAuxBackfill,
-  fetchStructuralAuxForMessages,
-} from "@/features/messages/lib/auxBackfill";
-import {
   threadRepliesKey,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
-import { relayClient } from "@/shared/api/relayClient";
-import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
-import { getThreadReplies } from "@/shared/api/tauri";
-import type { Channel, RelayEvent, ThreadCursor } from "@/shared/api/types";
+import { fetchNativeThreadReplies } from "@/features/messages/lib/nativeMessaging";
+import { useResolvedHistoryScope } from "@/features/messages/lib/useResolvedHistoryScope";
+import type { Channel, RelayEvent } from "@/shared/api/types";
 
-const THREAD_PAGE_LIMIT = 200;
-const MAX_THREAD_PAGES = 500;
+const NATIVE_THREAD_REFRESH_MS = 2_000;
 
-/**
- * Append the structural aux closure (edits/deletions) for the fetched replies.
- * The server thread-subtree query resolves deletions itself but omits
- * kind:40003 edits, so a bare refetch would render every edited reply with its
- * original text. Best-effort: an aux failure logs and returns the replies
- * unadorned rather than failing the whole thread load.
- */
-async function fetchThreadAuxBestEffort(
-  label: string,
-  channelId: string,
-  fetchAux: () => Promise<RelayEvent[]>,
-): Promise<RelayEvent[]> {
-  try {
-    return await fetchAux();
-  } catch (error) {
-    console.error(
-      `Failed to backfill thread reply ${label} for channel`,
-      channelId,
-      error,
-    );
-    return [];
-  }
-}
-
+/** Retained for cache/test callers; native history needs no aux-event query. */
 export function collectThreadAuxMessageIds(
   threadRootId: string,
   replies: RelayEvent[],
 ): string[] {
-  return [
-    ...new Set([threadRootId, ...collectMessageIdsForAuxBackfill(replies)]),
-  ];
-}
-
-async function withThreadAux(
-  channelId: string,
-  threadRootId: string,
-  replies: RelayEvent[],
-): Promise<RelayEvent[]> {
-  const messageIds = collectThreadAuxMessageIds(threadRootId, replies);
-  const [structuralAux, reactions] = await Promise.all([
-    fetchThreadAuxBestEffort("structural aux", channelId, () =>
-      fetchStructuralAuxForMessages(channelId, messageIds),
-    ),
-    fetchThreadAuxBestEffort("reactions", channelId, () =>
-      relayClient.fetchAuxEventsByReference(
-        channelId,
-        messageIds,
-        buildChannelReactionAuxFilter,
-      ),
-    ),
-  ]);
-  return sortMessages([...replies, ...structuralAux, ...reactions]);
+  return [...new Set([threadRootId, ...replies.map((reply) => reply.id)])];
 }
 
 /** Fetch a thread subtree into a cache independent from channel window pages. */
@@ -75,50 +23,46 @@ export function useThreadReplies(
   activeChannel: Channel | null,
   openThreadRootId: string | null,
 ) {
-  const channelId = activeChannel?.id ?? "none";
+  const channelId = activeChannel?.id ?? null;
   const rootId = openThreadRootId ?? "none";
   const queryClient = useQueryClient();
-  const queryKey = threadRepliesKey(channelId, rootId);
+  // Hold a group thread while its durable-history scope is unresolved — the
+  // scope-aware key also recomputes (and re-fetches) once it arrives. DMs are
+  // deterministic and never block.
+  const resolvedScope = useResolvedHistoryScope(channelId);
+  const isAwaitingGroupScope =
+    activeChannel !== null &&
+    activeChannel.channelType !== "forum" &&
+    activeChannel.channelType !== "dm" &&
+    resolvedScope === null;
+  const queryKey = threadRepliesKey(channelId ?? "none", rootId);
   return useQuery({
     queryKey,
     enabled:
       activeChannel !== null &&
       activeChannel.channelType !== "forum" &&
-      openThreadRootId !== null,
+      openThreadRootId !== null &&
+      !isAwaitingGroupScope,
     queryFn: async (): Promise<RelayEvent[]> => {
       if (!activeChannel || !openThreadRootId) return [];
       const cacheAtStart =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const idsAtStart = new Set(cacheAtStart.map((event) => event.id));
-      const replies: RelayEvent[] = [];
-      let cursor: ThreadCursor | null = null;
-      for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
-        const response = await getThreadReplies(
-          openThreadRootId,
-          activeChannel.id,
-          { limit: THREAD_PAGE_LIMIT, cursor },
-        );
-        replies.push(...response.events);
-        if (!response.nextCursor) {
-          const fetched = await withThreadAux(
-            activeChannel.id,
-            openThreadRootId,
-            replies,
-          );
-          const current =
-            queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-          const receivedInFlight = current.filter(
-            (event) => !idsAtStart.has(event.id),
-          );
-          return sortMessages([...fetched, ...receivedInFlight]);
-        }
-        cursor = response.nextCursor;
-      }
-      throw new Error(
-        `Thread ${openThreadRootId} exceeded the page safety limit.`,
+      const replies = await fetchNativeThreadReplies(
+        activeChannel,
+        openThreadRootId,
       );
+      const current = queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const receivedInFlight = current.filter(
+        (event) => !idsAtStart.has(event.id),
+      );
+      return sortMessages([...replies, ...receivedInFlight]);
     },
     staleTime: 0,
     gcTime: 60 * 60 * 1_000,
+    // Direct-fallback group delivery is committed to durable history without
+    // a matching `/ws` topic frame, so keep an open thread converged from the
+    // authoritative store as well as from live frames.
+    refetchInterval: NATIVE_THREAD_REFRESH_MS,
   });
 }

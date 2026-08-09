@@ -601,8 +601,16 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
         if i + 12 > bytes.len() {
             return Err(MediaError::InvalidImage);
         }
-        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
-        let kind: [u8; 4] = bytes[i + 4..i + 8].try_into().unwrap();
+        let len = u32::from_be_bytes(
+            bytes
+                .get(i..i + 4)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or(MediaError::InvalidImage)?,
+        ) as usize;
+        let kind: [u8; 4] = bytes
+            .get(i + 4..i + 8)
+            .and_then(|slice| slice.try_into().ok())
+            .ok_or(MediaError::InvalidImage)?;
         let end = i
             .checked_add(12)
             .and_then(|v| v.checked_add(len))
@@ -670,8 +678,16 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
             if i + 8 > payload.len() {
                 return Err(MediaError::InvalidImage);
             }
-            let kind: [u8; 4] = payload[i..i + 4].try_into().unwrap();
-            let len = u32::from_le_bytes(payload[i + 4..i + 8].try_into().unwrap()) as usize;
+            let kind: [u8; 4] = payload
+                .get(i..i + 4)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or(MediaError::InvalidImage)?;
+            let len = u32::from_le_bytes(
+                payload
+                    .get(i + 4..i + 8)
+                    .and_then(|slice| slice.try_into().ok())
+                    .ok_or(MediaError::InvalidImage)?,
+            ) as usize;
             let padded = len.checked_add(len & 1).ok_or(MediaError::InvalidImage)?;
             i = i
                 .checked_add(8)
@@ -694,7 +710,12 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
         return Err(MediaError::InvalidImage);
     }
-    let declared = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let declared = u32::from_le_bytes(
+        bytes
+            .get(4..8)
+            .and_then(|slice| slice.try_into().ok())
+            .ok_or(MediaError::InvalidImage)?,
+    ) as usize;
     if declared.checked_add(8) != Some(bytes.len()) {
         return Err(MediaError::MetadataForbidden);
     }
@@ -703,8 +724,16 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
         if i + 8 > bytes.len() {
             return Err(MediaError::InvalidImage);
         }
-        let kind: [u8; 4] = bytes[i..i + 4].try_into().unwrap();
-        let len = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
+        let kind: [u8; 4] = bytes
+            .get(i..i + 4)
+            .and_then(|slice| slice.try_into().ok())
+            .ok_or(MediaError::InvalidImage)?;
+        let len = u32::from_le_bytes(
+            bytes
+                .get(i + 4..i + 8)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or(MediaError::InvalidImage)?,
+        ) as usize;
         let payload_start = i + 8;
         let padded = len.checked_add(len & 1).ok_or(MediaError::InvalidImage)?;
         i = payload_start
@@ -882,8 +911,8 @@ fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
             let mut h = [0u8; 8];
             file.read_exact(&mut h)
                 .map_err(|_| MediaError::InvalidVideo)?;
-            let compact = u32::from_be_bytes(h[..4].try_into().unwrap()) as u64;
-            let kind: [u8; 4] = h[4..8].try_into().unwrap();
+            let compact = u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as u64;
+            let kind = [h[4], h[5], h[6], h[7]];
             let (size, header) = if compact == 1 {
                 let mut ext = [0u8; 8];
                 file.read_exact(&mut ext)

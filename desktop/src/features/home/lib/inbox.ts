@@ -23,7 +23,6 @@ export type InboxFilter =
   | "needs_action"
   | "activity"
   | "agent_activity"
-  | "reminders"
   | "drafts";
 
 export type InboxItem = {
@@ -152,10 +151,6 @@ function feedHeadline(item: FeedItem) {
       return "Job cancelled";
     case 43006:
       return "Job failed";
-    case 45001:
-      return "Forum post";
-    case 45003:
-      return "Forum reply";
     case 46010:
       return "Approval requested";
     default:
@@ -382,12 +377,12 @@ export function groupInboxItems(items: InboxItem[]): InboxGroup[] {
 
 export function buildInboxItems({
   channels,
-  currentPubkey,
+  currentAgentId,
   feed,
   profiles,
 }: {
   channels?: InboxChannel[];
-  currentPubkey?: string;
+  currentAgentId?: string;
   feed?: HomeFeedResponse;
   profiles?: UserProfileLookup;
 }): InboxItem[] {
@@ -457,7 +452,7 @@ export function buildInboxItems({
       ].sort((left, right) => categoryPriority(left) - categoryPriority(right));
       const senderLabel = resolveUserLabel({
         pubkey: item.pubkey,
-        currentPubkey,
+        currentAgentId,
         profiles,
         preferResolvedSelfLabel: true,
       });

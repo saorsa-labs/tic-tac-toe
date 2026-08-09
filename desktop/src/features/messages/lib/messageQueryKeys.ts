@@ -1,15 +1,38 @@
 import type { RelayEvent } from "@/shared/api/types";
+import { getResolvedHistoryScope } from "@/features/messages/lib/nativeHistoryScopeStore";
 
+/**
+ * The resolved durable-history scope participates in every history cache key so
+ * that resolving (null -> stable) or rotating (identity change) the scope
+ * produces a fresh cache partition: prior-scope/pending data can never be
+ * displayed after the scope changes, and an identity clear orphans the old
+ * partitions for GC. Group scopes resolve asynchronously via the live
+ * subscription; DM scopes are deterministic and stay `null` here (a stable
+ * partition for DMs).
+ */
 export function channelMessagesKey(channelId: string) {
-  return ["channel-messages", channelId] as const;
+  return [
+    "channel-messages",
+    channelId,
+    getResolvedHistoryScope(channelId),
+  ] as const;
 }
 
 export function channelWindowKey(channelId: string) {
-  return ["channel-window", channelId] as const;
+  return [
+    "channel-window",
+    channelId,
+    getResolvedHistoryScope(channelId),
+  ] as const;
 }
 
 export function threadRepliesKey(channelId: string, rootId: string) {
-  return ["thread-replies", channelId, rootId] as const;
+  return [
+    "thread-replies",
+    channelId,
+    rootId,
+    getResolvedHistoryScope(channelId),
+  ] as const;
 }
 
 export function dedupeMessagesById(messages: RelayEvent[]) {

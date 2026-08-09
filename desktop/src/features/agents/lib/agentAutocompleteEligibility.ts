@@ -12,16 +12,16 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 export function relayAgentIsSharedWithUser(
   agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   sharedChannelIds: ReadonlySet<string>,
-  currentPubkey?: string | null,
+  currentAgentId?: string | null,
 ) {
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
 
-  if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
+  if (agent.respondTo === "allowlist" && normalizedCurrentAgentId) {
     return agent.respondToAllowlist
       .map((pubkey) => normalizePubkey(pubkey))
-      .includes(normalizedCurrentPubkey);
+      .includes(normalizedCurrentAgentId);
   }
 
   return (
@@ -31,12 +31,12 @@ export function relayAgentIsSharedWithUser(
 }
 
 export function getMentionableAgentPubkeys({
-  currentPubkey,
+  currentAgentId,
   managedAgentPubkeys,
   relayAgents,
   sharedChannelIds,
 }: {
-  currentPubkey?: string | null;
+  currentAgentId?: string | null;
   managedAgentPubkeys: Iterable<string>;
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
@@ -46,7 +46,7 @@ export function getMentionableAgentPubkeys({
   );
 
   for (const agent of relayAgents ?? []) {
-    if (relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)) {
+    if (relayAgentIsSharedWithUser(agent, sharedChannelIds, currentAgentId)) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
   }
@@ -113,7 +113,7 @@ function normalizeLabel(label: string | null | undefined) {
 
 function agentIdentityKey<T extends AgentAutocompleteCandidate>(
   candidate: T,
-  currentPubkey: string | null | undefined,
+  currentAgentId: string | null | undefined,
   getLabel: (candidate: T) => string | null | undefined,
 ) {
   if (candidate.isAgent !== true) {
@@ -133,7 +133,7 @@ function agentIdentityKey<T extends AgentAutocompleteCandidate>(
     ? normalizePubkey(candidate.ownerPubkey)
     : null;
   if (ownerPubkey) {
-    if (currentPubkey && ownerPubkey === normalizePubkey(currentPubkey)) {
+    if (currentAgentId && ownerPubkey === normalizePubkey(currentAgentId)) {
       return `local:name:${label}`;
     }
     return `owner:${ownerPubkey}:name:${label}`;
@@ -144,15 +144,15 @@ function agentIdentityKey<T extends AgentAutocompleteCandidate>(
 
 function agentCandidateRank<T extends AgentAutocompleteCandidate>(
   candidate: T,
-  currentPubkey: string | null | undefined,
+  currentAgentId: string | null | undefined,
   preferredPubkeys: ReadonlySet<string>,
 ) {
   const pubkey = candidate.pubkey ? normalizePubkey(candidate.pubkey) : null;
   const ownerPubkey = candidate.ownerPubkey
     ? normalizePubkey(candidate.ownerPubkey)
     : null;
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
 
   return [
@@ -160,20 +160,20 @@ function agentCandidateRank<T extends AgentAutocompleteCandidate>(
     pubkey && preferredPubkeys.has(pubkey) ? 0 : 1,
     candidate.isManagedAgent === true ? 0 : 1,
     candidate.personaId ? 0 : 1,
-    ownerPubkey && ownerPubkey === normalizedCurrentPubkey ? 0 : 1,
+    ownerPubkey && ownerPubkey === normalizedCurrentAgentId ? 0 : 1,
   ];
 }
 
 function isPreferredAgentCandidate<T extends AgentAutocompleteCandidate>(
   next: T,
   current: T,
-  currentPubkey: string | null | undefined,
+  currentAgentId: string | null | undefined,
   preferredPubkeys: ReadonlySet<string>,
 ) {
-  const nextRank = agentCandidateRank(next, currentPubkey, preferredPubkeys);
+  const nextRank = agentCandidateRank(next, currentAgentId, preferredPubkeys);
   const currentRank = agentCandidateRank(
     current,
-    currentPubkey,
+    currentAgentId,
     preferredPubkeys,
   );
 
@@ -214,11 +214,11 @@ export function coalesceAgentAutocompleteCandidates<
 >(
   candidates: readonly T[],
   {
-    currentPubkey,
+    currentAgentId,
     getLabel,
     preferredPubkeys = new Set(),
   }: {
-    currentPubkey?: string | null;
+    currentAgentId?: string | null;
     getLabel: (candidate: T) => string | null | undefined;
     preferredPubkeys?: ReadonlySet<string>;
   },
@@ -227,7 +227,7 @@ export function coalesceAgentAutocompleteCandidates<
   const indexesByKey = new Map<string, number>();
 
   for (const candidate of candidates) {
-    const key = agentIdentityKey(candidate, currentPubkey, getLabel);
+    const key = agentIdentityKey(candidate, currentAgentId, getLabel);
     if (!key) {
       output.push(candidate);
       continue;
@@ -244,7 +244,7 @@ export function coalesceAgentAutocompleteCandidates<
       isPreferredAgentCandidate(
         candidate,
         output[currentIndex],
-        currentPubkey,
+        currentAgentId,
         preferredPubkeys,
       )
     ) {
