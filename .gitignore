@@ -3,3 +3,6 @@ target/
 desktop/dist/
 desktop/src-tauri/target/
 *.log
+/dist/
+/.pi/
+dhat-heap-*.json
