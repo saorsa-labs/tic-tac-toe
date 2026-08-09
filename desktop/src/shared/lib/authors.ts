@@ -1,5 +1,4 @@
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { verifyEvent } from "nostr-tools/pure";
 
 const PUBKEY_HEX_RE = /^[0-9a-f]{64}$/i;
 
@@ -41,13 +40,14 @@ type AuthorResolutionEvent = {
   sig: string;
 };
 
-function hasValidSignature(event: AuthorResolutionEvent) {
-  try {
-    return verifyEvent(event);
-  } catch {
-    return false;
-  }
-}
+/**
+ * Signature validity is enforced server-side: the Rust archive pipeline
+ * (`desktop/src-tauri/src/archive/pipeline.rs`) calls `event.verify_signature()`
+ * on every event at ingestion and drops invalid events before they reach the
+ * frontend. Events arriving here are therefore already signature-verified, so
+ * the attribution logic below trusts that precondition rather than re-verifying
+ * on the client.
+ */
 
 export function resolveEventAuthorPubkey(input: {
   event: AuthorResolutionEvent;
@@ -89,7 +89,7 @@ export function resolveEventAuthorPubkey(input: {
     }
   }
 
-  if (!attributedPubkey || !hasValidSignature(event)) {
+  if (!attributedPubkey) {
     return signerPubkey;
   }
 

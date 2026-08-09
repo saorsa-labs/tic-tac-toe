@@ -4,7 +4,7 @@ import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
 import { DEFAULT_EPHEMERAL_TTL_SECONDS } from "@/features/channels/lib/ephemeralChannel";
 import type { ChannelTemplate, ChannelVisibility } from "@/shared/api/types";
 
-export type CreateChannelKind = "stream" | "forum";
+export type CreateChannelKind = "stream";
 
 export type CreateChannelInput = {
   name: string;
@@ -85,7 +85,7 @@ export function useCreateChannelForm({
   const templatesQuery = useChannelTemplatesQuery();
   const templates = templatesQuery.data ?? [];
 
-  const kindLabel = channelKind === "forum" ? "forum" : "channel";
+  const kindLabel = "channel";
   React.useEffect(() => {
     if (!active) return;
 
@@ -174,7 +174,6 @@ export function useCreateChannelForm({
     [
       description,
       ephemeral,
-      kindLabel,
       name,
       onCreate,
       onCreated,

@@ -36,7 +36,7 @@ export type ChannelPaneProps = {
   botTypingEntries: TypingIndicatorEntry[];
   channelFind: ReturnType<typeof useChannelFind>;
   channelManagementOpen?: boolean;
-  currentPubkey?: string;
+  currentAgentId?: string;
   editTarget?: {
     author: string;
     body: string;
@@ -49,7 +49,6 @@ export type ChannelPaneProps = {
   /** True when the loaded window provably starts at the channel's beginning. */
   historyExhausted?: boolean;
   isFetchingOlder?: boolean;
-  isJoining?: boolean;
   isSinglePanelView?: boolean;
   isSending: boolean;
   isTimelineLoading: boolean;
@@ -91,7 +90,6 @@ export type ChannelPaneProps = {
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;
-  onJoinChannel?: () => Promise<void>;
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenMembers?: () => void;

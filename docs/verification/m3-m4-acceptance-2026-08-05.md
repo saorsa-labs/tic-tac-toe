@@ -2,9 +2,28 @@
 
 ## Result
 
-The native desktop release gates pass on the current tree. Verification found and fixed four gate defects: stale identity assertions after the native messaging cutover, five unformatted native adapter files, a forbidden legacy identity token in a native-membership comment, and an E2E mock that did not expose native group/Symphony commands.
+The static no-relay gate (`scripts/no-relay-gate.mjs`) was hardened from a
+shallow root-file scan to a full production-frontier scan (every frontend
+module under `desktop/src` and every Tauri source under
+`desktop/src-tauri/src`). It is intentionally NOT false-green: on the current
+tree it reports the remaining M3 cutover work — 57 transport-reachability
+violations (relay `query_relay`/`submit_event` call sites in registered Rust
+commands, `signRelayEvent`/`createAuthEvent`/`getRelayWsUrl` call sites, the
+production-reachable `readOnlyRelayClient` websocket transport, and two
+`nostr-tools` imports) plus 41 migration-debt items (`relayClient` stub
+imports and removed relay-backed command invokes). Earlier verification fixed
+four gate defects: stale identity assertions after the native messaging
+cutover, five unformatted native adapter files, a forbidden legacy identity
+token in a native-membership comment, and an E2E mock that did not expose
+native group/Symphony commands.
 
-The Playwright `smoke` project now gates the M3/M4 transport and product slice rather than the imported relay-dialect suite: native workspace boot proves no relay apply/WebSocket command is issued, and Company exercises template selection, instantiation, approval, and cancellation.
+The Playwright `smoke` project gates the M3/M4 transport and product slice as
+a MOCK-IPC boundary regression check: it installs the in-page mock bridge (no
+x0xd daemon is booted) and asserts the booted production paths never invoke a
+relay/Nostr command (URL resolution, signing, websocket, relay-backed
+reads/writes). It proves production-path cleanliness, NOT live-daemon native
+behaviour; Company additionally exercises template selection, instantiation,
+approval, and cancellation.
 
 ## Desktop evidence
 
@@ -16,8 +35,12 @@ The Playwright `smoke` project now gates the M3/M4 transport and product slice r
 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml --all-features symphony -- --nocapture` | PASS — 28/28 |
 | `cd desktop && corepack pnpm test` | PASS — 3,564 passed, 0 failed, 0 skipped |
 | `cd desktop && corepack pnpm lint` | PASS — 1,635 files |
-| `cd desktop && corepack pnpm check` | PASS — Biome, file-size, px-text, pubkey-truncation, Nostr-identity, and no-relay gates |
-| `just desktop-smoke` | PASS — 2/2 native M3/M4 Playwright scenarios |
+| `cd desktop && corepack pnpm check` | PARTIAL — Biome, file-size, px-text, pubkey-truncation, and Nostr-identity gates pass; the **no-relay gate now FAILS** (intentionally) with 57 transport-reachability + 41 migration-debt violations on the hardened full-frontier scan — see Result |
+| `just desktop-smoke` | MOCK-IPC — 2/2 M3/M4 Playwright scenarios pass under the in-page mock bridge (no x0xd daemon booted); proves production-path cleanliness, not live-daemon native behaviour |
+
+> The typecheck / unit-test / lint / cargo rows above record the prior
+> verification run and are NOT re-verified here against the in-flight M3
+> cutover edits; only the no-relay gate and smoke status are current.
 
 Before the native smoke definition was corrected, the imported Buzz relay-dialect selection produced 345 passes and 324 failures. Those specs remain in the repository for feature-by-feature migration, but are deliberately outside the M3/M4 release smoke gate; treating relay WebSocket behavior as native acceptance would be false evidence.
 

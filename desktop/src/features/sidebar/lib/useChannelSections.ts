@@ -1,14 +1,11 @@
 import * as React from "react";
 
-import { relayClient } from "@/shared/api/relayClient";
 import {
   DEFAULT_STORE,
   readChannelSectionsStore,
   storageKey,
   writeChannelSectionsStore,
 } from "./channelSectionsStorage";
-import { ChannelSectionSyncManager } from "./channelSectionsSync";
-import type { RemoteSections } from "./channelSectionsSync";
 import { swapSectionOrder } from "./channelSectionsHelpers";
 
 export type { ChannelSection } from "./channelSectionsStorage";
@@ -18,6 +15,12 @@ import type {
   ChannelSectionStore,
 } from "./channelSectionsStorage";
 
+/**
+ * Persistent per-community channel sections (custom grouping in the sidebar),
+ * scoped by pubkey + relay and mirrored across tabs/windows via the storage
+ * event. The packaged app has no relay transport, so sections are local-only
+ * — there is no cross-device sync.
+ */
 export function useChannelSections(
   pubkey: string | undefined,
   relayUrl?: string,
@@ -40,27 +43,16 @@ export function useChannelSections(
     return readChannelSectionsStore(pubkey, relayUrl);
   });
 
-  const managerRef = React.useRef<ChannelSectionSyncManager | null>(null);
-  const lastAppliedRemoteTs = React.useRef(0);
-  const lastAppliedEventId = React.useRef("");
-
+  // Reload from storage when the active identity/community changes.
   React.useEffect(() => {
     if (!pubkey) {
       setStore(DEFAULT_STORE);
-      lastAppliedRemoteTs.current = 0;
-      lastAppliedEventId.current = "";
       return;
     }
     setStore(readChannelSectionsStore(pubkey, relayUrl));
-    lastAppliedRemoteTs.current = 0;
-    lastAppliedEventId.current = "";
-    managerRef.current = new ChannelSectionSyncManager(pubkey);
-    return () => {
-      managerRef.current?.destroy();
-      managerRef.current = null;
-    };
   }, [pubkey, relayUrl]);
 
+  // Mirror changes made in other tabs/windows via the storage event.
   React.useEffect(() => {
     if (!pubkey) {
       return;
@@ -77,91 +69,6 @@ export function useChannelSections(
       window.removeEventListener("storage", handler);
     };
   }, [pubkey, relayUrl]);
-
-  const applyRemote = React.useCallback(
-    (
-      remote: RemoteSections,
-    ): ((prev: ChannelSectionStore) => ChannelSectionStore) => {
-      return (prev) => {
-        if (!pubkey) return prev;
-        if (remote.createdAt < lastAppliedRemoteTs.current) return prev;
-        if (
-          remote.createdAt === lastAppliedRemoteTs.current &&
-          remote.eventId <= lastAppliedEventId.current
-        )
-          return prev;
-        lastAppliedRemoteTs.current = remote.createdAt;
-        lastAppliedEventId.current = remote.eventId;
-        managerRef.current?.cancelPendingPublish();
-        if (!writeChannelSectionsStore(pubkey, remote.store, relayUrl))
-          return prev;
-        return remote.store;
-      };
-    },
-    [pubkey, relayUrl],
-  );
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let cancelled = false;
-    void managerRef.current?.fetchRemoteSections().then((remote) => {
-      if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelSectionsStore(pubkey, relayUrl);
-        if (local.sections.length > 0) {
-          managerRef.current?.publishSections(local);
-        }
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [pubkey, relayUrl, applyRemote]);
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let unsub: (() => Promise<void>) | null = null;
-    let cancelled = false;
-    void managerRef.current
-      ?.subscribeToSections((remote) => {
-        if (cancelled) return;
-        setStore(applyRemote(remote));
-      })
-      .then((dispose) => {
-        if (cancelled) {
-          void dispose();
-        } else {
-          unsub = dispose;
-        }
-      });
-    return () => {
-      cancelled = true;
-      if (unsub) void unsub();
-    };
-  }, [pubkey, applyRemote]);
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let cancelled = false;
-    const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteSections().then((remote) => {
-        if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
-        }
-        const pending = managerRef.current?.getPendingStore();
-        if (pending) {
-          managerRef.current?.publishSections(pending);
-        }
-      });
-    });
-    return () => {
-      cancelled = true;
-      unsub();
-    };
-  }, [pubkey, applyRemote]);
 
   const sections = React.useMemo<ChannelSection[]>(
     () => store.sections.slice().sort((a, b) => a.order - b.order),
@@ -188,7 +95,6 @@ export function useChannelSections(
           sections: [...current.sections, section],
         };
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return current;
-        managerRef.current?.publishSections(next);
         return next;
       });
       return section;
@@ -218,7 +124,6 @@ export function useChannelSections(
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }
-        managerRef.current?.publishSections(next);
         return next;
       });
     },
@@ -245,7 +150,6 @@ export function useChannelSections(
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }
-        managerRef.current?.publishSections(next);
         return next;
       });
     },
@@ -259,7 +163,6 @@ export function useChannelSections(
         const next = swapSectionOrder(prev, sectionId, "up");
         if (!next || !writeChannelSectionsStore(pubkey, next, relayUrl))
           return prev;
-        managerRef.current?.publishSections(next);
         return next;
       });
     },
@@ -273,7 +176,6 @@ export function useChannelSections(
         const next = swapSectionOrder(prev, sectionId, "down");
         if (!next || !writeChannelSectionsStore(pubkey, next, relayUrl))
           return prev;
-        managerRef.current?.publishSections(next);
         return next;
       });
     },
@@ -290,7 +192,6 @@ export function useChannelSections(
         });
         const next: ChannelSectionStore = { ...prev, sections };
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return prev;
-        managerRef.current?.publishSections(next);
         return next;
       });
     },
@@ -310,7 +211,6 @@ export function useChannelSections(
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }
-        managerRef.current?.publishSections(next);
         return next;
       });
     },
@@ -329,7 +229,6 @@ export function useChannelSections(
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }
-        managerRef.current?.publishSections(next);
         return next;
       });
     },

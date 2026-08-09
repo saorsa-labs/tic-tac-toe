@@ -25,9 +25,6 @@ import { useMachineOnboardingState } from "@/features/onboarding/machineOnboardi
 import {
   type FirstCommunityPage,
   useCommunityOnboarding,
-  markCommunityOnboardingComplete,
-  resolveProfileCheckAction,
-  isTransactionStillConnecting,
 } from "@/features/onboarding/communityOnboarding";
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
 import {
@@ -35,7 +32,6 @@ import {
   type MachineOnboardingPage,
 } from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
-import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
@@ -47,21 +43,11 @@ import {
   markPendingCommunityRestore,
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
-import {
-  onAddCommunityPrefillAvailable,
-  requestAddCommunityPrefill,
-} from "@/features/communities/addCommunityPrefill";
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
-import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
-import { getProfile } from "@/shared/api/tauriProfiles";
-import {
-  type AddCommunityDeepLinkPayload,
-  listenForDeepLinks,
-} from "@/shared/deep-link";
 import { cn } from "@/shared/lib/cn";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
@@ -208,8 +194,6 @@ function CommunitySwitchGate() {
 function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
-  useEffect(() => setAvatarProfileSyncQueryClient(queryClient), [queryClient]);
-
   useEffect(() => {
     const e2eWindow = window as Window & {
       __BUZZ_E2E__?: unknown;
@@ -259,7 +243,7 @@ function AppReady({
         actions={onboarding.flow.actions}
         identityLost={onboarding.identityLost}
         initialProfile={onboarding.flow.initialProfile}
-        key={onboarding.currentPubkey ?? "anonymous"}
+        key={onboarding.currentAgentId ?? "anonymous"}
       />
     );
   }
@@ -276,11 +260,11 @@ function AppReady({
 }
 
 function CommunityApp({
-  currentPubkey: _currentPubkey,
+  currentAgentId: _currentAgentId,
   onBackToMachineConfig,
   sharedIdentity,
 }: {
-  currentPubkey: string | null;
+  currentAgentId: string | null;
   onBackToMachineConfig: () => void;
   sharedIdentity: boolean;
 }) {
@@ -296,14 +280,6 @@ function CommunityApp({
   } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const connectingTransactionRef = useRef<string | null>(null);
-  // Tracks the ID of the profile-check request that has been launched for the
-  // current connecting transaction. Prevents the effect from launching a
-  // second request if it re-runs while a fetch is in flight.
-  const profileCheckTransactionRef = useRef<string | null>(null);
-  // Always reflects the live transaction object so async callbacks can perform
-  // an atomic check of both ID and stage before mutating state.
-  const transactionRef = useRef(communityOnboarding.transaction);
-  transactionRef.current = communityOnboarding.transaction;
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
@@ -370,24 +346,24 @@ function CommunityApp({
       return;
     }
     const previousCommunityId = activeCommunity?.id;
-    const relayAlreadyExists = communities.some(
-      (community) => community.relayUrl === transaction.relayUrl,
+    if (!transaction.groupId) {
+      communityOnboarding.update({ error: "Native group id is missing." });
+      return;
+    }
+    const groupAlreadyExists = communities.some(
+      (community) => community.groupId === transaction.groupId,
     );
     const id = addCommunity({
-      id: transaction.groupId ?? crypto.randomUUID(),
+      id: transaction.groupId,
       groupId: transaction.groupId,
       name: transaction.communityName,
-      relayUrl: transaction.groupId
-        ? `x0x://group/${encodeURIComponent(transaction.groupId)}`
-        : transaction.relayUrl,
-      token: transaction.token,
       reposDir: transaction.reposDir,
       addedAt: new Date().toISOString(),
     });
     communityOnboarding.update({
       communityId: id,
       previousCommunityId,
-      addedCommunity: !relayAlreadyExists,
+      addedCommunity: !groupAlreadyExists,
       error: undefined,
     });
     await transitionCommunity(id);
@@ -437,7 +413,6 @@ function CommunityApp({
   useEffect(() => {
     if (transaction?.stage !== "connecting") {
       connectingTransactionRef.current = null;
-      profileCheckTransactionRef.current = null;
     }
   }, [transaction?.stage]);
   const targetIsReady =
@@ -446,47 +421,11 @@ function CommunityApp({
     community.appliedKey === communityKey;
   useEffect(() => {
     if (transaction?.stage !== "connecting" || !targetIsReady) return;
-    const transactionId = transaction.id;
-    const relayUrl = transaction.relayUrl;
-    if (profileCheckTransactionRef.current === transactionId) return;
-    profileCheckTransactionRef.current = transactionId;
-
-    if (transaction.groupId) {
-      communityOnboarding.update(
-        { stage: "profile", error: undefined },
-        transactionId,
-      );
-      return;
-    }
-
-    // resolveProfileCheckAction resolves exactly once (Promise.race + timer
-    // cleared on settle), so no settled flag is needed here.
-    void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
-      // Atomic staleness guard via isTransactionStillConnecting: the
-      // transaction must still be the same one that launched this request
-      // AND still be in connecting. Covers cancel+replacement (B's ID !== A's)
-      // and cancel-without-replacement (transactionRef.current is null).
-      if (!isTransactionStillConnecting(transactionRef.current, transactionId))
-        return;
-
-      if (result.action === "skip") {
-        markCommunityOnboardingComplete(result.profile.pubkey, relayUrl);
-        communityOnboarding.clear();
-      } else {
-        communityOnboarding.update(
-          { stage: "profile", error: undefined },
-          transactionId,
-        );
-      }
-    });
-  }, [
-    communityOnboarding,
-    targetIsReady,
-    transaction?.stage,
-    transaction?.id,
-    transaction?.relayUrl,
-    transaction?.groupId,
-  ]);
+    communityOnboarding.update(
+      { stage: "profile", error: undefined },
+      transaction.id,
+    );
+  }, [communityOnboarding, targetIsReady, transaction?.stage, transaction?.id]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the
   // onboarding screen covers it, then fades once Welcome reports ready.
@@ -592,12 +531,8 @@ function CommunityApp({
 }
 
 function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
-  const { activeCommunity } = useCommunities();
-  const communityOnboarding = useCommunityOnboarding();
   const machine = useMachineOnboardingState({
-    activeCommunityPubkey: activeCommunity
-      ? (activeCommunity.pubkey ?? null)
-      : undefined,
+    activeCommunityPubkey: undefined,
     isSharedIdentity: sharedIdentity,
   });
   const [machineInitialPage, setMachineInitialPage] =
@@ -616,34 +551,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     [machine.complete],
   );
 
-  const openAddCommunity = useCallback(
-    (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
-      activeCommunity
-        ? requestAddCommunityPrefill(payload)
-        : communityOnboarding.start({
-            source: "add-community",
-            relayUrl: payload.relayUrl,
-            communityName: payload.name,
-          }),
-    [activeCommunity, communityOnboarding.start],
-  );
-
-  // Deep links are captured here — above the machine-onboarding gate — not in
-  // CommunityApp. The Rust side queues them; draining into the persisted
-  // community-onboarding transaction immediately means an invite opened on a
-  // fresh install is acknowledged on screen while the identity steps are
-  // still pending, and survives a relaunch in between.
-  useEffect(() => {
-    const unlisten = listenForDeepLinks({
-      startCommunityOnboarding: communityOnboarding.start,
-      openAddCommunity,
-      onAddCommunityAvailable: onAddCommunityPrefillAvailable,
-    });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
-  }, [communityOnboarding.start, openAddCommunity]);
-
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;
   if (machine.stage === "relaunch-required") return <RelaunchRequiredScreen />;
@@ -651,32 +558,20 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   if (machine.stage === "ready") {
     return (
       <CommunityApp
-        currentPubkey={machine.currentPubkey}
+        currentAgentId={machine.currentAgentId}
         onBackToMachineConfig={reopenMachineConfig}
         sharedIdentity={sharedIdentity}
       />
     );
   }
 
-  // A community deep link that arrived before machine onboarding finished is
-  // persisted immediately and acknowledged here. Invite claiming waits until
-  // setup completes so it is signed only by the user's final identity.
-  const transaction = communityOnboarding.transaction;
-  const isDeepLink =
-    transaction?.source === "deep-link-join" ||
-    transaction?.source === "deep-link-connect";
-  const shouldAcknowledgeDeepLink = isDeepLink && !transaction.acknowledged;
-
   return (
-    <>
-      <MachineOnboardingFlow
-        complete={completeMachineOnboarding}
-        identityLost={machine.identityLost}
-        initialPage={machineInitialPage}
-        queryClient={machine.queryClient}
-      />
-      {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}
-    </>
+    <MachineOnboardingFlow
+      complete={completeMachineOnboarding}
+      identityLost={machine.identityLost}
+      initialPage={machineInitialPage}
+      queryClient={machine.queryClient}
+    />
   );
 }
 

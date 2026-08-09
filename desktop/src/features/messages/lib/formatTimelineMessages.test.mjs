@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import {
   collectMessageAuthorPubkeys,
@@ -24,8 +23,7 @@ const PUBKEY_A =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PUBKEY_B =
   "2222222222222222222222222222222222222222222222222222222222222222";
-const RELAY_SECRET = new Uint8Array(32).fill(3);
-const RELAY_PUBKEY = getPublicKey(RELAY_SECRET);
+const RELAY_PUBKEY = "33".repeat(32);
 const CHANNEL_ID = "36411e44-0e2d-4cfe-bd6e-567eb169db9f";
 
 function streamMessage(overrides = {}) {
@@ -238,18 +236,13 @@ test("user-signed actor tag does not affect timeline identity or profile loading
 });
 
 test("relay-signed actor tag resolves the delegated timeline author", () => {
-  const event = finalizeEvent(
-    {
-      kind: 9,
-      created_at: 1_700_000_000,
-      content: "hello world",
-      tags: [
-        ["h", CHANNEL_ID],
-        ["actor", PUBKEY_B],
-      ],
-    },
-    RELAY_SECRET,
-  );
+  const event = streamMessage({
+    pubkey: RELAY_PUBKEY,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["actor", PUBKEY_B],
+    ],
+  });
   const profiles = {
     [PUBKEY_B]: {
       displayName: "Delegated user",

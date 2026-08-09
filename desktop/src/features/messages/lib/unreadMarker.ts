@@ -30,14 +30,14 @@ const EMPTY_MARKER: ChannelUnreadMarker = {
  * @param suppressed When true, the channel was manually marked unread this
  *   session; there is no meaningful in-timeline boundary, so no marker is
  *   produced regardless of the frontier.
- * @param currentPubkey When provided, messages authored by this pubkey are
+ * @param currentAgentId When provided, messages authored by this pubkey are
  *   never counted as unread (the user knows about their own posts).
  */
 export function computeChannelUnreadMarker(
   messages: TimelineMessage[],
   frontierSeconds: number | null,
   suppressed = false,
-  currentPubkey?: string,
+  currentAgentId?: string,
 ): ChannelUnreadMarker {
   if (suppressed) {
     return EMPTY_MARKER;
@@ -45,7 +45,7 @@ export function computeChannelUnreadMarker(
 
   // Normalize once: signer-emitted and identity pubkeys are both lowercase hex
   // today, but a case mismatch would otherwise miscount a self-post as unread.
-  const normalizedPubkey = currentPubkey?.toLowerCase();
+  const normalizedPubkey = currentAgentId?.toLowerCase();
 
   let firstUnreadMessageId: string | null = null;
   let unreadCount = 0;
@@ -102,7 +102,7 @@ const EMPTY_THREAD_MARKER: ThreadUnreadMarker = {
  *   marker means the reply was never read, so it counts as unread. Folding the
  *   channel term into each marker happens upstream in the resolver, never
  *   reply→reply, so reading one reply never clears another.
- * @param currentPubkey When provided, replies authored by this pubkey are
+ * @param currentAgentId When provided, replies authored by this pubkey are
  *   never counted as unread (the user knows about their own posts).
  * @param isForcedUnread Session-local OR-overlay (LP4 v3). When it returns
  *   true for a reply, the reply counts as unread regardless of its marker —
@@ -113,11 +113,11 @@ const EMPTY_THREAD_MARKER: ThreadUnreadMarker = {
 export function computeThreadUnreadMarker(
   replies: Pick<TimelineMessage, "id" | "createdAt" | "pubkey">[],
   getReadAt: (messageId: string) => number | null,
-  currentPubkey?: string,
+  currentAgentId?: string,
   isForcedUnread: (messageId: string) => boolean = () => false,
 ): ThreadUnreadMarker {
   // Normalize once: see computeChannelUnreadMarker for the case-mismatch guard.
-  const normalizedPubkey = currentPubkey?.toLowerCase();
+  const normalizedPubkey = currentAgentId?.toLowerCase();
 
   let firstUnreadReplyId: string | null = null;
   let unreadCount = 0;

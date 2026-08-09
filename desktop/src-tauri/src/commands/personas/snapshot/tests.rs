@@ -24,9 +24,6 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         name: slug.to_string(),
         display_name: None,
         persona_id: None,
-        private_key_nsec: String::new(),
-        auth_tag: None,
-        relay_url: String::new(),
         avatar_url: None,
         acp_command: String::new(),
         agent_command: String::new(),
@@ -69,7 +66,6 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
-        relay_mesh: None,
     }
 }
 
@@ -760,25 +756,9 @@ fn import_out_of_range_parallelism_is_rejected() {
 
 // ── Import: identity-never-travels ───────────────────────────────────────
 
-/// Importing the same snapshot bytes twice must yield two distinct pubkeys.
-/// This verifies Keys::generate() is called fresh each import (not mocked
-/// in unit tests, but the property is that two calls never collide).
-#[test]
-fn import_twice_produces_distinct_pubkeys() {
-    let key1 = nostr::Keys::generate();
-    let key2 = nostr::Keys::generate();
-    assert_ne!(
-        key1.public_key().to_hex(),
-        key2.public_key().to_hex(),
-        "two fresh keypairs must never share a pubkey"
-    );
-}
-
 /// No source identity or machine-local field from the snapshot ends up in
-/// the new agent record. Verified by checking that:
-///   - the new pubkey is not a string present in the snapshot JSON
-///   - private_key_nsec is not in the snapshot JSON
-///   - relay_url, env_vars, auth_tag are not carried from the snapshot
+/// the new agent record. The snapshot format omits native child identity,
+/// local daemon paths, provider environment, and transport settings.
 #[test]
 fn import_source_identity_fields_never_consumed() {
     use crate::managed_agents::agent_snapshot::encode_snapshot_json;
@@ -811,22 +791,6 @@ fn import_source_identity_fields_never_consumed() {
         !json_str.contains("acp_command"),
         "snapshot must not contain machine-local harness command"
     );
-}
-
-// ── Import: memory slug semantics ─────────────────────────────────────────
-
-/// The "core" slug maps to Body::Core; all other slugs map to Body::Memory.
-/// Verified by the sentinel slug value.
-#[test]
-fn import_core_slug_maps_to_core_body() {
-    let slug = buzz_core_pkg::engram::CORE_SLUG;
-    assert_eq!(slug, "core", "CORE_SLUG must equal 'core'");
-    // core slug → Body::Core; anything else → Body::Memory
-    let is_core = slug == buzz_core_pkg::engram::CORE_SLUG;
-    assert!(is_core, "slug 'core' must map to Body::Core");
-    let mem_slug = "mem/research";
-    let is_mem = mem_slug != buzz_core_pkg::engram::CORE_SLUG;
-    assert!(is_mem, "slug 'mem/*' must map to Body::Memory");
 }
 
 // ── Import: partial-failure boundary ─────────────────────────────────────

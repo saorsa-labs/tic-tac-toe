@@ -14,12 +14,12 @@ import {
 
 export function EditRespondToDialog({
   agent,
-  currentPubkey,
+  currentAgentId,
   onOpenChange,
   open,
 }: {
   agent: ManagedAgent | null;
-  currentPubkey?: string;
+  currentAgentId?: string;
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
@@ -65,7 +65,7 @@ export function EditRespondToDialog({
           mode={respondTo}
           onAllowlistChange={setRespondToAllowlist}
           onModeChange={setRespondTo}
-          ownerPubkey={currentPubkey}
+          ownerPubkey={currentAgentId}
         />
         {updateMutation.error instanceof Error ? (
           <p className="text-sm text-destructive">

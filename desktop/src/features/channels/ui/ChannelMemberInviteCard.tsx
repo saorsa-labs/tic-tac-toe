@@ -2,7 +2,6 @@ import { Search, UserPlus, X } from "lucide-react";
 import * as React from "react";
 
 import { truncatePubkey } from "@/shared/lib/pubkey";
-import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type {
@@ -210,7 +209,6 @@ export function ChannelMemberInviteCard({
                   <span className="font-medium">
                     {formatSearchUserName(invitee)}
                   </span>
-                  <PubKey pubkey={invitee.pubkey} variant="full" />
                 </div>
               ))}
             </div>

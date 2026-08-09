@@ -1,35 +1,49 @@
 import * as React from "react";
 
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { ChannelScreen } from "@/features/channels/ui/ChannelScreen";
 import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { fetchNativeMessagesById } from "@/features/messages/lib/nativeMessaging";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { getEventById } from "@/shared/api/tauri";
-import type { RelayEvent } from "@/shared/api/types";
+import type { Channel, RelayEvent } from "@/shared/api/types";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
+import { useResolvedHistoryScope } from "@/features/messages/lib/useResolvedHistoryScope";
 
 type ChannelRouteScreenProps = {
   autoSendDraftKey: string | null;
   channelId: string;
-  selectedPostId: string | null;
   targetMessageId: string | null;
-  targetReplyId: string | null;
   targetThreadRootId: string | null;
 };
 
 const MAX_ROUTE_ANCESTOR_HOPS = 50;
 
-async function fetchRouteEvent(eventId: string): Promise<RelayEvent | null> {
+async function resolveNativeRouteEvent(
+  channel: Channel | null,
+  eventId: string,
+): Promise<RelayEvent | null> {
+  if (!channel) {
+    return null;
+  }
   try {
-    return await getEventById(eventId);
+    // Native messages are keyed by BLAKE3 msgId, not a Nostr event id, so the
+    // relay get_event lookup cannot resolve them. Resolve via the scoped native
+    // history surface instead (id match). fetchNativeMessagesById returns as
+    // soon as the id is found, so a recent target is not a full-history scan;
+    // a native get-by-msgId endpoint would remove the paging entirely.
+    const events = await fetchNativeMessagesById(channel, new Set([eventId]));
+    return (
+      events.find(
+        (event) => event.id.toLowerCase() === eventId.toLowerCase(),
+      ) ?? null
+    );
   } catch (error) {
-    console.error("Failed to load route event", eventId, error);
+    console.error("Failed to load native route event", eventId, error);
     return null;
   }
 }
@@ -43,6 +57,7 @@ function getReplyParentId(event: RelayEvent): string | null {
 }
 
 async function fetchRouteTargetEvents(
+  channel: Channel | null,
   eventIds: string[],
   targetMessageId: string | null,
   targetThreadRootId: string | null,
@@ -55,7 +70,9 @@ async function fetchRouteTargetEvents(
   };
 
   const uniqueEventIds = [...new Set(eventIds)];
-  const initialEvents = await Promise.all(uniqueEventIds.map(fetchRouteEvent));
+  const initialEvents = await Promise.all(
+    uniqueEventIds.map((id) => resolveNativeRouteEvent(channel, id)),
+  );
   for (const event of initialEvents) {
     addEvent(event);
   }
@@ -70,7 +87,7 @@ async function fetchRouteTargetEvents(
   const targetThreadRef = getThreadReference(targetEvent.tags);
   const threadRootId = targetThreadRootId ?? targetThreadRef.rootId ?? null;
   if (threadRootId && !eventsById.has(threadRootId)) {
-    addEvent(await fetchRouteEvent(threadRootId));
+    addEvent(await resolveNativeRouteEvent(channel, threadRootId));
   }
 
   let parentId = getReplyParentId(targetEvent);
@@ -81,7 +98,8 @@ async function fetchRouteTargetEvents(
     guard < MAX_ROUTE_ANCESTOR_HOPS
   ) {
     const parentEvent =
-      eventsById.get(parentId) ?? (await fetchRouteEvent(parentId));
+      eventsById.get(parentId) ??
+      (await resolveNativeRouteEvent(channel, parentId));
     if (!parentEvent) {
       break;
     }
@@ -97,18 +115,24 @@ async function fetchRouteTargetEvents(
 export function ChannelRouteScreen({
   autoSendDraftKey,
   channelId,
-  selectedPostId,
   targetMessageId,
-  targetReplyId,
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
-  const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const channels = channelsQuery.data ?? [];
   const activeChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
+  // Hold route/target resolution until the group's durable-history scope is
+  // resolved so the deep-linked message is fetched from the correct (stable)
+  // scope, not the transient REST id; re-evaluates on scope arrival.
+  const resolvedRouteScope = useResolvedHistoryScope(channelId);
+  const isAwaitingGroupScope =
+    activeChannel !== null &&
+    activeChannel.channelType !== "forum" &&
+    activeChannel.channelType !== "dm" &&
+    resolvedRouteScope === null;
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
@@ -116,22 +140,18 @@ export function ChannelRouteScreen({
     return cachedTarget ? [cachedTarget] : [];
   });
 
-  // Reset spliced target events when the channel context changes (channel
-  // switch or entering/leaving a forum post). Tied to channel identity rather
-  // than the route target so clearing the `messageId` param mid-channel keeps
-  // the deep-linked row in view. Seeded with the mount key so the initial
-  // cache-seeded events survive first commit; only a genuine channel change
-  // clears them. Declared before the fetch effect so a channel switch clears
-  // stale events before the new target is fetched.
-  const previousResetKeyRef = React.useRef<string>(
-    `${channelId}::${selectedPostId ?? ""}`,
-  );
+  // Reset spliced target events when the channel context changes. Tied to
+  // channel identity rather than the route target so clearing the `messageId`
+  // param mid-channel keeps the deep-linked row in view. Seeded with the mount
+  // key so the initial cache-seeded events survive first commit; only a
+  // genuine channel change clears them. Declared before the fetch effect so a
+  // channel switch clears stale events before the new target is fetched.
+  const previousChannelIdRef = React.useRef<string>(channelId);
   React.useEffect(() => {
-    const resetKey = `${channelId}::${selectedPostId ?? ""}`;
-    if (previousResetKeyRef.current === resetKey) return;
-    previousResetKeyRef.current = resetKey;
+    if (previousChannelIdRef.current === channelId) return;
+    previousChannelIdRef.current = channelId;
     setTargetMessageEvents([]);
-  }, [channelId, selectedPostId]);
+  }, [channelId]);
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -140,9 +160,16 @@ export function ChannelRouteScreen({
     // cleared (e.g. `onTargetReached` clears the `messageId` URL param once the
     // row is centered). In a channel whose feed doesn't already contain the
     // deep-linked message, the spliced event is the only copy — dropping it on
-    // param-clear blanks the timeline. Resetting on channel / forum-post change
-    // is handled by the effect below; here we only fetch when there's a target.
-    if ((!targetMessageId && !targetThreadRootId) || selectedPostId) {
+    // param-clear blanks the timeline. Here we only fetch when there's a target.
+    if (!targetMessageId && !targetThreadRootId) {
+      return () => {
+        isCancelled = true;
+      };
+    }
+
+    // Hold target resolution while the group scope is unresolved; retry when it
+    // arrives (isAwaitingGroupScope flips false on scope resolution).
+    if (isAwaitingGroupScope) {
       return () => {
         isCancelled = true;
       };
@@ -165,6 +192,7 @@ export function ChannelRouteScreen({
     ].filter((eventId): eventId is string => eventId !== null);
 
     void fetchRouteTargetEvents(
+      activeChannel,
       eventIds,
       targetMessageId,
       targetThreadRootId,
@@ -183,15 +211,15 @@ export function ChannelRouteScreen({
     return () => {
       isCancelled = true;
     };
-  }, [selectedPostId, targetMessageId, targetThreadRootId]);
+  }, [
+    activeChannel,
+    targetMessageId,
+    targetThreadRootId,
+    isAwaitingGroupScope,
+  ]);
 
   if (channelsQuery.isPending && !activeChannel) {
-    return (
-      <ViewLoadingFallback
-        includeHeader
-        kind={selectedPostId ? "forum" : "channel"}
-      />
-    );
+    return <ViewLoadingFallback includeHeader kind="channel" />;
   }
 
   return (
@@ -200,14 +228,6 @@ export function ChannelRouteScreen({
       autoSendDraftKey={autoSendDraftKey}
       currentIdentity={identityQuery.data}
       currentProfile={profileQuery.data}
-      onCloseForumPost={() => {
-        void closeForumPost(channelId);
-      }}
-      onSelectForumPost={(postId) => {
-        void goForumPost(channelId, postId);
-      }}
-      selectedForumPostId={selectedPostId}
-      targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
     />

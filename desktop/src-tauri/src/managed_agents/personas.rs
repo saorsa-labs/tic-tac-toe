@@ -349,7 +349,7 @@ pub fn load_personas(app: &AppHandle) -> Result<Vec<AgentDefinition>, String> {
 /// Read the raw persona records at `path` — no built-in merge, no write-back.
 /// The single disk-read seam for persona definitions: `load_personas` layers
 /// the built-in merge on top, and the boot-time readers that need raw records
-/// without an `AppHandle` (`event_sync`, `migration::load_persona_runtimes`)
+/// without an `AppHandle` (`migration::load_persona_runtimes`)
 /// call it directly. The A2 store fold retargets THIS function at the unified
 /// store; its callers stay unchanged.
 pub(crate) fn load_personas_from_path(

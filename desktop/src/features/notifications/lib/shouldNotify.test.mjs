@@ -64,7 +64,7 @@ test("broadcast reply with root+reply tags notifies", () => {
   assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), true);
 });
 
-test("thread reply with p-tag mention of currentPubkey notifies", () => {
+test("thread reply with p-tag mention of currentAgentId notifies", () => {
   const event = makeEvent([
     rootTag(ROOT_ID),
     replyTag(PARENT_ID),
@@ -185,7 +185,7 @@ test("muted thread reply suppresses authored", () => {
   );
 });
 
-test("muted thread reply still notifies when currentPubkey is mentioned via p-tag", () => {
+test("muted thread reply still notifies when currentAgentId is mentioned via p-tag", () => {
   const event = makeEvent([
     rootTag(ROOT_ID),
     replyTag(PARENT_ID),
@@ -261,7 +261,7 @@ test("broadcast reply on a muted thread still notifies (broadcast overrides mute
   );
 });
 
-test("empty currentPubkey skips p-tag check — muted thread is suppressed", () => {
+test("empty currentAgentId skips p-tag check — muted thread is suppressed", () => {
   const event = makeEvent([
     rootTag(ROOT_ID),
     replyTag(PARENT_ID),
@@ -280,7 +280,7 @@ test("empty currentPubkey skips p-tag check — muted thread is suppressed", () 
   );
 });
 
-test("empty currentPubkey with participated thread still notifies (no mute)", () => {
+test("empty currentAgentId with participated thread still notifies (no mute)", () => {
   const event = makeEvent([
     rootTag(ROOT_ID),
     replyTag(PARENT_ID),
@@ -296,7 +296,7 @@ test("empty currentPubkey with participated thread still notifies (no mute)", ()
   );
 });
 
-test("isHighPriorityEventForUser returns true when p-tag matches currentPubkey", () => {
+test("isHighPriorityEventForUser returns true when p-tag matches currentAgentId", () => {
   const event = makeEvent([replyTag(ROOT_ID), pTag(PUBKEY)]);
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), true);
 });
@@ -316,7 +316,7 @@ test("isHighPriorityEventForUser p-tag matching is case-insensitive", () => {
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), true);
 });
 
-test("isHighPriorityEventForUser returns false when currentPubkey is empty", () => {
+test("isHighPriorityEventForUser returns false when currentAgentId is empty", () => {
   // Short-circuits before p-tag check; broadcast absent so also false
   const event = makeEvent([replyTag(ROOT_ID), pTag(PUBKEY)]);
   assert.equal(isHighPriorityEventForUser(event, ""), false);

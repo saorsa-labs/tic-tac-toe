@@ -155,13 +155,13 @@ function aggregateGroupedReactions(
 
 function resolveLabel(
   pubkey: string | undefined,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   profiles: UserProfileLookup | undefined,
 ): string {
   if (!pubkey) {
     return "Someone";
   }
-  return resolveUserLabel({ pubkey, currentPubkey, profiles });
+  return resolveUserLabel({ pubkey, currentAgentId, profiles });
 }
 
 function resolveAvatarUrl(
@@ -174,10 +174,10 @@ function resolveAvatarUrl(
 
 function resolveDisplayLabel(
   pubkey: string | undefined,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   profiles: UserProfileLookup | undefined,
 ): string {
-  return resolveLabel(pubkey, currentPubkey, profiles);
+  return resolveLabel(pubkey, currentAgentId, profiles);
 }
 
 function isKnownAgentPubkey(
@@ -253,14 +253,14 @@ function ProfileName({
 function SystemMessageAvatar({
   actorPubkey,
   agentPubkeys,
-  currentPubkey,
+  currentAgentId,
   personaLookup,
   profiles,
   targetPubkey,
 }: {
   actorPubkey: string | undefined;
   agentPubkeys?: ReadonlySet<string>;
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   personaLookup?: Map<string, string>;
   profiles: UserProfileLookup | undefined;
   targetPubkey: string | undefined;
@@ -270,7 +270,7 @@ function SystemMessageAvatar({
   const actorLabel = actorPubkey
     ? resolveUserLabel({
         pubkey: actorPubkey,
-        currentPubkey,
+        currentAgentId,
         profiles,
         preferResolvedSelfLabel: true,
       })
@@ -323,7 +323,7 @@ function SystemMessageAvatar({
   );
   const targetLabel = resolveUserLabel({
     pubkey: targetPubkey,
-    currentPubkey,
+    currentAgentId,
     profiles,
     preferResolvedSelfLabel: true,
   });
@@ -364,13 +364,13 @@ function SystemMessageAvatar({
 
 function MembershipPersonName({
   agentPubkeys,
-  currentPubkey,
+  currentAgentId,
   personaLookup,
   profiles,
   pubkey,
 }: {
   agentPubkeys?: ReadonlySet<string>;
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   personaLookup?: Map<string, string>;
   profiles: UserProfileLookup | undefined;
   pubkey: string;
@@ -386,20 +386,20 @@ function MembershipPersonName({
       pubkey={pubkey}
       underlineOnHover
     >
-      {resolveDisplayLabel(pubkey, currentPubkey, profiles)}
+      {resolveDisplayLabel(pubkey, currentAgentId, profiles)}
     </ProfileName>
   );
 }
 
 function MemberNamesInlineList({
   agentPubkeys,
-  currentPubkey,
+  currentAgentId,
   personaLookup,
   profiles,
   targets,
 }: {
   agentPubkeys?: ReadonlySet<string>;
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   personaLookup?: Map<string, string>;
   profiles: UserProfileLookup | undefined;
   targets: string[];
@@ -409,7 +409,7 @@ function MemberNamesInlineList({
   const renderName = (pubkey: string) => (
     <MembershipPersonName
       agentPubkeys={agentPubkeys}
-      currentPubkey={currentPubkey}
+      currentAgentId={currentAgentId}
       personaLookup={personaLookup}
       profiles={profiles}
       pubkey={pubkey}
@@ -456,12 +456,12 @@ function MemberNamesInlineList({
                       className="!h-5 !w-5 shrink-0 text-3xs"
                       displayName={resolveDisplayLabel(
                         pubkey,
-                        currentPubkey,
+                        currentAgentId,
                         profiles,
                       )}
                     />
                     <span className="min-w-0 truncate">
-                      {resolveDisplayLabel(pubkey, currentPubkey, profiles)}
+                      {resolveDisplayLabel(pubkey, currentAgentId, profiles)}
                     </span>
                   </div>
                 ))}
@@ -476,7 +476,7 @@ function MemberNamesInlineList({
 
 function describeSystemEvent(
   payload: SystemMessagePayload,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   profiles: UserProfileLookup | undefined,
   personaLookup?: Map<string, string>,
   agentPubkeys?: ReadonlySet<string>,
@@ -489,12 +489,12 @@ function describeSystemEvent(
   );
   const actorLabel = resolveDisplayLabel(
     payload.actor,
-    currentPubkey,
+    currentAgentId,
     profiles,
   );
   const targetLabel = resolveDisplayLabel(
     payload.target,
-    currentPubkey,
+    currentAgentId,
     profiles,
   );
   const actorName = (
@@ -524,12 +524,12 @@ function describeSystemEvent(
           <>
             was added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
-              {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
+              {resolveDisplayLabel(payload.actor, currentAgentId, profiles)}
             </ProfileName>
             , along with{" "}
             <MemberNamesInlineList
               agentPubkeys={agentPubkeys}
-              currentPubkey={currentPubkey}
+              currentAgentId={currentAgentId}
               personaLookup={personaLookup}
               profiles={profiles}
               targets={payload.targets.slice(1)}
@@ -546,7 +546,7 @@ function describeSystemEvent(
             joined the channel along with{" "}
             <MemberNamesInlineList
               agentPubkeys={agentPubkeys}
-              currentPubkey={currentPubkey}
+              currentAgentId={currentAgentId}
               personaLookup={personaLookup}
               profiles={profiles}
               targets={payload.targets.slice(1)}
@@ -568,7 +568,7 @@ function describeSystemEvent(
           <>
             was added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
-              {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
+              {resolveDisplayLabel(payload.actor, currentAgentId, profiles)}
             </ProfileName>
           </>
         ),
@@ -632,7 +632,7 @@ function describeSystemEvent(
 export const SystemMessageRow = React.memo(function SystemMessageRow({
   message,
   groupedMessages,
-  currentPubkey,
+  currentAgentId,
   agentPubkeys,
   profiles,
   ownerProfiles,
@@ -641,7 +641,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
 }: {
   message: TimelineMessage;
   groupedMessages?: TimelineMessage[];
-  currentPubkey?: string;
+  currentAgentId?: string;
   agentPubkeys?: ReadonlySet<string>;
   profiles?: UserProfileLookup;
   ownerProfiles?: UserProfileLookup;
@@ -714,7 +714,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
 
   const description = describeSystemEvent(
     payload,
-    currentPubkey,
+    currentAgentId,
     profiles,
     personaLookup,
     agentPubkeys,
@@ -752,7 +752,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     null;
   const displayedOwnerLabel =
     displayedTimelineIdentity?.ownerLabel ??
-    formatOwnerLabel(displayedOwnerPubkey, currentPubkey, ownerProfiles);
+    formatOwnerLabel(displayedOwnerPubkey, currentAgentId, ownerProfiles);
 
   const wouldAddReaction = (emoji: string) =>
     !reactions.some(
@@ -768,7 +768,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
         <SystemMessageAvatar
           actorPubkey={isMembershipArrival ? payload.target : payload.actor}
           agentPubkeys={agentPubkeys}
-          currentPubkey={currentPubkey}
+          currentAgentId={currentAgentId}
           personaLookup={personaLookup}
           profiles={profiles}
           targetPubkey={isMembershipArrival ? undefined : payload.target}

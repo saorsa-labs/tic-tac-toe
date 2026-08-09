@@ -4,12 +4,12 @@ import { toast } from "sonner";
 
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import {
-  useChangeRelayMemberRoleMutation,
-  useMyRelayMembershipQuery,
-  useRelayMembersQuery,
-  type NativeMemberRenderShape,
+  useChangeNativeMemberRoleMutation,
+  useMyNativeMembershipQuery,
+  useNativeMembersQuery,
+  type NativeGroupMemberView,
 } from "@/features/community-members/hooks";
-import type { RelayMemberRole } from "@/shared/api/types";
+import type { CommunityMemberRole } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -37,7 +37,7 @@ function formatRelativeDate(dateString: string): string {
   return date.toLocaleDateString();
 }
 
-function RoleBadge({ role }: { role: RelayMemberRole }) {
+function RoleBadge({ role }: { role: CommunityMemberRole }) {
   return (
     <span
       className={cn(
@@ -52,7 +52,7 @@ function RoleBadge({ role }: { role: RelayMemberRole }) {
   );
 }
 
-function RoleIcon({ role }: { role: RelayMemberRole }) {
+function RoleIcon({ role }: { role: CommunityMemberRole }) {
   switch (role) {
     case "owner":
       return <ShieldCheck className="h-4 w-4 shrink-0 text-primary" />;
@@ -66,19 +66,19 @@ function RoleIcon({ role }: { role: RelayMemberRole }) {
 function MemberRow({
   member,
   displayName,
-  currentPubkey,
+  currentAgentId,
   viewerRole,
   onRemove,
   onChangeRole,
 }: {
-  member: NativeMemberRenderShape;
+  member: NativeGroupMemberView;
   displayName: string | null;
-  currentPubkey?: string;
-  viewerRole: RelayMemberRole | null;
-  onRemove: (member: NativeMemberRenderShape) => void;
+  currentAgentId?: string;
+  viewerRole: CommunityMemberRole | null;
+  onRemove: (member: NativeGroupMemberView) => void;
   onChangeRole: (pubkey: string, newRole: string) => void;
 }) {
-  const isSelf = currentPubkey?.toLowerCase() === member.pubkey.toLowerCase();
+  const isSelf = currentAgentId?.toLowerCase() === member.pubkey.toLowerCase();
   const isOwner = viewerRole === "owner";
   const isAdmin = viewerRole === "admin";
 
@@ -164,19 +164,19 @@ function MemberRow({
 const ROLE_ORDER: Record<string, number> = { owner: 0, admin: 1, member: 2 };
 
 export function CommunityMembersCard({
-  currentPubkey: _currentPubkey,
+  currentAgentId: _currentAgentId,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
 }) {
   const identityQuery = useIdentityQuery();
   const currentAgentId = identityQuery.data?.agentId;
-  const membersQuery = useRelayMembersQuery();
-  const myMembershipQuery = useMyRelayMembershipQuery();
-  const changeRoleMutation = useChangeRelayMemberRoleMutation();
+  const membersQuery = useNativeMembersQuery();
+  const myMembershipQuery = useMyNativeMembershipQuery();
+  const changeRoleMutation = useChangeNativeMemberRoleMutation();
 
   const [addDialogOpen, setAddDialogOpen] = React.useState(false);
   const [removeTarget, setRemoveTarget] =
-    React.useState<NativeMemberRenderShape | null>(null);
+    React.useState<NativeGroupMemberView | null>(null);
 
   const members = React.useMemo(() => {
     const raw = membersQuery.data ?? [];
@@ -244,7 +244,7 @@ export function CommunityMembersCard({
         <div className="mt-4 space-y-2">
           {members.map((member) => (
             <MemberRow
-              currentPubkey={currentAgentId}
+              currentAgentId={currentAgentId}
               displayName={member.displayName}
               key={member.pubkey}
               member={member}

@@ -233,9 +233,6 @@ fn record_with(
         pubkey: String::new(),
         name: "r".to_string(),
         persona_id: persona_id.map(str::to_string),
-        private_key_nsec: String::new(),
-        auth_tag: None,
-        relay_url: String::new(),
         avatar_url: None,
         acp_command: String::new(),
         agent_command: String::new(),
@@ -280,7 +277,6 @@ fn record_with(
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
-        relay_mesh: None,
     }
 }
 

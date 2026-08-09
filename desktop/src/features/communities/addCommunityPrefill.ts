@@ -1,9 +1,8 @@
 import * as React from "react";
 
-import type { AddCommunityDeepLinkPayload } from "@/shared/deep-link";
-
-export type AddCommunityPrefillRequest = AddCommunityDeepLinkPayload & {
+export type AddCommunityPrefillRequest = {
   requestId: string;
+  name?: string;
 };
 
 let currentRequest: AddCommunityPrefillRequest | null = null;

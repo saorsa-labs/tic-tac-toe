@@ -51,14 +51,14 @@ type ChannelDeleteConfirmationDialogProps = {
 
 export function useChannelModerationCapabilities(
   members: ChannelMember[] | undefined,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
   enabled: boolean,
 ) {
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : undefined;
   const selfRole = members?.find(
-    (member) => normalizePubkey(member.pubkey) === normalizedCurrentPubkey,
+    (member) => normalizePubkey(member.pubkey) === normalizedCurrentAgentId,
   )?.role;
   const ownerMemberPubkeys = useMemo(
     () =>
@@ -66,10 +66,10 @@ export function useChannelModerationCapabilities(
         .filter(
           (member) =>
             member.role === "owner" &&
-            normalizePubkey(member.pubkey) !== normalizedCurrentPubkey,
+            normalizePubkey(member.pubkey) !== normalizedCurrentAgentId,
         )
         .map((member) => member.pubkey),
-    [members, normalizedCurrentPubkey],
+    [members, normalizedCurrentAgentId],
   );
   const shouldResolveAgentOwnership =
     enabled && selfRole !== "owner" && ownerMemberPubkeys.length > 0;
@@ -79,7 +79,7 @@ export function useChannelModerationCapabilities(
   const canManageOwnedAgentChannel = ownerMemberPubkeys.some((pubkey) =>
     ownsAuthorAgent(
       ownerProfilesQuery.data?.profiles[normalizePubkey(pubkey)],
-      currentPubkey,
+      currentAgentId,
     ),
   );
 

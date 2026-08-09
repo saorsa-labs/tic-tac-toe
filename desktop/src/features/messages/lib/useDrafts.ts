@@ -102,19 +102,19 @@ function canonicalizeRelayScope(relayUrl: string): string {
 }
 
 /** Module-level workspace identity set by `initDraftStore`. Empty = no workspace. */
-let currentPubkey = "";
+let currentAgentId = "";
 let currentRelayScope = "";
 
 function storageKey(): string {
   // The no-relay form is retained for direct legacy callers/tests. App startup
   // always supplies a normalized relay and therefore uses the v2 scoped key.
   return currentRelayScope
-    ? `${DRAFT_STORE_KEY_PREFIX}:${currentRelayScope}:${currentPubkey}`
+    ? `${DRAFT_STORE_KEY_PREFIX}:${currentRelayScope}:${currentAgentId}`
     : legacyStorageKey();
 }
 
 function legacyStorageKey(): string {
-  return `${LEGACY_DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
+  return `${LEGACY_DRAFT_STORE_KEY_PREFIX}:${currentAgentId}`;
 }
 
 /**
@@ -125,10 +125,10 @@ function legacyStorageKey(): string {
  */
 export function initDraftStore(pubkey: string, relayUrl = ""): void {
   const relayScope = canonicalizeRelayScope(relayUrl);
-  if (currentPubkey !== pubkey || currentRelayScope !== relayScope) {
+  if (currentAgentId !== pubkey || currentRelayScope !== relayScope) {
     _memCache = null;
   }
-  currentPubkey = pubkey;
+  currentAgentId = pubkey;
   currentRelayScope = relayScope;
   // Eagerly load to surface corruption errors in console at startup rather
   // than on first draft interaction.
@@ -140,7 +140,7 @@ export function initDraftStore(pubkey: string, relayUrl = ""): void {
  * Replaces the old `clearAllDrafts()`.
  */
 export function clearAllDrafts(): void {
-  currentPubkey = "";
+  currentAgentId = "";
   currentRelayScope = "";
   _memCache = null;
 }
@@ -155,7 +155,7 @@ function readStore(): Map<string, DraftState> {
   if (_memCache !== null) return _memCache;
 
   const map = new Map<string, DraftState>();
-  if (!currentPubkey) {
+  if (!currentAgentId) {
     _memCache = map;
     return map;
   }
@@ -252,7 +252,7 @@ function isValidDraftState(v: unknown): v is DraftState {
 }
 
 function flushStore(map: Map<string, DraftState>): boolean {
-  if (!currentPubkey) return false;
+  if (!currentAgentId) return false;
   const obj: StoredDrafts = {};
   for (const [k, v] of map) {
     obj[k] = v;

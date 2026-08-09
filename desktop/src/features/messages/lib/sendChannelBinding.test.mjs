@@ -32,8 +32,11 @@ import {
 // ---------------------------------------------------------------------------
 // Minimal stubs
 // ---------------------------------------------------------------------------
+// M3 identity cutover: the x0x AgentId is the sole identity. The Nostr relay
+// signer was removed; createOptimisticMessage binds the event to agentId.
 const IDENTITY = {
-  pubkey: "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222",
+  agentId: "dddd1111eeee2222ffff3333aaaa4444bbbb5555cccc6666dddd1111eeee2222",
+  identityWords: ["alpha", "beta", "gamma", "delta"],
 };
 
 function makeChannel(id) {

@@ -24,7 +24,7 @@ type SidebarSelectedView =
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
-  currentPubkey?: string;
+  currentAgentId?: string;
   onBrowseChannels?: () => void;
   onCreateAgent: () => void;
   onCreateChannel: () => void;
@@ -49,7 +49,7 @@ type AppSidebarPrimaryMenuProps = {
 
 export function AppSidebarPinnedHeader({
   channelLabels,
-  currentPubkey,
+  currentAgentId,
   onBrowseChannels,
   onCreateAgent,
   onCreateChannel,
@@ -68,7 +68,7 @@ export function AppSidebarPinnedHeader({
       <TopbarSearch
         channelLabels={channelLabels}
         channels={searchChannels}
-        currentPubkey={currentPubkey}
+        currentAgentId={currentAgentId}
         focusRequest={searchFocusRequest}
         onOpenChannel={onSelectChannel}
         onOpenResult={onOpenSearchResult}

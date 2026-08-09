@@ -7,12 +7,14 @@ serverless, post-quantum mesh.**
 
 ## What it is
 
-A desktop workspace — channels, direct messages, private groups, presence,
-and AI agents as first-class members — with **zero server infrastructure**.
-No relay, no workspace host, no accounts database. Every participant
-(human or agent) is a node on the x0x mesh: QUIC transport with native NAT
-traversal, post-quantum identity (ML-DSA-65), MLS/TreeKEM private groups,
-and durable local history (ADR-0023).
+A desktop workspace — channels, direct messages, presence, and AI agents as
+first-class members — with **zero server infrastructure**. No relay, no
+workspace host, no accounts database. Every participant (human or agent) is
+a node on the x0x mesh: QUIC transport with native NAT traversal,
+post-quantum identity (ML-DSA-65), and durable local history (ADR-0023).
+Authenticated private-group cryptography and invite bootstrap remain gated on
+the separate x0x secure-group design approval; tic-tac-toe does not expose
+those product surfaces yet.
 
 ## The proof point
 
@@ -34,9 +36,10 @@ or server-based workspace can make together:
 
 tic-tac-toe is a thin client over the local `x0xd` daemon's REST + WebSocket
 API — the same daemon-only integration surface every x0x app uses. It spawns
-or attaches to `x0xd`, and everything else (transport, identity, groups,
-MLS, presence, history, search) is the daemon's job. The app owns UI state
-and nothing else. See [`docs/design/tic-tac-toe-v1.md`](docs/design/tic-tac-toe-v1.md).
+or attaches to `x0xd`; transport, identity, public groups, presence, history,
+and search remain daemon responsibilities. The app owns UI state and local
+agent/workflow supervision. See
+[`docs/design/tic-tac-toe-v1.md`](docs/design/tic-tac-toe-v1.md).
 
 ## Relationship to Buzz and Nostr
 
@@ -49,16 +52,27 @@ end-to-end.
 
 ## Status
 
-**Stage 0 complete** — Block's Buzz desktop app (Tauri 2 + React) is imported
-at upstream anchor `710ed9ff` (Buzz Desktop 0.4.24) with the five crates it
-depends on; typecheck,
-unit suite, and the mock-mode Playwright smoke suite run in this repo's CI
-(see `FORK.md` for the import/exclusion inventory and license boundary).
-Next: Stage 1 — embedded x0xd + bridge v2 ("Buzz UX, x0x mesh"), per
-[`docs/design/buzz-fork-plan.md`](docs/design/buzz-fork-plan.md).
+**Native cutover in progress.** The packaged Tauri app now spawns or attaches
+to an isolated loopback `x0xd`; production frontend paths pass the no-relay
+gate and use native x0x history, search, messaging, public-group membership,
+identity, presence, and managed-agent adapters. Unsupported forum, canvas,
+hosted-join, private-group, and in-app bridge/relay surfaces are removed. A
+first public-only Company template has a fail-closed, resumable, cancellable,
+single-active lifecycle through Symphony/ACP.
 
-The substrate dependency — x0x ADR-0023 durable local history — is
-**merged and testnet-proven** (x0x PR #268).
+Executable real-process evidence now starts two fresh isolated daemons, pairs
+them over a direct loopback QUIC link, delivers a uniquely tagged SignedPublic
+group message to the second node, restarts the sender on the same data directory,
+and retrieves the exact payload from durable history; both daemons report zero
+relayed connections. The two-physical-machine/WAN pass, 50-message FTS scenario,
+and live managed-agent reply remain release gates. Native group-thread publishing
+is blocked because the current x0xd public-message API has no
+`threadRoot`/`threadParent` write contract; the UI fails closed rather than
+recording local-only ancestry as delivered history.
+
+The imported Buzz anchor and license boundary remain documented in `FORK.md`.
+The substrate dependency — x0x ADR-0023 durable local history — is merged and
+testnet-proven (x0x PR #268).
 
 ## License
 

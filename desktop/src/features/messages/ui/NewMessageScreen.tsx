@@ -28,7 +28,7 @@ import {
  */
 export function NewMessageScreen() {
   const identityQuery = useIdentityQuery();
-  const currentPubkey = identityQuery.data?.pubkey;
+  const currentAgentId = identityQuery.data?.agentId;
   const openDmMutation = useOpenDmMutation();
   const upsertCachedChannel = useUpsertCachedChannel();
   const sendMessageMutation = useSendMessageMutation(null, identityQuery.data);
@@ -67,7 +67,7 @@ export function NewMessageScreen() {
     selectUser,
     selectedUsers,
     setSearchQuery,
-  } = useNewMessageRecipients({ active: true, currentPubkey });
+  } = useNewMessageRecipients({ active: true, currentAgentId });
 
   const isSearchTransitionPending = searchQuery.trim() !== deferredSearchQuery;
   const visibleSearchResults =
@@ -177,8 +177,8 @@ export function NewMessageScreen() {
         ),
       ].filter(Boolean);
       const preparedDirectMessage = preparedDirectMessageRef.current;
-      const currentNormalizedPubkey = currentPubkey
-        ? normalizePubkey(currentPubkey)
+      const currentNormalizedPubkey = currentAgentId
+        ? normalizePubkey(currentAgentId)
         : null;
       const preparedParticipantPubkeys = new Set(
         (preparedDirectMessage?.participantPubkeys ?? [])
@@ -221,7 +221,7 @@ export function NewMessageScreen() {
       }
     },
     [
-      currentPubkey,
+      currentAgentId,
       openDmMutation.isPending,
       openDmMutation.mutateAsync,
       selectedUsers,
@@ -509,7 +509,7 @@ export function NewMessageScreen() {
                       );
                       return (
                         <NewMessageResultRow
-                          currentPubkey={currentPubkey}
+                          currentAgentId={currentAgentId}
                           disabled={
                             isPending ||
                             (hasReachedRecipientLimit && !isSelected)
@@ -579,7 +579,8 @@ export function NewMessageScreen() {
           className="px-5 pb-2 text-sm text-muted-foreground"
           data-testid="new-dm-limit"
         >
-          DMs support up to nine people, including you.
+          Native direct messages are one-to-one. Group messaging isn't available
+          yet.
         </p>
       ) : null}
       {searchError ? (

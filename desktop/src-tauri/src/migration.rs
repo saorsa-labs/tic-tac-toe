@@ -2,7 +2,7 @@
 //!
 //! **Worktree sync** (`sync_shared_agent_data`): Per-launch symlink creation
 //! from the current worktree data directory to the canonical dev data
-//! directory (`xyz.block.buzz.app.dev`). Only runs when
+//! directory (`com.saorsalabs.tictactoe.dev`). Only runs when
 //! `BUZZ_SHARE_IDENTITY=1` and `BUZZ_PRIVATE_KEY` is set. All dev
 //! instances share the same physical files — edits in any worktree are
 //! immediately visible to all others.
@@ -21,9 +21,9 @@ use tauri::Manager;
 
 use crate::util::replace_with_symlink;
 
-const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
-const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
-const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
+const CANONICAL_DEV_IDENTIFIER: &str = "com.saorsalabs.tictactoe.dev";
+const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
+const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.buzz.app";
 
 /// JSON files symlinked from worktree data directories to the canonical
 /// dev data directory. Only data files — never `agent-pids/` or `logs/`.
@@ -41,8 +41,8 @@ const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
 
 /// Returns `true` when `name` is a dev data dir name — i.e. it is exactly the
 /// canonical dev identifier or a worktree variant separated by a `.` (e.g.
-/// `xyz.block.buzz.app.dev.my-branch`). Rejects prefix-collisions such as
-/// `xyz.block.buzz.app.developer`. This is the authoritative dev/prod
+/// `com.saorsalabs.tictactoe.dev.my-branch`). Rejects prefix-collisions such as
+/// `com.saorsalabs.tictactoe.developer`. This is the authoritative dev/prod
 /// discriminator shared by `run_boot_migrations`, `sync_shared_agent_data`,
 /// and `reconcile_target_dir`.
 pub(crate) fn is_dev_data_dir_name(name: &str) -> bool {
@@ -60,8 +60,8 @@ pub(crate) fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
     let name = current.file_name()?.to_str()?;
     let legacy_name = if name.starts_with(CANONICAL_DEV_IDENTIFIER) {
         name.replacen(CANONICAL_DEV_IDENTIFIER, LEGACY_CANONICAL_DEV_IDENTIFIER, 1)
-    } else if name.starts_with("xyz.block.buzz.app") {
-        name.replacen("xyz.block.buzz.app", LEGACY_RELEASE_IDENTIFIER, 1)
+    } else if name.starts_with("com.saorsalabs.tictactoe") {
+        name.replacen("com.saorsalabs.tictactoe", LEGACY_RELEASE_IDENTIFIER, 1)
     } else {
         return None;
     };
@@ -113,12 +113,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// `sync_team_personas` is the sole writer of team-dir persona-runtime edits
 /// into `personas.json`/`teams.json`; it MUST run before every reader of those
 /// files. The pre-identity reader is `reconcile_provider_mcp_commands` (derives
-/// `mcp_command` from each persona's effective harness); the post-identity
-/// readers are `migrate_personas_to_events`/`migrate_teams_to_events` in
-/// [`crate::event_sync::run_event_sync`]. Sync touches only JSON (no owner
-/// keys, no `retention.db`), so it runs pre-identity here ahead of all
-/// readers — reader-first loses a launch (stale harness/`mcp_command` until
-/// the next boot).
+/// `mcp_command` from each persona's effective harness). Sync touches only
+/// JSON (no owner keys), so it runs pre-identity here ahead of all readers
+/// — reader-first loses a launch (stale harness/`mcp_command` until the
+/// next boot).
 pub fn run_boot_migrations(app: &tauri::AppHandle) {
     run_boot_migrations_inner(app, false);
 }
@@ -157,16 +155,6 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
 
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
-    // Dev-build-only: copy any agent keys that exist in the production
-    // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
-    // so existing agents don't lose their keys after the service-name split.
-    // Must run after sync_shared_agent_data (JSON symlinked) and before
-    // any load_managed_agents call (which runs hydrate_keys against the
-    // dev service and would log "has no key" for un-migrated entries).
-    #[cfg(debug_assertions)]
-    if is_dev {
-        crate::managed_agents::migrate_agent_keys_to_dev_service(app);
-    }
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
     // Fold personas.json into the unified store HERE: after the JSON-level
@@ -755,7 +743,7 @@ fn replace_builtin_avatar(record: &mut serde_json::Value, persona_id: &str, now:
 ///
 /// Guards:
 /// - `BUZZ_SHARE_IDENTITY` must be `"1"`
-/// - `BUZZ_PRIVATE_KEY` must parse as valid `nostr::Keys`
+/// - `BUZZ_PRIVATE_KEY` must be present and non-empty
 /// - The canonical dir must differ from the current dir (skip if we ARE canonical)
 /// - The canonical dir must exist
 pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
@@ -767,13 +755,14 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         return;
     }
 
-    // Guard: BUZZ_PRIVATE_KEY must be a valid nostr key.
-    let has_valid_key = std::env::var("BUZZ_PRIVATE_KEY")
-        .ok()
-        .and_then(|k| k.parse::<nostr::Keys>().ok())
-        .is_some();
-    if !has_valid_key {
-        eprintln!("buzz-desktop: shared-agent-sync: BUZZ_PRIVATE_KEY missing or invalid, skipping");
+    // Guard: a shared identity key must be configured (dev worktree sharing).
+    // The value is treated as opaque — production identity is the x0x AgentId;
+    // this string is never parsed as a Nostr key or activated as a signer.
+    let has_shared_key = std::env::var("BUZZ_PRIVATE_KEY")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    if !has_shared_key {
+        eprintln!("buzz-desktop: shared-agent-sync: BUZZ_PRIVATE_KEY missing or empty, skipping");
         return;
     }
 

@@ -486,7 +486,7 @@ export function useHomeFeedNotificationState(
 
 export function useHomeFeedNotifications(pubkey: string | undefined) {
   const notificationSettings = useNotificationSettings(pubkey);
-  const homeFeedQuery = useHomeFeedQuery();
+  const homeFeedQuery = useHomeFeedQuery({ currentAgentId: pubkey });
   const refetchHomeFeedForE2e = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
   });

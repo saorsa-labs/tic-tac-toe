@@ -178,19 +178,19 @@ export function useSidebarLoadingShape({
   directMessages,
   dmChannelLabels,
   isLoading,
-  currentPubkey,
+  currentAgentId,
   streamChannels,
 }: {
   activeCommunityId: string | null | undefined;
   directMessages: Channel[];
   dmChannelLabels: Record<string, string>;
   isLoading: boolean;
-  currentPubkey?: string;
+  currentAgentId?: string;
   streamChannels: Channel[];
 }) {
   const cacheKey = React.useMemo(
-    () => sidebarSkeletonCacheKey(activeCommunityId, currentPubkey),
-    [activeCommunityId, currentPubkey],
+    () => sidebarSkeletonCacheKey(activeCommunityId, currentAgentId),
+    [activeCommunityId, currentAgentId],
   );
   const liveShape = React.useMemo(
     () =>

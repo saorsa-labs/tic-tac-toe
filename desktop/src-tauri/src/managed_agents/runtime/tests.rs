@@ -117,18 +117,11 @@ use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
 
 /// Construct a minimal record fixture for env-building tests. Only the
 /// fields read by `build_respond_to_env` matter here.
-fn fixture(
-    respond_to: RespondTo,
-    allowlist: Vec<String>,
-    auth_tag: Option<String>,
-) -> ManagedAgentRecord {
+fn fixture(respond_to: RespondTo, allowlist: Vec<String>) -> ManagedAgentRecord {
     ManagedAgentRecord {
         pubkey: "p".into(),
         name: "n".into(),
         persona_id: None,
-        private_key_nsec: "nsec1fake".into(),
-        auth_tag,
-        relay_url: "ws://localhost:3000".into(),
         avatar_url: None,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
@@ -173,14 +166,13 @@ fn fixture(
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
-        relay_mesh: None,
     }
 }
 
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
-    let rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
-    let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
+    let rec = fixture(RespondTo::OwnerOnly, vec![]);
+    let (set, remove) = build_respond_to_env(&rec).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
@@ -188,8 +180,6 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     );
     assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
     assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
-    // auth_tag is present → no AGENT_OWNER fallback fires.
-    assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
 
 // select_untracked_bundle_harnesses tests live in runtime/sweep.rs (mod tests).
@@ -198,12 +188,8 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
 fn build_env_allowlist_sets_both_envs_and_joins() {
     let a = "a".repeat(64);
     let b = "b".repeat(64);
-    let rec = fixture(
-        RespondTo::Allowlist,
-        vec![a.clone(), b.clone()],
-        Some("tag".into()),
-    );
-    let (set, _remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
+    let rec = fixture(RespondTo::Allowlist, vec![a.clone(), b.clone()]);
+    let (set, _remove) = build_respond_to_env(&rec).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
@@ -219,8 +205,8 @@ fn build_env_allowlist_sets_both_envs_and_joins() {
 
 #[test]
 fn build_env_anyone_omits_allowlist_var() {
-    let rec = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
-    let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
+    let rec = fixture(RespondTo::Anyone, vec![]);
+    let (set, remove) = build_respond_to_env(&rec).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
@@ -231,40 +217,15 @@ fn build_env_anyone_omits_allowlist_var() {
 }
 
 #[test]
-fn build_env_legacy_record_without_auth_tag_emits_agent_owner() {
-    let rec = fixture(RespondTo::OwnerOnly, vec![], None);
-    let (set, remove) = build_respond_to_env(&rec, Some("ownerhex")).unwrap();
-    let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
-    assert_eq!(
-        set_map.get("BUZZ_ACP_AGENT_OWNER").map(String::as_str),
-        Some("ownerhex")
-    );
-    assert!(!remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
-}
-
-#[test]
-fn build_env_legacy_record_without_owner_hex_removes_agent_owner() {
-    // No owner available to forward → make sure we don't inherit a leaked
-    // env var from the parent.
-    let rec = fixture(RespondTo::OwnerOnly, vec![], None);
-    let (_set, remove) = build_respond_to_env(&rec, None).unwrap();
-    assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
-}
-
-#[test]
 fn build_env_rejects_corrupted_allowlist() {
-    let rec = fixture(
-        RespondTo::Allowlist,
-        vec!["not-hex".into()],
-        Some("tag".into()),
-    );
-    assert!(build_respond_to_env(&rec, Some("owner")).is_err());
+    let rec = fixture(RespondTo::Allowlist, vec!["not-hex".into()]);
+    assert!(build_respond_to_env(&rec).is_err());
 }
 
 #[test]
 fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
-    let rec = fixture(RespondTo::Allowlist, vec![], Some("tag".into()));
-    let err = build_respond_to_env(&rec, Some("owner")).unwrap_err();
+    let rec = fixture(RespondTo::Allowlist, vec![]);
+    let err = build_respond_to_env(&rec).unwrap_err();
     assert!(err.contains("at least one pubkey"));
 }
 
@@ -353,7 +314,7 @@ fn spawn_user_env(
 #[test]
 fn create_keeps_env_vars_as_overrides_only() {
     let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
-    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    let mut record = fixture(RespondTo::Anyone, vec![]);
     pin_persona(&mut record, &p0);
 
     assert_eq!(record.system_prompt.as_deref(), Some("prompt-v0"));
@@ -377,7 +338,7 @@ fn create_keeps_env_vars_as_overrides_only() {
 fn restart_after_persona_edit_refreshes_credential() {
     // Create from P0.
     let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
-    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    let mut record = fixture(RespondTo::Anyone, vec![]);
     pin_persona(&mut record, &p0);
 
     // Edit the persona to P1 (prompt + credential change). Restart reuses the
@@ -407,7 +368,7 @@ fn agent_env_overrides_win_over_persona_env_at_spawn() {
     // Agent-level env_vars layer over persona env on collision at read time
     // (persona env < agent env).
     let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
-    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    let mut record = fixture(RespondTo::Anyone, vec![]);
     record.env_vars = BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "agent-key".to_string())]);
     pin_persona(&mut record, &persona);
 
@@ -424,7 +385,7 @@ fn agent_env_overrides_win_over_persona_env_at_spawn() {
 fn orphaned_agent_spawns_from_its_own_overrides() {
     // Persona deleted: the live merge degrades to the record's own overrides.
     let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
-    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    let mut record = fixture(RespondTo::Anyone, vec![]);
     record.env_vars = BTreeMap::from([("EXTRA".to_string(), "agent-value".to_string())]);
     pin_persona(&mut record, &persona);
 
@@ -443,7 +404,7 @@ fn self_heal_drops_overrides_equal_to_persona_value() {
     // spawn-path retain() treats an override equal to the persona's current
     // value as inherited, so later persona edits refresh it.
     let p0 = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "key-v0")]);
-    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    let mut record = fixture(RespondTo::Anyone, vec![]);
     record.env_vars = BTreeMap::from([
         ("ANTHROPIC_API_KEY".to_string(), "key-v0".to_string()), // baked-in persona value
         ("GENUINE".to_string(), "override".to_string()),         // real override
@@ -478,7 +439,7 @@ fn self_heal_drops_overrides_equal_to_persona_value() {
 #[test]
 fn deleted_persona_is_orphaned_not_out_of_date() {
     let p0 = persona_v("p", "prompt-v0", &[("KEY", "v0")]);
-    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    let mut record = fixture(RespondTo::Anyone, vec![]);
     pin_persona(&mut record, &p0);
 
     // Persona no longer in the catalog → orphaned, never out of date (no
@@ -491,7 +452,7 @@ fn deleted_persona_is_orphaned_not_out_of_date() {
 #[test]
 fn non_persona_agent_never_drifts() {
     // A hand-built agent (no persona_id) has nothing to drift from.
-    let record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    let record = fixture(RespondTo::Anyone, vec![]);
     assert_eq!(record.persona_id, None);
     let (out_of_date, orphaned) = super::persona_drift_state(&record, &[]);
     assert!(!out_of_date);
@@ -871,25 +832,9 @@ fn receipt_fixture(
 }
 
 #[test]
-fn receipt_validation_rejects_noncanonical_identity() {
-    let mut receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
-    );
-    receipt.key.relay_url = "WSS://RELAY.EXAMPLE/".into();
-    let path = std::path::PathBuf::from(format!("{}.json", receipt.key.runtime_id()));
-    assert!(!super::valid_agent_runtime_receipt(
-        &path,
-        &receipt,
-        "test-instance"
-    ));
-}
-
-#[test]
 fn receipt_validation_rejects_wrong_pair_filename() {
     let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "group-a").unwrap(),
     );
     assert!(!super::valid_agent_runtime_receipt(
         std::path::Path::new("corrupted.json"),
@@ -903,8 +848,7 @@ fn replacement_removes_receipt_only_after_confirmed_exit() {
     use std::cell::{Cell, RefCell};
 
     let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "group-a").unwrap(),
     );
     let path = std::path::Path::new("pair.json");
     let terminated = Cell::new(None);
@@ -937,8 +881,7 @@ fn replacement_failure_keeps_receipt() {
     use std::cell::Cell;
 
     let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "group-a").unwrap(),
     );
     let removed = Cell::new(false);
     let error = super::terminate_runtime_receipt_with(
@@ -957,13 +900,13 @@ fn replacement_failure_keeps_receipt() {
 // ── workspace pair-key resolution (summary/stop scoping) ────────────────
 
 #[test]
-fn unpinned_record_resolves_pair_key_per_workspace() {
-    // Community-scoped truth: an unpinned agent running only on relay A must
-    // read as running in workspace A and stopped in workspace B — the pair
-    // key the summary looks up differs per workspace.
+fn pair_key_resolves_per_workspace_group() {
+    // Group-scoped truth: an agent running only in group A must read as
+    // running in group A and stopped in group B — the pair key the summary
+    // looks up differs per group.
     let pubkey = "aa".repeat(32);
-    let key_a = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
-    let key_b = super::resolve_workspace_pair_key(&pubkey, "", "wss://two.example").unwrap();
+    let key_a = super::resolve_workspace_pair_key(&pubkey, "group-a").unwrap();
+    let key_b = super::resolve_workspace_pair_key(&pubkey, "group-b").unwrap();
 
     let runtimes = std::collections::HashMap::from([(key_a.clone(), ())]);
     assert!(runtimes.contains_key(&key_a));
@@ -971,35 +914,8 @@ fn unpinned_record_resolves_pair_key_per_workspace() {
 }
 
 #[test]
-fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
-    // Legacy pins are ignored (#2122): a record carrying a creation-era
-    // `relay_url` resolves the same per-workspace pair key an unpinned record
-    // does, so summaries/stop act on the community being viewed.
-    let pubkey = "aa".repeat(32);
-    let from_a =
-        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://one.example")
-            .unwrap();
-    let from_b =
-        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://two.example")
-            .unwrap();
-    assert_ne!(from_a, from_b);
-    assert_eq!(from_a.relay_url, "wss://one.example");
-    assert_eq!(from_b.relay_url, "wss://two.example");
-}
-
-#[test]
-fn workspace_pair_key_is_canonical() {
-    // Spawn stamps the canonical key; lookup must hit the same entry even
-    // when the workspace relay is written in a non-canonical form.
-    let pubkey = "aa".repeat(32);
-    let stamped = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
-    let viewed = super::resolve_workspace_pair_key(&pubkey, "", "WSS://One.Example:443/").unwrap();
-    assert_eq!(stamped, viewed);
-}
-
-#[test]
 fn invalid_pubkey_resolves_no_pair_key() {
     // Key-less records (keys minted on first start) cannot form a pair key;
     // the summary must fall back to the stopped/legacy-pid path, not panic.
-    assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
+    assert!(super::resolve_workspace_pair_key("not-a-key", "group-a").is_none());
 }

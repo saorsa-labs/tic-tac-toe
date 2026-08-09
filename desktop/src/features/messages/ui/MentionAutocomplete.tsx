@@ -10,7 +10,6 @@ import {
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export type MentionSuggestion = {
@@ -66,7 +65,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
 
   // Name collisions are the impersonation vector: a vanity-ground key can
   // wear any display name. When two suggestions share a name, surface each
-  // one's npub (truncated; full key in the hover tooltip) to tell them apart.
+  // one's identity key (truncated; full key in the hover tooltip) to tell them
+  // apart.
   const nameCounts = new Map<string, number>();
   for (const suggestion of suggestions) {
     const name = suggestion.displayName.toLowerCase();
@@ -103,9 +103,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
           const agentLabel = "agent";
           const hasNameCollision =
             (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
-          const collisionNpub =
+          const collisionKey =
             hasNameCollision && suggestion.pubkey
-              ? safeNpub(suggestion.pubkey)
+              ? truncatePubkey(suggestion.pubkey)
               : null;
 
           return (
@@ -199,7 +199,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     ) : null}
                   </span>
                 ) : null}
-                {collisionNpub ? (
+                {collisionKey ? (
                   <span
                     className={cn(
                       "min-w-0 truncate font-mono text-2xs leading-snug",
@@ -207,10 +207,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         ? "text-accent-foreground/60"
                         : "text-muted-foreground",
                     )}
-                    data-testid="mention-collision-npub"
-                    title={collisionNpub}
+                    data-testid="mention-collision-key"
+                    title={collisionKey}
                   >
-                    {truncatePubkey(collisionNpub)}
+                    {collisionKey}
                   </span>
                 ) : null}
               </span>

@@ -1,7 +1,4 @@
-import { fetchMediaBytes } from "@/shared/api/tauriMedia";
-
 type SnapshotAvatarPngDependencies = {
-  fetchBytes?: (url: string) => Promise<Uint8Array>;
   createCanvas?: () => HTMLCanvasElement;
   createImage?: () => HTMLImageElement;
 };
@@ -10,8 +7,9 @@ type SnapshotAvatarPngDependencies = {
  * Resolve an avatar to PNG data for the image body of a snapshot PNG.
  *
  * The original avatar URL remains in the manifest so imports preserve the
- * editable source; this only supplies a renderable card thumbnail. Relay
- * media fetches are validated by Rust, which rejects external origins.
+ * editable source; this only supplies a renderable card thumbnail. Only
+ * inline SVG data URLs can be rasterized locally — remote HTTPS avatars have
+ * no fetch transport and are left for the manifest URL to render.
  */
 export async function resolveSnapshotAvatarPng(
   avatarUrl: string | null | undefined,
@@ -20,32 +18,13 @@ export async function resolveSnapshotAvatarPng(
   const url = avatarUrl?.trim();
   if (!url) return undefined;
 
-  if (isSvgDataUrl(url)) {
-    return rasterizeSvg(url, dependencies);
-  }
+  if (!isSvgDataUrl(url)) return undefined;
 
-  if (!isHttpsUrl(url)) return undefined;
-
-  try {
-    // Rust validates same-relay `/media/` URLs before fetching; other origins
-    // fail there rather than being fetched by the webview.
-    const bytes = await (dependencies.fetchBytes ?? fetchMediaBytes)(url);
-    return `data:image/png;base64,${bytesToBase64(bytes)}`;
-  } catch {
-    return undefined;
-  }
+  return rasterizeSvg(url, dependencies);
 }
 
 function isSvgDataUrl(url: string) {
   return /^data:image\/svg\+xml(?:;[^,]*)?,/i.test(url);
-}
-
-function isHttpsUrl(url: string) {
-  try {
-    return new URL(url).protocol === "https:";
-  } catch {
-    return false;
-  }
 }
 
 async function rasterizeSvg(
@@ -99,15 +78,4 @@ function squareEmojiAvatarBackground(svgDataUrl: string) {
   } catch {
     return svgDataUrl;
   }
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(
-      ...bytes.subarray(offset, offset + chunkSize),
-    );
-  }
-  return btoa(binary);
 }

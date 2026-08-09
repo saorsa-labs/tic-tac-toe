@@ -5,11 +5,11 @@
 //! Precedence: desktop parent env < persona env < agent env (last wins on
 //! key collision). See `runtime::spawn_agent_child`.
 //!
-//! A small set of *reserved* keys — Buzz's identity and secrets — are
-//! rejected at save time and stripped at runtime so a typo or malicious
-//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
-//! freely overridable — those have dedicated UI fields, but power users
-//! may want to bypass them.
+//! A small set of *reserved* keys — native x0x identities and desktop-owned
+//! credentials — are rejected at save time and stripped at runtime so a typo
+//! or malicious value cannot redirect or impersonate a managed agent. Behavior
+//! knobs remain freely overridable; those have dedicated UI fields, but power
+//! users may want to bypass them.
 
 use std::collections::BTreeMap;
 
@@ -42,41 +42,33 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 /// Env var keys that Buzz sets itself and users must not override from
 /// the persona/agent env_vars UI. Three categories:
 ///
-/// 1. **Identity / secrets** — overriding would swap the agent's nsec or
-///    leak credentials.
+/// 1. **Identity / secrets** — overriding would replace native agent identity or
+///    leak desktop-owned local API credentials.
 /// 2. **Code-execution surface** — overriding the binary/args lets the
 ///    user run arbitrary code as the agent process.
-/// 3. **Security gates** — overriding the respond-to mode/allowlist or
-///    relay URL would silently break the saved security settings (the UI
-///    shows owner-only while the running agent answers anyone, for
-///    example), or redirect the agent to an attacker-controlled relay.
+/// 3. **Security gates** — overriding response policy, native x0x identity,
+///    or process commands would make runtime behavior diverge from saved state.
 ///
-/// This list is deliberately narrow — it only covers keys with security
-/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
-/// overridable; those have dedicated UI fields but power users may want
-/// to bypass them.
+/// This list is deliberately narrow. Behavior knobs remain freely
+/// overridable; those have dedicated UI fields but power users may want to
+/// bypass them.
 pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
-    // Identity / secrets.
-    "BUZZ_PRIVATE_KEY",
-    "NOSTR_PRIVATE_KEY",
-    "BUZZ_AUTH_TAG",
+    // Native identity and daemon ownership are provisioned by the desktop.
+    "X0X_DATA_DIR",
+    "X0X_OWNER_AGENT_ID",
+    "X0X_AGENT_ID",
+    // Desktop-owned local API credentials.
     "BUZZ_API_TOKEN",
     "BUZZ_ACP_PRIVATE_KEY",
     "BUZZ_ACP_API_TOKEN",
-    // Relay URL: overriding would let a malicious config redirect the
-    // agent to an attacker-controlled relay.
-    "BUZZ_RELAY_URL",
     // Code-execution surface: overriding would let the user run arbitrary
     // binaries/args as the agent process.
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
-    // Security gates: respond-to mode + allowlist + legacy owner-only
-    // fallback. Overriding would make the running agent's gate diverge
-    // from the saved/UI-visible settings.
+    // Security gates: response mode and allowlist must match saved state.
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
-    "BUZZ_ACP_AGENT_OWNER",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.
@@ -94,11 +86,10 @@ pub(crate) fn is_reserved_env_key(key: &str) -> bool {
 /// nit: Rust's `Command::env` will happily accept a key containing `=`
 /// or whitespace and pass it straight into the child's environ block,
 /// where `getenv("FOO")` then matches whatever comes after the first
-/// `=`. That means a key like `BUZZ_AUTH_TAG=x` with value `forged`
-/// lands as `BUZZ_AUTH_TAG=x=forged` in the child env and
-/// `getenv("BUZZ_AUTH_TAG")` returns `"x=forged"` — a full reserved-
-/// key bypass. Rejecting non-POSIX keys closes this hole at the
-/// boundary where the input enters the system.
+/// `=`. That means a key like `X0X_AGENT_ID=x` with value `forged`
+/// lands as `X0X_AGENT_ID=x=forged` in the child env and
+/// `getenv("X0X_AGENT_ID")` returns `"x=forged"` — a full reserved-key
+/// bypass. Rejecting non-POSIX keys closes this hole at the input boundary.
 pub(crate) fn is_well_formed_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     match chars.next() {

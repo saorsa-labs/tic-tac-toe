@@ -15,6 +15,7 @@ import {
   buildVirtualizedItems,
   didPrependVirtualizedTimeline,
   estimateVirtualizedTimelineItemHeight,
+  isVirtualizedAtBottom,
   type VirtualizedTimelineItem,
   virtualizedItemKey,
 } from "@/features/messages/lib/virtualizedTimelineItems";
@@ -39,6 +40,7 @@ import { SystemMessageRow } from "./SystemMessageRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useTimelineRetention } from "./useTimelineRetention";
 import { useUpwardPaginationWheel } from "./useUpwardPaginationWheel";
+import { useVirtualizedBottomGeometry } from "./useVirtualizedBottomGeometry";
 import { useVirtualizedBottomSettle } from "./useVirtualizedBottomSettle";
 
 export type TimelineVirtualizerApi = {
@@ -54,7 +56,7 @@ type TimelineMessageListProps = {
   channelId?: string | null;
   channelName?: string;
   channelType?: ChannelType | null;
-  currentPubkey?: string;
+  currentAgentId?: string;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
   /** Event id of the oldest unread top-level message; renders a "New" divider above it. */
@@ -125,7 +127,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   channelId,
   channelName,
   channelType,
-  currentPubkey,
+  currentAgentId,
   firstUnreadMessageId = null,
   followThreadById,
   highlightedMessageId = null,
@@ -234,7 +236,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         case "system":
           return (
             <SystemRow
-              currentPubkey={currentPubkey}
+              currentAgentId={currentAgentId}
               entry={item.entry}
               footer={messageFooters?.[item.entry.message.id] ?? null}
               onToggleReaction={onToggleReaction}
@@ -245,7 +247,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         case "system-group":
           return (
             <SystemRow
-              currentPubkey={currentPubkey}
+              currentAgentId={currentAgentId}
               entries={item.entries}
               footer={item.entries.map(
                 (entry) => messageFooters?.[entry.message.id] ?? null,
@@ -259,7 +261,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
           return (
             <MessageRowItem
               channelId={channelId}
-              currentPubkey={currentPubkey}
+              currentAgentId={currentAgentId}
               entry={item.entry}
               followThreadById={followThreadById}
               footer={messageFooters?.[item.entry.message.id] ?? null}
@@ -293,7 +295,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     },
     [
       channelId,
-      currentPubkey,
+      currentAgentId,
       followThreadById,
       highlightedMessageId,
       huddleMemberPubkeys,
@@ -478,15 +480,24 @@ function VirtualizedTimelineRows({
     prependWatcherFrameRef.current = null;
     prependAnchorRef.current = null;
   }, []);
+  const recomputeAtBottom = useVirtualizedBottomGeometry(
+    hostRef,
+    items.length,
+    onAtBottomStateChange,
+  );
   const { cancel: cancelBottomSettle, settle: settleAtBottom } =
-    useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
+    useVirtualizedBottomSettle(
+      hostRef,
+      listRef,
+      itemsLengthRef,
+      recomputeAtBottom,
+    );
   const retireTimelineSettle = React.useCallback(() => {
     retirePrependAnchor();
     cancelBottomSettle();
   }, [cancelBottomSettle, retirePrependAnchor]);
   const { arm: armUpwardMomentum, clear: clearUpwardMomentum } =
     useUpwardPaginationWheel(hostRef, retireTimelineSettle);
-
   const capturePrependAnchor = React.useCallback(() => {
     // Keep the pending capture current while the fetch is in flight. Once the
     // prepend commits and the watcher starts, its baseline is frozen.
@@ -669,9 +680,12 @@ function VirtualizedTimelineRows({
       const scroller = hostRef.current?.firstElementChild;
       if (!list || !(scroller instanceof HTMLDivElement)) return;
       onVirtualizerRangeChanged?.();
-      const distanceFromBottom = list.scrollSize - list.viewportSize - offset;
-      if (distanceFromBottom > 32) cancelBottomSettle();
-      onAtBottomStateChange?.(distanceFromBottom <= 32);
+      const atBottom = isVirtualizedAtBottom(
+        list.scrollSize,
+        list.viewportSize,
+        offset,
+      );
+      onAtBottomStateChange?.(atBottom);
       if (
         prependAnchorRef.current !== null ||
         offset <= 200 ||
@@ -686,7 +700,6 @@ function VirtualizedTimelineRows({
     },
     [
       armUpwardMomentum,
-      cancelBottomSettle,
       capturePrependAnchor,
       onAtBottomStateChange,
       onStartReached,
@@ -716,6 +729,7 @@ function VirtualizedTimelineRows({
                 <div
                   aria-hidden
                   className="h-[var(--composer-overlay-height,6rem)]"
+                  data-bottom-spacer
                   key={virtualizedItemKey(item)}
                 />
               );
@@ -781,7 +795,7 @@ function TimelineRowShell({
 }
 
 function SystemRow({
-  currentPubkey,
+  currentAgentId,
   entries,
   entry,
   footer,
@@ -789,7 +803,7 @@ function SystemRow({
   profiles,
   ownerProfiles,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
   entries?: MainTimelineEntry[];
   entry?: MainTimelineEntry;
   footer: React.ReactNode;
@@ -810,7 +824,7 @@ function SystemRow({
       <SystemMessageRow
         groupedMessages={groupedMessages}
         message={firstEntry.message}
-        currentPubkey={currentPubkey}
+        currentAgentId={currentAgentId}
         onToggleReaction={onToggleReaction}
         profiles={profiles}
         ownerProfiles={ownerProfiles}
@@ -823,7 +837,7 @@ function SystemRow({
 type MessageRowItemProps = Pick<
   TimelineMessageListProps,
   | "channelId"
-  | "currentPubkey"
+  | "currentAgentId"
   | "followThreadById"
   | "highlightedMessageId"
   | "huddleMemberPubkeys"
@@ -854,7 +868,7 @@ type MessageRowItemProps = Pick<
 
 function MessageRowItem({
   channelId,
-  currentPubkey,
+  currentAgentId,
   entry,
   followThreadById,
   footer,
@@ -884,7 +898,7 @@ function MessageRowItem({
   const { message, summary } = entry;
   const canManage = canManageMessageForCurrentUser(
     message,
-    currentPubkey,
+    currentAgentId,
     profiles,
   );
   const canDelete = canManage && onDelete ? onDelete : undefined;

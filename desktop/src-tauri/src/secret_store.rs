@@ -537,163 +537,6 @@ impl SecretStore {
         }
     }
 
-    /// Load the secret for `key`. `Ok(None)` when there is no entry; `Err` only
-    /// when the backend errored in a way that is not "missing".
-    ///
-    /// On first launch after an upgrade from the per-key DPK format, the blob
-    /// will not exist yet. In that case the macOS path falls back to reading the
-    /// old per-key DPK entry for `key` specifically, writes it into a new blob,
-    /// and deletes the old item — a one-time migration per key. The same
-    /// migration fires when the blob exists but the key is absent, covering
-    /// partial-migration scenarios (e.g. identity migrated first, agents not yet).
-    pub fn load(&self, key: &str) -> Result<Option<String>, String> {
-        #[cfg(feature = "system-keyring")]
-        {
-            match self.load_blob() {
-                Ok(Some(map)) => {
-                    if let Some(value) = map.get(key) {
-                        Ok(Some(value.clone()))
-                    } else {
-                        // Blob exists but key absent — attempt migration from old
-                        // per-key entry. migrate_legacy_key writes the result into
-                        // the blob if found, so subsequent loads hit the cache.
-                        self.migrate_legacy_key(key)
-                    }
-                }
-                Ok(None) => {
-                    // No blob yet — attempt one-time migration from old per-key
-                    // DPK entry (macOS) or return Ok(None) (other platforms).
-                    self.migrate_legacy_key(key)
-                }
-                Err(e) => Err(e),
-            }
-        }
-        #[cfg(not(feature = "system-keyring"))]
-        {
-            let _ = key;
-            Err("system-keyring feature disabled".to_string())
-        }
-    }
-
-    /// Read the secret for `key` without any legacy-migration side effects.
-    ///
-    /// Read the entire blob without any legacy-migration side effects.
-    ///
-    /// Returns the full key→value map when a blob exists, `Ok(None)` when no
-    /// blob has been written yet, and `Err` only when the backend is
-    /// unavailable. Never calls `migrate_legacy_key`.
-    pub fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
-        #[cfg(feature = "system-keyring")]
-        {
-            self.load_blob()
-        }
-        #[cfg(not(feature = "system-keyring"))]
-        {
-            Err("system-keyring feature disabled".to_string())
-        }
-    }
-
-    /// Insert all entries from `entries` into the blob in a single mutation.
-    ///
-    /// Entries that already exist in the blob are overwritten; entries not
-    /// present in `entries` are left unchanged. If the resulting blob is
-    /// identical to what is already stored, no keychain write occurs.
-    pub fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
-        #[cfg(feature = "system-keyring")]
-        {
-            self.mutate_blob(|map| {
-                for (k, v) in entries {
-                    map.insert(k.clone(), v.clone());
-                }
-            })
-        }
-        #[cfg(not(feature = "system-keyring"))]
-        {
-            let _ = entries;
-            Err("system-keyring feature disabled".to_string())
-        }
-    }
-
-    /// On first launch after upgrading from the per-key DPK format, read the
-    /// old DPK entry for `key`, write it into a new blob, and delete the old
-    /// item. Returns `Ok(None)` when no old entry exists.
-    ///
-    /// Also handles a one-time migration from the DPK blob format written by
-    /// #1267 (before the dev/release split was fixed). Anyone who ran main
-    /// while #1267 was present has a DPK blob instead of per-key entries; this
-    /// reads it, merges all keys into the legacy blob, and deletes the DPK blob.
-    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
-    fn migrate_legacy_key(&self, key: &str) -> Result<Option<String>, String> {
-        // One-time migration: check for a DPK blob (key = BLOB_KEY = "secrets")
-        // written by #1267 before the dev/release split was fixed.
-        match generic_password(dpk_opts(&self.service, BLOB_KEY)) {
-            Ok(bytes) => {
-                let json = String::from_utf8(bytes).map_err(|e| format!("dpk blob utf8: {e}"))?;
-                let dpk_map = serde_json::from_str::<HashMap<String, String>>(&json)
-                    .map_err(|e| format!("dpk blob json: {e}"))?;
-                // Merge all keys from the DPK blob into the legacy blob.
-                self.mutate_blob(|map| {
-                    for (k, v) in &dpk_map {
-                        map.entry(k.clone()).or_insert_with(|| v.clone());
-                    }
-                })?;
-                // Best-effort delete the DPK blob.
-                let _ = delete_generic_password_options(dpk_opts(&self.service, BLOB_KEY));
-                return Ok(dpk_map.get(key).cloned());
-            }
-            Err(ref e) if is_not_found(e) => {
-                // No DPK blob — fall through to per-key migration.
-            }
-            Err(ref e) if is_dpk_unavailable(e) => {
-                // Unsigned dev build — DPK inaccessible, fall through.
-            }
-            Err(e) => return Err(format!("dpk blob read: {e}")),
-        }
-
-        // Try the old per-key DPK entry.
-        match generic_password(dpk_opts(&self.service, key)) {
-            Ok(bytes) => {
-                let value = String::from_utf8(bytes).map_err(|e| format!("keyring utf8: {e}"))?;
-                // Write into blob (creates the blob if it doesn't exist).
-                self.store(key, &value)?;
-                // Best-effort cleanup of the old per-key entry.
-                let _ = delete_generic_password_options(dpk_opts(&self.service, key));
-                Ok(Some(value))
-            }
-            Err(ref e) if is_not_found(e) => {
-                // Also check the old keyring-crate entry (pre-#1264 installs).
-                self.migrate_legacy_key_keyring(key)
-            }
-            Err(ref e) if is_dpk_unavailable(e) => {
-                // Unsigned dev build — check old keyring-crate entry only.
-                self.migrate_legacy_key_keyring(key)
-            }
-            Err(e) => Err(format!("keyring get: {e}")),
-        }
-    }
-
-    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
-    fn migrate_legacy_key(&self, key: &str) -> Result<Option<String>, String> {
-        // Non-macOS: no DPK, just check the old keyring-crate per-key entry.
-        self.migrate_legacy_key_keyring(key)
-    }
-
-    /// Check the old per-key `keyring` crate entry (pre-#1264 format) and
-    /// migrate it into the blob if found.
-    #[cfg(feature = "system-keyring")]
-    fn migrate_legacy_key_keyring(&self, key: &str) -> Result<Option<String>, String> {
-        let entry = keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
-        match entry.get_password() {
-            Ok(value) => {
-                self.store(key, &value)?;
-                let _ = entry.delete_credential();
-                Ok(Some(value))
-            }
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(format!("keyring get: {e}")),
-        }
-    }
-
     /// Verify that `key` holds `expected` by reading directly from the OS
     /// backend, bypassing the in-process cache. This is the key innovation for
     /// read-back verification: it proves the OS keyring round-trip, not just
@@ -896,29 +739,6 @@ impl SecretStore {
             true // No keyring = nothing to verify.
         }
     }
-
-    /// Delete the secret for `key`. A missing entry is not an error.
-    pub fn delete(&self, key: &str) -> Result<(), String> {
-        #[cfg(feature = "system-keyring")]
-        {
-            self.mutate_blob(|map| {
-                map.remove(key);
-            })?;
-            // Best-effort: also delete any old per-key entry for this key to
-            // prevent resurrection on the next probe/load (migration path).
-            #[cfg(target_os = "macos")]
-            let _ = delete_generic_password_options(dpk_opts(&self.service, key));
-            if let Ok(entry) = keyring_entry(&self.service, key) {
-                let _ = entry.delete_credential();
-            }
-            Ok(())
-        }
-        #[cfg(not(feature = "system-keyring"))]
-        {
-            let _ = key;
-            Err("system-keyring feature disabled".to_string())
-        }
-    }
 }
 
 #[cfg(all(test, feature = "system-keyring"))]
@@ -943,110 +763,6 @@ mod tests {
         // Cache is warm and contains "identity" — probe must return Present
         // without touching the keychain.
         assert_eq!(store.probe("identity"), KeyringProbe::Present);
-    }
-
-    #[test]
-    fn load_returns_value_when_key_in_cache() {
-        let mut map = HashMap::new();
-        map.insert("identity".to_string(), "nsec1test".to_string());
-        let store = SecretStore::with_cache("buzz-test-load-cache-hit", Some(map));
-        // Cache is warm and contains "identity" — load must return the value
-        // without touching the keychain.
-        assert_eq!(
-            store.load("identity").unwrap(),
-            Some("nsec1test".to_string())
-        );
-    }
-
-    // ── Cross-process race tests (require real OS keychain) ────────────────
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn test_stale_warm_cache_add_observes_prior_write() {
-        // Simulates the cross-process race that stranded Will's agent keys.
-        //
-        // Setup: two SecretStore instances for the same service (= two
-        // "processes" with separate caches). Process A warms its cache to
-        // {k1}. Process B then writes {k1, k2}. Without the fix, A's next
-        // mutate_blob would build from its stale {k1} cache and write
-        // {k1, k3}, silently dropping k2. With the fix, A always re-reads
-        // from the keychain inside the lock, so the result is {k1, k2, k3}.
-        let svc = "buzz-test-race-stale-cache";
-
-        // Clean state.
-        let setup = SecretStore::keyring(svc);
-        let _ = setup.delete("k1");
-        let _ = setup.delete("k2");
-        let _ = setup.delete("k3");
-
-        // Process A: write k1, warming its cache.
-        let store_a = SecretStore::keyring(svc);
-        store_a.store("k1", "v1").unwrap();
-
-        // Process B: write k2 (separate instance = separate cache).
-        let store_b = SecretStore::keyring(svc);
-        store_b.store("k2", "v2").unwrap();
-
-        // Process A: write k3. With the fix, A re-reads inside the lock and
-        // sees {k1, k2} before appending k3 — result must be {k1, k2, k3}.
-        store_a.store("k3", "v3").unwrap();
-
-        // Verify via a third reader (clean cache).
-        let reader = SecretStore::keyring(svc);
-        assert_eq!(
-            reader.load("k1").unwrap(),
-            Some("v1".to_string()),
-            "k1 must survive"
-        );
-        assert_eq!(
-            reader.load("k2").unwrap(),
-            Some("v2".to_string()),
-            "k2 must not be dropped"
-        );
-        assert_eq!(
-            reader.load("k3").unwrap(),
-            Some("v3".to_string()),
-            "k3 must be written"
-        );
-
-        // Cleanup.
-        let _ = reader.delete("k1");
-        let _ = reader.delete("k2");
-        let _ = reader.delete("k3");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn test_concurrent_adds_neither_key_dropped() {
-        // Two sequential stores from distinct instances (simulating two
-        // processes each adding one key) must both be durably visible.
-        let svc = "buzz-test-race-concurrent-add";
-
-        let setup = SecretStore::keyring(svc);
-        let _ = setup.delete("agent_a");
-        let _ = setup.delete("agent_b");
-
-        let store1 = SecretStore::keyring(svc);
-        store1.store("agent_a", "nsec1aaa").unwrap();
-
-        let store2 = SecretStore::keyring(svc);
-        store2.store("agent_b", "nsec1bbb").unwrap();
-
-        let reader = SecretStore::keyring(svc);
-        assert_eq!(
-            reader.load("agent_a").unwrap(),
-            Some("nsec1aaa".to_string()),
-            "agent_a must not be dropped"
-        );
-        assert_eq!(
-            reader.load("agent_b").unwrap(),
-            Some("nsec1bbb".to_string()),
-            "agent_b must not be dropped"
-        );
-
-        // Cleanup.
-        let _ = reader.delete("agent_a");
-        let _ = reader.delete("agent_b");
     }
 
     #[test]
@@ -1107,57 +823,6 @@ mod tests {
         );
     }
 
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn mutate_blob_does_not_advance_cache_on_write_failure() {
-        // Copy-on-write safety: if `write_blob_raw` fails (denied prompt,
-        // transient outage, ACL rejection), the cache must stay at the last
-        // known durable state. A subsequent `store()` for the same key/value
-        // must NOT be skipped as a no-op — the equality check must compare
-        // against the durable cache, not an unpersisted candidate.
-        //
-        // This is a real-keychain integration test. Run locally with:
-        //   cargo test -p buzz-desktop -- --ignored mutate_blob_does_not_advance
-        //
-        // On a machine with a reachable keychain the `store()` call succeeds
-        // (result.is_ok()) and the write-failure branch is skipped — the test
-        // still passes. On a machine where the write is denied (e.g., user
-        // clicks Deny in the macOS prompt) result.is_err() and the assertions
-        // below verify the cache invariant. We verify that after an error:
-        //   1. The cache is not advanced (the previously cached key is intact).
-        //   2. The failed key is not present (the dirty candidate was discarded).
-        let mut map = HashMap::new();
-        map.insert("existing".to_string(), "durable_val".to_string());
-        let store = SecretStore::with_cache("buzz-test-cow-write-fail", Some(map));
-
-        // Attempt to add a new key — this calls write_blob_raw against the
-        // real keychain; with copy-on-write the cache must remain at {existing}
-        // if the write fails.
-        let result = store.store("new_key", "new_val");
-
-        if result.is_err() {
-            // Write failed (e.g., user denied the keychain prompt): confirm
-            // cache was not advanced — the existing key is still intact and
-            // the new key was never committed to the in-memory state.
-            assert_eq!(
-                store.load("existing").unwrap(),
-                Some("durable_val".to_string()),
-                "cache must remain at last durable state after write failure"
-            );
-            // load("new_key") goes through the unchanged cache (no entry),
-            // then attempts migrate_legacy_key which also fails on a denied
-            // keychain, returning either Ok(None) or Err — either is correct
-            // since the key was never durably stored.
-            let after = store.load("new_key");
-            assert!(
-                matches!(after, Ok(None) | Err(_)),
-                "a key whose write failed must not be visible via load: {after:?}"
-            );
-        }
-        // If result.is_ok() the write succeeded — the cache-integrity invariant
-        // does not apply to the success path; no assertion needed here.
-    }
-
     #[test]
     fn availability_error_discriminator() {
         assert!(is_keyring_availability_error("dbus connection failed"));
@@ -1193,20 +858,6 @@ mod tests {
 
     #[ignore = "requires real OS keychain (run locally)"]
     #[test]
-    fn blob_stores_and_retrieves_multiple_keys() {
-        let store = SecretStore::keyring("buzz-test-blob-multi");
-        store.store("key_a", "val_a").unwrap();
-        store.store("key_b", "val_b").unwrap();
-        assert_eq!(store.load("key_a").unwrap(), Some("val_a".to_string()));
-        assert_eq!(store.load("key_b").unwrap(), Some("val_b".to_string()));
-        assert_eq!(store.load("key_c").unwrap(), None);
-        // Cleanup.
-        let _ = store.delete("key_a");
-        let _ = store.delete("key_b");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
     fn blob_probe_present_absent_unreachable() {
         let store = SecretStore::keyring("buzz-test-blob-probe");
         // No blob yet — key absent, backend reachable.
@@ -1217,53 +868,6 @@ mod tests {
         // Different key — blob exists but key absent.
         assert_eq!(store.probe("other"), KeyringProbe::ReachableButEmpty);
         // Cleanup.
-        let _ = store.delete("identity");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn blob_delete_removes_key_not_others() {
-        let store = SecretStore::keyring("buzz-test-blob-delete");
-        store.store("keep", "keep_val").unwrap();
-        store.store("remove", "remove_val").unwrap();
-        store.delete("remove").unwrap();
-        assert_eq!(store.load("keep").unwrap(), Some("keep_val".to_string()));
-        assert_eq!(store.load("remove").unwrap(), None);
-        // Cleanup.
-        let _ = store.delete("keep");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn blob_migration_from_per_key_entry() {
-        let svc = "buzz-test-blob-migration";
-        let key = "identity";
-        let value = "nsec1migrationtest";
-
-        // Seed a per-key entry (old format) — no blob exists.
-        let entry = keyring_entry(svc, key).unwrap();
-        entry.set_password(value).unwrap();
-
-        // Fresh store — no blob in the keychain yet.
-        let store = SecretStore::keyring(svc);
-
-        // probe should find the legacy key.
-        assert_eq!(store.probe(key), KeyringProbe::Present);
-
-        // load should migrate it into the blob and return the value.
-        assert_eq!(store.load(key).unwrap(), Some(value.to_string()));
-
-        // Old per-key entry should be cleaned up.
-        let entry = keyring_entry(svc, key).unwrap();
-        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
-
-        // Key is now in the blob — probe confirms.
-        let store2 = SecretStore::keyring(svc);
-        assert_eq!(store2.probe(key), KeyringProbe::Present);
-        assert_eq!(store2.load(key).unwrap(), Some(value.to_string()));
-
-        // Cleanup.
-        let _ = store2.delete(key);
     }
 
     #[ignore = "requires real OS keychain (run locally)"]
@@ -1295,12 +899,10 @@ mod tests {
             KeyringProbe::ReachableButEmpty,
             "per-key identity must not survive delete_all_with_legacy_cleanup"
         );
+        assert_eq!(store3.probe(key), KeyringProbe::ReachableButEmpty);
         assert_eq!(
-            store3.load(key).unwrap(),
-            None,
-            "load must not resurrect the legacy per-key identity"
+            store3.probe("agent:abc123"),
+            KeyringProbe::ReachableButEmpty
         );
-        // Agent key should also be gone.
-        assert_eq!(store3.load("agent:abc123").unwrap(), None);
     }
 }

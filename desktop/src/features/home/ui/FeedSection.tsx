@@ -7,8 +7,6 @@ import {
 import type { FeedItem } from "@/shared/api/types";
 import {
   KIND_APPROVAL_REQUEST,
-  KIND_FORUM_COMMENT,
-  KIND_FORUM_POST,
   KIND_JOB_ACCEPTED,
   KIND_JOB_CANCEL,
   KIND_JOB_ERROR,
@@ -73,10 +71,6 @@ function feedHeadline(item: FeedItem) {
       return "Job cancelled";
     case KIND_JOB_ERROR:
       return "Job failed";
-    case KIND_FORUM_POST:
-      return "Forum post";
-    case KIND_FORUM_COMMENT:
-      return "Forum reply";
     case KIND_APPROVAL_REQUEST:
       return "Approval requested";
     default:
@@ -115,7 +109,7 @@ type FeedSectionProps = {
   emptyDescription: string;
   icon: LucideIcon;
   items: FeedItem[];
-  currentPubkey?: string;
+  currentAgentId?: string;
   profiles?: UserProfileLookup;
   availableChannelIds: ReadonlySet<string>;
   doneSet: ReadonlySet<string>;
@@ -131,7 +125,7 @@ export function FeedSection({
   emptyDescription,
   icon: Icon,
   items,
-  currentPubkey,
+  currentAgentId,
   profiles,
   availableChannelIds,
   doneSet,
@@ -201,7 +195,7 @@ export function FeedSection({
                       }
                       displayName={resolveUserLabel({
                         pubkey: item.pubkey,
-                        currentPubkey,
+                        currentAgentId,
                         profiles,
                         preferResolvedSelfLabel: true,
                       })}
@@ -209,7 +203,7 @@ export function FeedSection({
                     />
                     {resolveUserLabel({
                       pubkey: item.pubkey,
-                      currentPubkey,
+                      currentAgentId,
                       profiles,
                       preferResolvedSelfLabel: true,
                     })}

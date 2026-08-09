@@ -57,6 +57,9 @@ pub enum EngramError {
     /// Signing error.
     #[error("sign failed: {0}")]
     Sign(String),
+    /// Key derivation or MAC initialization failed.
+    #[error("crypto initialization failed: {0}")]
+    Crypto(String),
 }
 
 /// Validate a slug against the *Slugs* grammar.
@@ -133,24 +136,25 @@ pub fn normalize_slug(raw: &str) -> Result<String, EngramError> {
 /// Derive the conversation key `K_c` for the agent ↔ owner pair (NIP-44 v2).
 ///
 /// `K_c` is symmetric: `derive(seckey_a, pubkey_o) == derive(seckey_o, pubkey_a)`.
-pub fn conversation_key(my_seckey: &SecretKey, their_pubkey: &PublicKey) -> ConversationKey {
-    ConversationKey::derive(my_seckey, their_pubkey).expect("valid keys produce conversation key")
+pub fn conversation_key(
+    my_seckey: &SecretKey,
+    their_pubkey: &PublicKey,
+) -> Result<ConversationKey, EngramError> {
+    ConversationKey::derive(my_seckey, their_pubkey)
+        .map_err(|error| EngramError::Crypto(error.to_string()))
 }
 
 /// Compute the `d` tag for a slug under a conversation key.
 ///
 /// `d = lower_hex(HMAC-SHA256(K_c, "agent-memory/v1/d-tag" || 0x00 || slug))`,
 /// 64 hex characters.
-pub fn d_tag(k_c: &ConversationKey, slug: &str) -> String {
-    // HMAC-SHA256 accepts a key of any byte length; `new_from_slice` only
-    // returns `Err` for fixed-length MAC variants. This is infallible for
-    // SHA-256 and propagating it would just add noise at every call site.
+pub fn d_tag(k_c: &ConversationKey, slug: &str) -> Result<String, EngramError> {
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(k_c.as_bytes())
-        .expect("HMAC-SHA256 is keyed-prefix MAC; new_from_slice cannot fail");
+        .map_err(|error| EngramError::Crypto(error.to_string()))?;
     mac.update(D_TAG_DOMAIN);
     mac.update(&[0u8]);
     mac.update(slug.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// A decoded engram body. The slug discriminates the variant.
@@ -449,7 +453,7 @@ pub fn build_event(
     let plaintext_str = std::str::from_utf8(&plaintext)
         .map_err(|e| EngramError::Encrypt(format!("body JSON not UTF-8: {e}")))?;
 
-    let k_c = conversation_key(agent_keys.secret_key(), owner_pubkey);
+    let k_c = conversation_key(agent_keys.secret_key(), owner_pubkey)?;
     let ciphertext = nip44::encrypt(
         agent_keys.secret_key(),
         owner_pubkey,
@@ -458,7 +462,7 @@ pub fn build_event(
     )
     .map_err(|e| EngramError::Encrypt(e.to_string()))?;
 
-    let d = d_tag(&k_c, body.slug());
+    let d = d_tag(&k_c, body.slug())?;
     let tags = vec![
         Tag::parse(["d", &d]).map_err(|e| EngramError::Encrypt(e.to_string()))?,
         Tag::parse(["p", &owner_pubkey.to_hex()])
@@ -546,8 +550,8 @@ pub fn validate_and_decrypt(
     let body = Body::from_json_bytes(plaintext.as_bytes())?;
 
     // Rule (4): body slug re-derives to the event's d tag.
-    let k_c = conversation_key(my_seckey, their_pubkey);
-    let derived = d_tag(&k_c, body.slug());
+    let k_c = conversation_key(my_seckey, their_pubkey)?;
+    let derived = d_tag(&k_c, body.slug())?;
     if derived != d_value {
         return Err(EngramError::InvalidEnvelope(
             "body slug does not re-derive to d tag".into(),
@@ -636,8 +640,8 @@ mod tests {
     fn conversation_key_matches_spec() {
         let a = keys_from_hex(SECKEY_A);
         let o = keys_from_hex(SECKEY_O);
-        let k_c_ao = conversation_key(a.secret_key(), &o.public_key());
-        let k_c_oa = conversation_key(o.secret_key(), &a.public_key());
+        let k_c_ao = conversation_key(a.secret_key(), &o.public_key()).expect("agent key");
+        let k_c_oa = conversation_key(o.secret_key(), &a.public_key()).expect("owner key");
         assert_eq!(hex::encode(k_c_ao.as_bytes()), K_C_HEX, "agent-side K_c");
         assert_eq!(hex::encode(k_c_oa.as_bytes()), K_C_HEX, "owner-side K_c");
     }
@@ -646,10 +650,13 @@ mod tests {
     fn d_tags_match_spec() {
         let a = keys_from_hex(SECKEY_A);
         let o = keys_from_hex(SECKEY_O);
-        let k_c = conversation_key(a.secret_key(), &o.public_key());
-        assert_eq!(d_tag(&k_c, "core"), D_CORE);
-        assert_eq!(d_tag(&k_c, "mem/example"), D_EXAMPLE);
-        assert_eq!(d_tag(&k_c, "mem/notes/2026-05-12"), D_NOTES);
+        let k_c = conversation_key(a.secret_key(), &o.public_key()).expect("conversation key");
+        assert_eq!(d_tag(&k_c, "core").expect("core tag"), D_CORE);
+        assert_eq!(d_tag(&k_c, "mem/example").expect("example tag"), D_EXAMPLE);
+        assert_eq!(
+            d_tag(&k_c, "mem/notes/2026-05-12").expect("notes tag"),
+            D_NOTES
+        );
     }
 
     #[test]

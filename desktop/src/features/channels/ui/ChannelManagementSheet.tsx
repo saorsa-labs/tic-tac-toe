@@ -1,9 +1,7 @@
 import {
   Archive,
-  BookOpenText,
   Copy,
   DoorClosed,
-  DoorOpen,
   FileText,
   Fingerprint,
   Eye,
@@ -21,11 +19,9 @@ import { toast } from "sonner";
 
 import {
   useArchiveChannelMutation,
-  useCanvasQuery,
   useChannelDetailsQuery,
   useChannelMembersQuery,
   useDeleteChannelMutation,
-  useJoinChannelMutation,
   useLeaveChannelMutation,
   useUnarchiveChannelMutation,
   useUpdateChannelMutation,
@@ -63,7 +59,6 @@ import {
   PANEL_ENTER_MOTION_CLASS,
   PANEL_OVERLAY_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
-import { ChannelCanvas } from "./ChannelCanvas";
 import {
   CHANNEL_FORM_FIELD_CONTROL_CLASS,
   CHANNEL_FORM_FIELD_SHELL_CLASS,
@@ -75,9 +70,7 @@ import {
   ChannelQuickAction,
   CopyFieldRow,
   FieldGroup,
-  getMarkdownPreviewText,
   InfoFieldRow,
-  IngressRow,
   NarrativeField,
   NarrativeGroup,
 } from "./ChannelManagementSheetRows";
@@ -90,7 +83,7 @@ import { writeTextToClipboard } from "@/shared/lib/clipboard";
 type ChannelManagementSheetProps = {
   channel: Channel | null;
   animateSplitEnter?: boolean;
-  currentPubkey?: string;
+  currentAgentId?: string;
   layout?: "overlay" | "split";
   onDeleted?: () => void;
   onOpenChange: (open: boolean) => void;
@@ -101,7 +94,7 @@ type ChannelManagementSheetProps = {
 export function ChannelManagementSheet({
   animateSplitEnter = false,
   channel,
-  currentPubkey,
+  currentAgentId,
   layout = "overlay",
   onDeleted,
   onOpenChange,
@@ -117,12 +110,10 @@ export function ChannelManagementSheet({
   const channelId = channel?.id ?? null;
   const detailsQuery = useChannelDetailsQuery(channelId, open);
   const membersQuery = useChannelMembersQuery(channelId, open);
-  const canvasQuery = useCanvasQuery(channelId, channelId !== null && open);
   const updateChannelDetailsMutation = useUpdateChannelMutation(channelId);
   const archiveChannelMutation = useArchiveChannelMutation(channelId);
   const unarchiveChannelMutation = useUnarchiveChannelMutation(channelId);
   const deleteChannelMutation = useDeleteChannelMutation(channelId);
-  const joinChannelMutation = useJoinChannelMutation(channelId);
   const leaveChannelMutation = useLeaveChannelMutation(channelId);
   const channelIdRef = React.useRef(channelId);
   channelIdRef.current = channelId;
@@ -131,25 +122,17 @@ export function ChannelManagementSheet({
   const members = React.useMemo(() => {
     const currentMembers = membersQuery.data ?? [];
     return [...currentMembers].sort((left, right) =>
-      compareMembersByRole(left, right, currentPubkey),
+      compareMembersByRole(left, right, currentAgentId),
     );
-  }, [currentPubkey, membersQuery.data]);
+  }, [currentAgentId, membersQuery.data]);
   const selfMember =
-    members.find((member) => member.pubkey === currentPubkey) ?? null;
+    members.find((member) => member.pubkey === currentAgentId) ?? null;
   const hasResolvedMembership = membersQuery.data !== undefined;
 
   const { canDeleteChannel, canManageChannel } =
-    useChannelModerationCapabilities(membersQuery.data, currentPubkey, open);
-  const canEditNarrative =
-    canManageChannel && selfMember !== null && detail?.channelType !== "dm";
+    useChannelModerationCapabilities(membersQuery.data, currentAgentId, open);
   const isArchived =
     detail?.archivedAt !== null && detail?.archivedAt !== undefined;
-  const canJoin =
-    hasResolvedMembership &&
-    detail?.channelType !== "dm" &&
-    detail?.visibility === "open" &&
-    !isArchived &&
-    selfMember === null;
   const canLeave =
     hasResolvedMembership &&
     detail?.channelType !== "dm" &&
@@ -171,9 +154,6 @@ export function ChannelManagementSheet({
     React.useState(false);
   const [hasUserEditedChannelDraft, setHasUserEditedChannelDraft] =
     React.useState(false);
-  const [activeView, setActiveView] = React.useState<"summary" | "canvas">(
-    "summary",
-  );
 
   // Sync drafts from server only when the sheet opens or the channel changes -
   // not on every background refetch, which would clobber in-flight edits.
@@ -184,7 +164,6 @@ export function ChannelManagementSheet({
       syncedForRef.current = null;
       setIsDeleteDialogOpen(false);
       setIsEditDialogOpen(false);
-      setActiveView("summary");
       return;
     }
     if (!detail) {
@@ -203,7 +182,6 @@ export function ChannelManagementSheet({
     setIsEphemeralDraft(detail.ttlSeconds !== null);
     setTtlSecondsDraft(detail.ttlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
     setHasUserEditedChannelDraft(false);
-    setActiveView("summary");
   }, [detail, open]);
 
   if (!channel) {
@@ -257,12 +235,6 @@ export function ChannelManagementSheet({
     hasUserEditedChannelDraft &&
     hasChannelEditChanges &&
     !isSavingChannelEdits;
-  const canvasContent = canvasQuery.data?.content?.trim() ?? "";
-  const hasCanvas = canvasContent.length > 0;
-  const canvasPreview = hasCanvas
-    ? getMarkdownPreviewText(canvasContent)
-    : undefined;
-  const canOpenCanvas = hasCanvas || canEditNarrative;
 
   function handleEditDialogOpenChange(next: boolean) {
     if (!next) {
@@ -349,16 +321,9 @@ export function ChannelManagementSheet({
           onPointerDownOutside={(event) => event.preventDefault()}
         >
           <ChannelManagementPanelContent
-            activeView={activeView}
             archiveChannelMutation={archiveChannelMutation}
-            canEditNarrative={canEditNarrative}
-            canJoin={canJoin}
             canLeave={canLeave}
             canManageChannel={canManageChannel}
-            canOpenCanvas={canOpenCanvas}
-            canvasPreview={canvasPreview}
-            canvasQuery={canvasQuery}
-            channelId={channelId}
             deleteChannelMutation={deleteChannelMutation}
             detailsError={detailsQuery.error}
             handleDeleteChannel={handleDeleteChannel}
@@ -369,13 +334,11 @@ export function ChannelManagementSheet({
             canDeleteChannel={canDeleteChannel}
             mode={auxiliaryPanelMode}
             transparentChrome={transparentChrome}
-            joinChannelMutation={joinChannelMutation}
             leaveChannelMutation={leaveChannelMutation}
             memberCount={memberCount}
             membersError={membersQuery.error}
             onOpenChange={handlePanelOpenChange}
             resolvedChannel={resolvedChannel}
-            setActiveView={setActiveView}
             setIsEditDialogOpen={setIsEditDialogOpen}
             unarchiveChannelMutation={unarchiveChannelMutation}
           />
@@ -395,16 +358,9 @@ export function ChannelManagementSheet({
             data-testid="channel-management-sheet"
           >
             <ChannelManagementPanelContent
-              activeView={activeView}
               archiveChannelMutation={archiveChannelMutation}
-              canEditNarrative={canEditNarrative}
-              canJoin={canJoin}
               canLeave={canLeave}
               canManageChannel={canManageChannel}
-              canOpenCanvas={canOpenCanvas}
-              canvasPreview={canvasPreview}
-              canvasQuery={canvasQuery}
-              channelId={channelId}
               deleteChannelMutation={deleteChannelMutation}
               detailsError={detailsQuery.error}
               handleDeleteChannel={handleDeleteChannel}
@@ -415,13 +371,11 @@ export function ChannelManagementSheet({
               canDeleteChannel={canDeleteChannel}
               mode={auxiliaryPanelMode}
               transparentChrome={transparentChrome}
-              joinChannelMutation={joinChannelMutation}
               leaveChannelMutation={leaveChannelMutation}
               memberCount={memberCount}
               membersError={membersQuery.error}
               onOpenChange={handlePanelOpenChange}
               resolvedChannel={resolvedChannel}
-              setActiveView={setActiveView}
               setIsEditDialogOpen={setIsEditDialogOpen}
               unarchiveChannelMutation={unarchiveChannelMutation}
             />
@@ -576,16 +530,9 @@ type ChannelMutation<TArgs = void> = {
 };
 
 type ChannelManagementPanelContentProps = {
-  activeView: "summary" | "canvas";
   archiveChannelMutation: ChannelMutation;
-  canEditNarrative: boolean;
-  canJoin: boolean;
   canLeave: boolean;
   canManageChannel: boolean;
-  canOpenCanvas: boolean;
-  canvasPreview?: string;
-  canvasQuery: { isLoading: boolean };
-  channelId: string | null;
   deleteChannelMutation: ChannelMutation;
   detailsError: unknown;
   handleDeleteChannel: () => Promise<void>;
@@ -596,28 +543,19 @@ type ChannelManagementPanelContentProps = {
   canDeleteChannel: boolean; // true when caller may delete the channel
   mode: AuxiliaryPanelMode;
   transparentChrome?: boolean;
-  joinChannelMutation: ChannelMutation;
   leaveChannelMutation: ChannelMutation;
   memberCount: number;
   membersError: unknown;
   onOpenChange: (open: boolean) => void;
   resolvedChannel: Channel;
-  setActiveView: React.Dispatch<React.SetStateAction<"summary" | "canvas">>;
   setIsEditDialogOpen: React.Dispatch<React.SetStateAction<boolean>>;
   unarchiveChannelMutation: ChannelMutation;
 };
 
 function ChannelManagementPanelContent({
-  activeView,
   archiveChannelMutation,
-  canEditNarrative,
-  canJoin,
   canLeave,
   canManageChannel,
-  canOpenCanvas,
-  canvasPreview,
-  canvasQuery,
-  channelId,
   deleteChannelMutation,
   detailsError,
   handleDeleteChannel,
@@ -628,13 +566,11 @@ function ChannelManagementPanelContent({
   canDeleteChannel,
   mode,
   transparentChrome = false,
-  joinChannelMutation,
   leaveChannelMutation,
   memberCount,
   membersError,
   onOpenChange,
   resolvedChannel,
-  setActiveView,
   setIsEditDialogOpen,
   unarchiveChannelMutation,
 }: ChannelManagementPanelContentProps) {
@@ -642,9 +578,7 @@ function ChannelManagementPanelContent({
   useScrollBoundaryLock(scrollRef);
 
   const showModerationActions =
-    activeView === "summary" &&
-    canManageChannel &&
-    resolvedChannel.channelType !== "dm";
+    canManageChannel && resolvedChannel.channelType !== "dm";
   return (
     <AuxiliaryPanelContext.Provider
       value={{
@@ -669,14 +603,9 @@ function ChannelManagementPanelContent({
           backButtonAriaLabel="Back to channel"
           backButtonTestId="channel-management-back"
           mode={mode}
-          onBack={
-            activeView === "canvas" ? () => setActiveView("summary") : undefined
-          }
         >
           <DialogPrimitive.Title asChild>
-            <AuxiliaryPanelTitle>
-              {activeView === "canvas" ? "Canvas" : "Channel"}
-            </AuxiliaryPanelTitle>
+            <AuxiliaryPanelTitle>Channel</AuxiliaryPanelTitle>
           </DialogPrimitive.Title>
         </AuxiliaryPanelHeaderGroup>
         <DialogPrimitive.Description className="sr-only">
@@ -693,192 +622,152 @@ function ChannelManagementPanelContent({
         panelPadding
         ref={scrollRef}
       >
-        {activeView === "summary" ? (
-          <div className="space-y-6 pt-3">
-            <ChannelHero channel={resolvedChannel} />
+        <div className="space-y-6 pt-3">
+          <ChannelHero channel={resolvedChannel} />
 
-            {detailsError instanceof Error ? (
-              <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                {detailsError.message}
-              </p>
-            ) : null}
+          {detailsError instanceof Error ? (
+            <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {detailsError.message}
+            </p>
+          ) : null}
 
-            {membersError instanceof Error ? (
-              <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                {membersError.message}
-              </p>
-            ) : null}
+          {membersError instanceof Error ? (
+            <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {membersError.message}
+            </p>
+          ) : null}
 
-            <div className="flex flex-wrap items-start justify-center gap-6">
-              <ChannelQuickAction
-                icon={Copy}
-                label="Copy ID"
-                onClick={() => {
-                  void writeTextToClipboard(resolvedChannel.id).then(() =>
-                    toast.success("Copied channel ID"),
-                  );
-                }}
-                testId="channel-management-copy-id-action"
-              />
-              {canJoin ? (
-                <ChannelQuickAction
-                  active
-                  disabled={joinChannelMutation.isPending}
-                  icon={DoorOpen}
-                  label={joinChannelMutation.isPending ? "Joining..." : "Join"}
-                  onClick={() => {
-                    void joinChannelMutation.mutateAsync();
-                  }}
-                  testId="channel-management-join"
-                />
-              ) : null}
-              {canLeave ? (
-                <ChannelQuickAction
-                  disabled={leaveChannelMutation.isPending}
-                  icon={DoorClosed}
-                  label={
-                    leaveChannelMutation.isPending ? "Leaving..." : "Leave"
-                  }
-                  onClick={() => {
-                    void leaveChannelMutation.mutateAsync().then(() => {
-                      onOpenChange(false);
-                    });
-                  }}
-                  testId="channel-management-leave"
-                />
-              ) : null}
-              {canManageChannel ? (
-                <ChannelQuickAction
-                  icon={Pencil}
-                  label="Edit"
-                  onClick={() => setIsEditDialogOpen(true)}
-                  testId="channel-management-edit"
-                />
-              ) : null}
-            </div>
-
-            {joinChannelMutation.error instanceof Error ? (
-              <p className="text-center text-sm text-destructive">
-                {joinChannelMutation.error.message}
-              </p>
-            ) : null}
-            {leaveChannelMutation.error instanceof Error ? (
-              <p className="text-center text-sm text-destructive">
-                {leaveChannelMutation.error.message}
-              </p>
-            ) : null}
-
-            {resolvedChannel.description.trim() ||
-            resolvedChannel.topic?.trim() ||
-            resolvedChannel.purpose?.trim() ? (
-              <NarrativeGroup>
-                {resolvedChannel.description.trim() ? (
-                  <NarrativeField
-                    icon={FileText}
-                    label="Description"
-                    testId="channel-management-description"
-                    value={resolvedChannel.description.trim()}
-                  />
-                ) : null}
-                {resolvedChannel.topic?.trim() ? (
-                  <NarrativeField
-                    icon={MessageSquare}
-                    label="Topic"
-                    testId="channel-management-topic"
-                    value={resolvedChannel.topic.trim()}
-                  />
-                ) : null}
-                {resolvedChannel.purpose?.trim() ? (
-                  <NarrativeField
-                    icon={Zap}
-                    label="Purpose"
-                    testId="channel-management-purpose"
-                    value={resolvedChannel.purpose.trim()}
-                  />
-                ) : null}
-              </NarrativeGroup>
-            ) : null}
-
-            {canOpenCanvas ? (
-              <IngressRow
-                description={canvasPreview}
-                icon={BookOpenText}
-                label="Canvas"
-                onClick={() => setActiveView("canvas")}
-                testId="channel-canvas-ingress"
-                trailing={canvasQuery.isLoading ? "Loading..." : undefined}
-              />
-            ) : null}
-
-            <FieldGroup>
-              <CopyFieldRow
-                icon={Fingerprint}
-                label="Channel ID"
-                testId="channel-management-channel-id"
-                value={resolvedChannel.id}
-              />
-              <InfoFieldRow
-                icon={Type}
-                label="Name"
-                testId="channel-management-name-row"
-                value={resolvedChannel.name}
-              />
-              <InfoFieldRow
-                icon={Radio}
-                label="Type"
-                testId="channel-management-type"
-                value={resolvedChannel.channelType}
-              />
-              <InfoFieldRow
-                icon={resolvedChannel.visibility === "private" ? Lock : Eye}
-                label="Visibility"
-                testId="channel-management-visibility"
-                value={resolvedChannel.visibility}
-              />
-              <InfoFieldRow
-                icon={Users}
-                label="Members"
-                testId="channel-management-member-count"
-                value={`${memberCount}`}
-              />
-              {isArchived ? (
-                <InfoFieldRow
-                  icon={Archive}
-                  label="Status"
-                  testId="channel-management-archived"
-                  value="Archived"
-                />
-              ) : null}
-              {resolvedChannel.ttlSeconds !== null ? (
-                <InfoFieldRow
-                  icon={Archive}
-                  label="Ephemeral"
-                  testId="channel-management-ephemeral-row"
-                  value={formatTtlDuration(resolvedChannel.ttlSeconds)}
-                />
-              ) : null}
-            </FieldGroup>
-
-            {archiveChannelMutation.error instanceof Error ? (
-              <p className="text-sm text-destructive">
-                {archiveChannelMutation.error.message}
-              </p>
-            ) : null}
-            {unarchiveChannelMutation.error instanceof Error ? (
-              <p className="text-sm text-destructive">
-                {unarchiveChannelMutation.error.message}
-              </p>
-            ) : null}
-          </div>
-        ) : (
-          <div data-testid="channel-canvas-section">
-            <ChannelCanvas
-              canEdit={canEditNarrative}
-              channelId={channelId}
-              isArchived={isArchived}
+          <div className="flex flex-wrap items-start justify-center gap-6">
+            <ChannelQuickAction
+              icon={Copy}
+              label="Copy ID"
+              onClick={() => {
+                void writeTextToClipboard(resolvedChannel.id).then(() =>
+                  toast.success("Copied channel ID"),
+                );
+              }}
+              testId="channel-management-copy-id-action"
             />
+            {canLeave ? (
+              <ChannelQuickAction
+                disabled={leaveChannelMutation.isPending}
+                icon={DoorClosed}
+                label={leaveChannelMutation.isPending ? "Leaving..." : "Leave"}
+                onClick={() => {
+                  void leaveChannelMutation.mutateAsync().then(() => {
+                    onOpenChange(false);
+                  });
+                }}
+                testId="channel-management-leave"
+              />
+            ) : null}
+            {canManageChannel ? (
+              <ChannelQuickAction
+                icon={Pencil}
+                label="Edit"
+                onClick={() => setIsEditDialogOpen(true)}
+                testId="channel-management-edit"
+              />
+            ) : null}
           </div>
-        )}
+
+          {leaveChannelMutation.error instanceof Error ? (
+            <p className="text-center text-sm text-destructive">
+              {leaveChannelMutation.error.message}
+            </p>
+          ) : null}
+
+          {resolvedChannel.description.trim() ||
+          resolvedChannel.topic?.trim() ||
+          resolvedChannel.purpose?.trim() ? (
+            <NarrativeGroup>
+              {resolvedChannel.description.trim() ? (
+                <NarrativeField
+                  icon={FileText}
+                  label="Description"
+                  testId="channel-management-description"
+                  value={resolvedChannel.description.trim()}
+                />
+              ) : null}
+              {resolvedChannel.topic?.trim() ? (
+                <NarrativeField
+                  icon={MessageSquare}
+                  label="Topic"
+                  testId="channel-management-topic"
+                  value={resolvedChannel.topic.trim()}
+                />
+              ) : null}
+              {resolvedChannel.purpose?.trim() ? (
+                <NarrativeField
+                  icon={Zap}
+                  label="Purpose"
+                  testId="channel-management-purpose"
+                  value={resolvedChannel.purpose.trim()}
+                />
+              ) : null}
+            </NarrativeGroup>
+          ) : null}
+
+          <FieldGroup>
+            <CopyFieldRow
+              icon={Fingerprint}
+              label="Channel ID"
+              testId="channel-management-channel-id"
+              value={resolvedChannel.id}
+            />
+            <InfoFieldRow
+              icon={Type}
+              label="Name"
+              testId="channel-management-name-row"
+              value={resolvedChannel.name}
+            />
+            <InfoFieldRow
+              icon={Radio}
+              label="Type"
+              testId="channel-management-type"
+              value={resolvedChannel.channelType}
+            />
+            <InfoFieldRow
+              icon={resolvedChannel.visibility === "private" ? Lock : Eye}
+              label="Visibility"
+              testId="channel-management-visibility"
+              value={resolvedChannel.visibility}
+            />
+            <InfoFieldRow
+              icon={Users}
+              label="Members"
+              testId="channel-management-member-count"
+              value={`${memberCount}`}
+            />
+            {isArchived ? (
+              <InfoFieldRow
+                icon={Archive}
+                label="Status"
+                testId="channel-management-archived"
+                value="Archived"
+              />
+            ) : null}
+            {resolvedChannel.ttlSeconds !== null ? (
+              <InfoFieldRow
+                icon={Archive}
+                label="Ephemeral"
+                testId="channel-management-ephemeral-row"
+                value={formatTtlDuration(resolvedChannel.ttlSeconds)}
+              />
+            ) : null}
+          </FieldGroup>
+
+          {archiveChannelMutation.error instanceof Error ? (
+            <p className="text-sm text-destructive">
+              {archiveChannelMutation.error.message}
+            </p>
+          ) : null}
+          {unarchiveChannelMutation.error instanceof Error ? (
+            <p className="text-sm text-destructive">
+              {unarchiveChannelMutation.error.message}
+            </p>
+          ) : null}
+        </div>
       </AuxiliaryPanelBody>
 
       {showModerationActions ? (

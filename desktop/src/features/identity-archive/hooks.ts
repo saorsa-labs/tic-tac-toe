@@ -2,7 +2,7 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
+import { useMyNativeMembershipQuery } from "@/features/community-members/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   archiveIdentity,
@@ -50,9 +50,9 @@ export function useIsIdentityArchived(pubkey: string): boolean | undefined {
 export function useIsArchivedPredicate(): (pubkey: string) => boolean {
   const query = useArchivedIdentitiesQuery();
   const identityQuery = useIdentityQuery();
-  const selfPubkey = identityQuery.data?.pubkey;
+  const selfAgentId = identityQuery.data?.agentId;
   return React.useMemo(() => {
-    const self = selfPubkey?.toLowerCase() ?? null;
+    const self = selfAgentId?.toLowerCase() ?? null;
     const set = new Set(
       (query.data?.archived ?? []).map((p) => p.toLowerCase()),
     );
@@ -60,7 +60,7 @@ export function useIsArchivedPredicate(): (pubkey: string) => boolean {
       const lower = pubkey.toLowerCase();
       return lower !== self && set.has(lower);
     };
-  }, [query.data, selfPubkey]);
+  }, [query.data, selfAgentId]);
 }
 
 /** Gates the owner-path archive button via the target's live `kind:0`. */
@@ -120,21 +120,22 @@ export function useIdentityArchive(
   pubkey: string | null,
 ): IdentityArchiveActions {
   const identityQuery = useIdentityQuery();
-  const currentPubkey = identityQuery.data?.pubkey;
+  const currentAgentId = identityQuery.data?.agentId;
 
   const targetPubkey = pubkey?.trim() ?? "";
   const hasTargetPubkey = targetPubkey.length > 0;
   const pubkeyLower = targetPubkey.toLowerCase();
   const isSelf =
-    currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
+    currentAgentId !== undefined &&
+    pubkeyLower === currentAgentId.toLowerCase();
 
-  const myMembershipQuery = useMyRelayMembershipQuery();
+  const myMembershipQuery = useMyNativeMembershipQuery();
   // Skip the kind:0 lookup when viewing yourself — the OA gate is for
   // archiving *other* identities you own. Also defer until our own identity
   // resolves so we never fire the lookup against an unknown viewer.
   const oaOwnerQuery = useOaOwnerQuery(
     targetPubkey,
-    hasTargetPubkey && currentPubkey !== undefined && !isSelf,
+    hasTargetPubkey && currentAgentId !== undefined && !isSelf,
   );
 
   const isArchived = useIsIdentityArchived(targetPubkey);

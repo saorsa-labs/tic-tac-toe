@@ -1,31 +1,10 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import {
-  activateRateLimit,
-  parseRateLimitHint,
-} from "@/shared/api/relayRateLimitGate";
 import type {
-  AddChannelMembersInput,
-  AddChannelMembersResult,
   BackendProviderCandidate,
   BackendProviderProbeResult,
-  CanvasResponse,
-  GetHomeFeedInput,
-  HomeFeedResponse,
   ManagedAgent,
   ManagedAgentBackend,
-  RelayAgent,
-  RelayMember,
-  RelayMemberRole,
-  PresenceLookup,
-  PresenceStatus,
   RelayEvent,
-  SearchMessagesInput,
-  SearchMessagesResponse,
-  SendChannelMessageResult,
-  SetCanvasInput,
-  SetCanvasResult,
-  ThreadCursor,
-  ThreadRepliesResponse,
   CreateManagedAgentInput,
   AgentModelsResponse,
   UpdateManagedAgentInput,
@@ -37,89 +16,19 @@ import type {
   GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
+import { x0xHistoryGet } from "@/shared/api/tauriNativeX0x";
+import {
+  channelIdFromScope,
+  historyRowToRelayEvent,
+} from "@/shared/api/nativeMessageAdapter";
 
 export * from "@/shared/api/tauriChannels";
 
-type RawPresenceLookup = Record<string, PresenceStatus>;
-
-type RawAddChannelMembersResult = {
-  added: string[];
-  errors: Array<{
-    pubkey: string;
-    error: string;
-  }>;
-};
-
-type RawFeedItem = {
-  id: string;
-  kind: number;
-  pubkey: string;
-  content: string;
-  created_at: number;
-  channel_id: string | null;
-  channel_name: string;
-  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
-  // never omits the key.
-  channel_type: string | null;
-  tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
-};
-
-type RawHomeFeedResponse = {
-  feed: {
-    mentions: RawFeedItem[];
-    needs_action: RawFeedItem[];
-    activity: RawFeedItem[];
-    agent_activity: RawFeedItem[];
-  };
-  meta: {
-    since: number;
-    total: number;
-    generated_at: number;
-  };
-};
-
-type RawSearchHit = {
-  event_id: string;
-  content: string;
-  kind: number;
-  pubkey: string;
-  channel_id: string | null;
-  channel_name: string | null;
-  created_at: number;
-  score: number;
-};
-
-type RawSearchResponse = {
-  hits: RawSearchHit[];
-  found: number;
-};
-
-type RawSendChannelMessageResult = {
-  event_id: string;
-  parent_event_id: string | null;
-  root_event_id: string | null;
-  depth: number;
-  created_at: number;
-};
-
-type RawRelayAgent = {
-  pubkey: string;
-  name: string;
-  agent_type: string;
-  channels: string[];
-  channel_ids: string[];
-  capabilities: string[];
-  status: RelayAgent["status"];
-  respond_to?: RelayAgent["respondTo"];
-  respond_to_allowlist?: string[];
-};
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
   team_id?: string | null;
-  relay_url: string;
   acp_command: string;
   agent_command: string;
   agent_command_override?: string | null;
@@ -159,7 +68,6 @@ export type RawManagedAgent = {
 
 type RawCreateManagedAgentResponse = {
   agent: RawManagedAgent;
-  private_key_nsec: string;
   profile_sync_error: string | null;
   spawn_error: string | null;
 };
@@ -226,28 +134,6 @@ type RawManagedAgentPrereqs = {
   mcp: RawCommandAvailability;
 };
 
-type RawRelayMember = {
-  pubkey: string;
-  role: string;
-  added_by: string | null;
-  created_at: string;
-};
-
-type RawListRelayMembersResponse = {
-  members: RawRelayMember[];
-};
-
-type RawCanvasResponse = {
-  content: string | null;
-  updated_at: number | null;
-  author: string | null;
-};
-
-type RawSetCanvasResult = {
-  ok: boolean;
-  event_id: string;
-};
-
 /** Error normalized from a rejected Tauri invocation with its wire payload. */
 export class TauriInvokeError extends Error {
   readonly payload: unknown;
@@ -284,18 +170,6 @@ function toTauriError(error: unknown): Error {
   }
 }
 
-/**
- * Inspect a Tauri error message and activate the shared rate-limit gate when
- * the Rust relay layer emitted an HTTP 429 response (`relay rate-limited:` prefix).
- *
- * Extracted so it can be unit-tested without mocking the Tauri invoke bridge.
- */
-export function applyTauriRateLimitIfNeeded(message: string): void {
-  if (message.startsWith("relay rate-limited:")) {
-    activateRateLimit(parseRateLimitHint(message));
-  }
-}
-
 export async function invokeTauri<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -304,266 +178,33 @@ export async function invokeTauri<T>(
     return await tauriInvoke<T>(command, args);
   } catch (error) {
     const err = toTauriError(error);
-    // Rust emits `relay rate-limited:` for HTTP 429 responses. Activate the
-    // shared gate so the TS relay client backs off for the same window.
-    applyTauriRateLimitIfNeeded(err.message);
     throw err;
   }
-}
-
-export function fromRawFeedItem(item: RawFeedItem) {
-  return {
-    id: item.id,
-    kind: item.kind,
-    pubkey: item.pubkey,
-    content: item.content,
-    createdAt: item.created_at,
-    channelId: item.channel_id,
-    channelName: item.channel_name,
-    // Canonicalize the wire `null` to undefined so FeedItem's optional
-    // channelType contract holds at runtime (enrichment and the DM
-    // notification filter both key off `=== undefined`).
-    channelType: item.channel_type ?? undefined,
-    tags: item.tags,
-    category: item.category,
-  };
-}
-
-function fromRawSearchHit(hit: RawSearchHit) {
-  return {
-    eventId: hit.event_id,
-    content: hit.content,
-    kind: hit.kind,
-    pubkey: hit.pubkey,
-    channelId: hit.channel_id,
-    channelName: hit.channel_name,
-    createdAt: hit.created_at,
-    score: hit.score,
-  };
-}
-
-export async function getPresence(pubkeys: string[]): Promise<PresenceLookup> {
-  const response = await invokeTauri<RawPresenceLookup>("get_presence", {
-    pubkeys,
-  });
-
-  return Object.fromEntries(
-    Object.entries(response).map(([pubkey, status]) => [
-      pubkey.toLowerCase(),
-      status,
-    ]),
-  );
-}
-
-export function getDefaultRelayUrl(): Promise<string> {
-  return invokeTauri<string>("get_default_relay_url");
-}
-
-export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
-  return invokeTauri<boolean>("auto_connect_default_relay_enabled");
 }
 
 export function isSharedIdentity(): Promise<boolean> {
   return invokeTauri<boolean>("is_shared_identity");
 }
 
-export function getRelayWsUrl(): Promise<string> {
-  return invokeTauri<string>("get_relay_ws_url");
-}
-
-export function getRelayHttpUrl(): Promise<string> {
-  return invokeTauri<string>("get_relay_http_url");
-}
-
-export async function addChannelMembers(
-  input: AddChannelMembersInput,
-): Promise<AddChannelMembersResult> {
-  return invokeTauri<RawAddChannelMembersResult>("add_channel_members", input);
-}
-
-export async function removeChannelMember(
-  channelId: string,
-  pubkey: string,
-): Promise<void> {
-  await invokeTauri("remove_channel_member", { channelId, pubkey });
-}
-
-export async function changeChannelMemberRole(
-  channelId: string,
-  pubkey: string,
-  role: string,
-): Promise<void> {
-  await invokeTauri("change_channel_member_role", { channelId, pubkey, role });
-}
-
-export async function joinChannel(channelId: string): Promise<void> {
-  await invokeTauri("join_channel", { channelId });
-}
-
-export async function leaveChannel(channelId: string): Promise<void> {
-  await invokeTauri("leave_channel", { channelId });
-}
-
-export async function getCanvas(channelId: string): Promise<CanvasResponse> {
-  const response = await invokeTauri<RawCanvasResponse>("get_canvas", {
-    channelId,
-  });
-  return {
-    content: response.content,
-    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
-    // "no canvas yet", and `undefined !== null` would make every fresh
-    // channel look already-seeded.
-    updatedAt: response.updated_at ?? null,
-    author: response.author ?? null,
-  };
-}
-
-export async function setCanvas(
-  input: SetCanvasInput,
-): Promise<SetCanvasResult> {
-  const response = await invokeTauri<RawSetCanvasResult>("set_canvas", {
-    channelId: input.channelId,
-    content: input.content,
-  });
-  return {
-    ok: response.ok,
-    eventId: response.event_id,
-  };
-}
-
-export async function getHomeFeed(
-  input: GetHomeFeedInput = {},
-): Promise<HomeFeedResponse> {
-  const response = await invokeTauri<RawHomeFeedResponse>("get_feed", input);
-
-  return {
-    feed: {
-      mentions: response.feed.mentions.map(fromRawFeedItem),
-      needsAction: response.feed.needs_action.map(fromRawFeedItem),
-      activity: response.feed.activity.map(fromRawFeedItem),
-      agentActivity: response.feed.agent_activity.map(fromRawFeedItem),
-    },
-    meta: {
-      since: response.meta.since,
-      total: response.meta.total,
-      generatedAt: response.meta.generated_at,
-    },
-  };
-}
-
-export async function searchMessages(
-  input: SearchMessagesInput,
-): Promise<SearchMessagesResponse> {
-  const response = await invokeTauri<RawSearchResponse>("search_messages", {
-    q: input.q,
-    limit: input.limit,
-    channelId: input.channelId,
-  });
-
-  return {
-    hits: response.hits.map(fromRawSearchHit),
-    found: response.found,
-  };
-}
-
 export async function getEventById(eventId: string): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("get_event", { eventId });
-  return JSON.parse(eventJson) as RelayEvent;
-}
-
-type RawThreadCursor = {
-  created_at: number;
-  event_id: string;
-};
-
-type RawThreadRepliesResponse = {
-  events: RelayEvent[];
-  next_cursor: RawThreadCursor | null;
-};
-
-/**
- * Fetch the full reply subtree under a thread root, server-side.
- *
- * Unlike the channel timeline (which the desktop assembles from its local
- * cache), this walks `thread_metadata` on the relay, so a thread renders
- * complete even when its replies fell outside the channel cold-load window —
- * the descendant gap that made deep/old threads silently incomplete.
- *
- * Paging is forward keyset on `(createdAt, eventId)`: pass the returned
- * `nextCursor` back as `cursor` for the next page. `nextCursor` is non-null only
- * when a full page was returned. The returned `events` are raw nostr events
- * (`RelayEvent`), chronological (oldest first). These are the *replies* under
- * the root (depth >= 1); the root event itself is NOT returned (the relay query
- * keys on `root_event_id`, which a root row lacks). The caller already holds
- * the root — it is the open thread head.
- */
-export async function getThreadReplies(
-  rootEventId: string,
-  channelId?: string | null,
-  options?: {
-    limit?: number;
-    depthLimit?: number;
-    cursor?: ThreadCursor | null;
-  },
-): Promise<ThreadRepliesResponse> {
-  const response = await invokeTauri<RawThreadRepliesResponse>(
-    "get_thread_replies",
-    {
-      rootEventId,
-      channelId: channelId ?? null,
-      limit: options?.limit ?? null,
-      depthLimit: options?.depthLimit ?? null,
-      cursor: options?.cursor
-        ? {
-            created_at: options.cursor.createdAt,
-            event_id: options.cursor.eventId,
-          }
-        : null,
-    },
-  );
-
-  return {
-    events: response.events,
-    nextCursor: response.next_cursor
-      ? {
-          createdAt: response.next_cursor.created_at,
-          eventId: response.next_cursor.event_id,
-        }
-      : null,
-  };
-}
-
-export async function sendChannelMessage(
-  channelId: string,
-  content: string,
-  parentEventId?: string | null,
-  mediaTags?: string[][],
-  mentionPubkeys?: string[],
-  kind?: number,
-  emojiTags?: string[][],
-  mentionTags?: string[][],
-): Promise<SendChannelMessageResult> {
-  const response = await invokeTauri<RawSendChannelMessageResult>(
-    "send_channel_message",
-    {
-      channelId,
-      content,
-      parentEventId,
-      mediaTags: mediaTags ?? null,
-      emojiTags: emojiTags ?? null,
-      mentionTags: mentionTags ?? null,
-      mentionPubkeys: mentionPubkeys ?? null,
-      kind: kind ?? null,
-    },
-  );
-
-  return {
-    eventId: response.event_id,
-    parentEventId: response.parent_event_id,
-    rootEventId: response.root_event_id,
-    depth: response.depth,
-    createdAt: response.created_at,
-  };
+  // Native lookup by canonical msg_id (BLAKE3). The local daemon's history
+  // store is indexed on `msg_id` (UNIQUE constraint), so this is a point
+  // read — no relay, no network round-trip, no payload/history scan. A
+  // canonical id is globally unique within one daemon's store, so no
+  // scope/channel hint is needed to disambiguate; the channel id is derived
+  // from the row's own scope.
+  const row = await x0xHistoryGet(eventId);
+  if (!row) {
+    throw new Error(`message ${eventId} not found in local history`);
+  }
+  const event = historyRowToRelayEvent(row, channelIdFromScope(row.scope));
+  if (!event) {
+    // The id resolves to a stored row that is not a renderable channel
+    // message (non-text content type / undecodable envelope). Surface as a
+    // miss so callers' catch paths treat it like "not found".
+    throw new Error(`message ${eventId} is not a renderable channel message`);
+  }
+  return event;
 }
 
 export type BlobDescriptor = {
@@ -581,112 +222,12 @@ export type BlobDescriptor = {
   filename?: string;
 };
 
-export async function uploadMedia(
-  filePath: string,
-  isTemp: boolean,
-): Promise<BlobDescriptor> {
-  return invokeTauri<BlobDescriptor>("upload_media", {
-    filePath,
-    isTemp,
-  });
-}
-
-export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
-  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", {});
-}
-
-export async function uploadMediaBytes(
-  data: number[],
-  filename?: string,
-  /** Correlation id for `media-upload-progress` events from the Rust side. */
-  progressId?: string,
-): Promise<BlobDescriptor> {
-  return invokeTauri<BlobDescriptor>("upload_media_bytes", {
-    data,
-    filename,
-    progressId,
-  });
-}
-
-export async function editMessage(
-  channelId: string,
-  eventId: string,
-  content: string,
-  mediaTags?: string[][],
-  emojiTags?: string[][],
-  mentionPubkeys?: string[],
-): Promise<void> {
-  await invokeTauri("edit_message", {
-    channelId,
-    eventId,
-    content,
-    mediaTags: mediaTags ?? [],
-    emojiTags: emojiTags ?? [],
-    mentionPubkeys: mentionPubkeys ?? null,
-  });
-}
-
-export async function deleteMessage(
-  channelId: string,
-  eventId: string,
-): Promise<void> {
-  await invokeTauri("delete_message", { channelId, eventId });
-}
-
-export async function addReaction(
-  eventId: string,
-  emoji: string,
-  emojiUrl?: string,
-): Promise<void> {
-  await invokeTauri("add_reaction", { eventId, emoji, emojiUrl });
-}
-
-export async function removeReaction(
-  eventId: string,
-  emoji: string,
-): Promise<void> {
-  await invokeTauri("remove_reaction", { eventId, emoji });
-}
-
-export async function signRelayEvent(input: {
-  kind: number;
-  content: string;
-  createdAt?: number;
-  tags: string[][];
-}): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("sign_event", input);
-  return JSON.parse(eventJson) as RelayEvent;
-}
-
-export async function createAuthEvent(input: {
-  challenge: string;
-  relayUrl: string;
-}): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("create_auth_event", input);
-  return JSON.parse(eventJson) as RelayEvent;
-}
-
-function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
-  return {
-    pubkey: agent.pubkey,
-    name: agent.name,
-    agentType: agent.agent_type,
-    channels: agent.channels,
-    channelIds: agent.channel_ids ?? [],
-    capabilities: agent.capabilities,
-    status: agent.status,
-    respondTo: agent.respond_to ?? null,
-    respondToAllowlist: agent.respond_to_allowlist ?? [],
-  };
-}
-
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
     teamId: agent.team_id ?? null,
-    relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
     agentCommand: agent.agent_command,
     agentCommandOverride: agent.agent_command_override ?? null,
@@ -779,65 +320,6 @@ function fromRawCommandAvailability(
   };
 }
 
-// ── Relay Members ────────────────────────────────────────────────────────────
-
-function fromRawRelayMember(raw: RawRelayMember): RelayMember {
-  return {
-    pubkey: raw.pubkey,
-    role: raw.role as RelayMemberRole,
-    addedBy: raw.added_by,
-    createdAt: raw.created_at,
-  };
-}
-
-export async function listRelayMembers(): Promise<RelayMember[]> {
-  const response =
-    await invokeTauri<RawListRelayMembersResponse>("list_relay_members");
-  return response.members.map(fromRawRelayMember);
-}
-
-export async function getMyRelayMembership(): Promise<RelayMember | null> {
-  try {
-    const raw = await invokeTauri<RawRelayMember>("get_my_relay_membership");
-    return fromRawRelayMember(raw);
-  } catch (error) {
-    // "relay returned 404 Not Found" = not a relay member — return null so
-    // the UI hides the Members tab. Re-throw real errors (network, auth, 500)
-    // so React Query surfaces them.
-    if (
-      error instanceof Error &&
-      error.message.startsWith("relay returned 404")
-    ) {
-      return null;
-    }
-    throw error;
-  }
-}
-
-export async function addRelayMember(
-  targetPubkey: string,
-  role: string,
-): Promise<void> {
-  await invokeTauri("add_relay_member", { targetPubkey, role });
-}
-
-export async function removeRelayMember(targetPubkey: string): Promise<void> {
-  await invokeTauri("remove_relay_member", { targetPubkey });
-}
-
-export async function changeRelayMemberRole(
-  targetPubkey: string,
-  newRole: string,
-): Promise<void> {
-  await invokeTauri("change_relay_member_role", { targetPubkey, newRole });
-}
-
-export async function listRelayAgents(): Promise<RelayAgent[]> {
-  return (await invokeTauri<RawRelayAgent[]>("list_relay_agents")).map(
-    fromRawRelayAgent,
-  );
-}
-
 export async function listManagedAgents(): Promise<ManagedAgent[]> {
   return (await invokeTauri<RawManagedAgent[]>("list_managed_agents")).map(
     fromRawManagedAgent,
@@ -851,7 +333,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         name: input.name,
         personaId: input.personaId,
         teamId: input.teamId,
-        relayUrl: input.relayUrl,
         acpCommand: input.acpCommand,
         agentCommand: input.agentCommand,
         harnessOverride: input.harnessOverride ?? false,
@@ -871,13 +352,11 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         backend: input.backend,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
-        relayMesh: input.relayMesh,
       },
     },
   );
   return {
     agent: fromRawManagedAgent(response.agent),
-    privateKeyNsec: response.private_key_nsec,
     profileSyncError: response.profile_sync_error,
     spawnError: response.spawn_error,
   };
@@ -1079,48 +558,6 @@ export async function probeBackendProvider(
 ): Promise<BackendProviderProbeResult> {
   return invokeTauri<BackendProviderProbeResult>("probe_backend_provider", {
     binaryPath,
-  });
-}
-
-// ── NIP-44 encrypt-to-self ───────────────────────────────────────────────────
-
-export async function nip44EncryptToSelf(plaintext: string): Promise<string> {
-  return invokeTauri<string>("nip44_encrypt_to_self", { plaintext });
-}
-
-export async function nip44DecryptFromSelf(
-  ciphertext: string,
-): Promise<string> {
-  return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
-}
-
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
-
-export async function startPairing(): Promise<string> {
-  return invokeTauri<string>("start_pairing");
-}
-
-export async function confirmPairingSas(): Promise<void> {
-  await invokeTauri("confirm_pairing_sas");
-}
-
-export async function cancelPairing(): Promise<void> {
-  await invokeTauri("cancel_pairing");
-}
-
-export async function applyCommunity(
-  relayUrl: string,
-  nsec?: string,
-  token?: string,
-  reposDir?: string,
-  agentManagedProfiles?: boolean,
-): Promise<void> {
-  await invokeTauri("apply_workspace", {
-    relayUrl,
-    nsec: nsec ?? null,
-    token: token ?? null,
-    reposDir: reposDir ?? null,
-    agentManagedProfiles: agentManagedProfiles ?? false,
   });
 }
 

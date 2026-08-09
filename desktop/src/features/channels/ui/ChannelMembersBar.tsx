@@ -26,7 +26,7 @@ import { AddChannelBotDialog } from "./AddChannelBotDialog";
 
 type ChannelMembersBarProps = {
   channel: Channel;
-  currentPubkey?: string;
+  currentAgentId?: string;
   isAddBotOpen?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
@@ -36,7 +36,7 @@ type ChannelMembersBarProps = {
 
 export function ChannelMembersBar({
   channel,
-  currentPubkey,
+  currentAgentId,
   isAddBotOpen: isAddBotOpenProp,
   onAddBotOpenChange,
   onManageChannel,
@@ -76,16 +76,16 @@ export function ChannelMembersBar({
       }),
     [providersQuery.data],
   );
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
   const selfMember =
     members.find(
-      (member) => normalizePubkey(member.pubkey) === normalizedCurrentPubkey,
+      (member) => normalizePubkey(member.pubkey) === normalizedCurrentAgentId,
     ) ?? null;
   const canStartHuddle = canStartHuddleInChannel({
     channel,
-    currentPubkey,
+    currentAgentId,
     selfMember,
   });
   const previousChannelIdRef = React.useRef(channel.id);
@@ -118,7 +118,7 @@ export function ChannelMembersBar({
             [],
             buildHuddleChannelName({
               channel,
-              currentPubkey,
+              currentAgentId,
               members,
             }),
           );

@@ -1,17 +1,22 @@
 import type {
   Channel,
+  Identity,
   RelayEvent,
   SearchMessagesResponse,
 } from "@/shared/api/types";
 import {
-  historyRowToRelayEvent,
+  buildChannelMessagePayload,
   decodeChannelMessageEnvelope,
+  historyRowToRelayEvent,
 } from "@/shared/api/nativeMessageAdapter";
 import {
-  x0xGetGroup,
+  x0xHistoryGet,
   x0xHistoryList,
   x0xHistorySearch,
   x0xScope,
+  x0xSendDirectMessage,
+  x0xSendGroupMessage,
+  type X0xAgentId,
   type X0xHistoryPage,
   type X0xHistoryRow,
   type X0xScope,
@@ -21,11 +26,14 @@ import type {
   ChannelWindowPage,
   ChannelWindowThreadSummary,
 } from "@/features/messages/lib/channelWindowStore";
+import { getResolvedHistoryScope } from "@/features/messages/lib/nativeHistoryScopeStore";
+import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 
 const NATIVE_HISTORY_PAGE_SIZE = 200;
 const MAX_NATIVE_HISTORY_PAGES = 500;
 const AGENT_ID_PATTERN = /^[0-9a-f]{64}$/i;
 
+/** Superseded by ADR-0029 (x0x v0.36.0); retained for historical reference. */
 export const NATIVE_THREAD_WRITE_BLOCKER =
   "x0xd does not expose a publish API that accepts threadRoot/threadParent metadata; thread replies are unavailable until that native contract ships.";
 export const NATIVE_EDIT_BLOCKER =
@@ -36,8 +44,27 @@ export const NATIVE_REACTION_BLOCKER =
   "x0xd does not expose a native message-reaction API.";
 export const NATIVE_RICH_MESSAGE_BLOCKER =
   "x0xd native publish does not yet expose typed attachment/custom-emoji metadata; refusing to send relay tags as a fallback.";
-export const NATIVE_DM_SEND_BLOCKER =
-  "x0xd supports POST /direct/send, but the native Tauri messaging transport does not expose it yet.";
+
+/**
+ * Native messaging write-path capabilities — what the x0xd transport exposes
+ * TODAY. The message UI consults this to hide/disable controls BEFORE submit
+ * rather than surfacing the `NATIVE_*_BLOCKER` errors at submit time.
+ *
+ * Each flag mirrors a blocker above. When a capability flips to `true` the
+ * matching blocker becomes an unreachable defensive guard and its control is
+ * re-enabled — flipping a flag is the single place transport readiness enters
+ * the UI.
+ */
+export const nativeMessageCapabilities = {
+  /** Reply in a thread (publish with threadRoot/threadParent). */
+  canReplyInThread: true,
+  /** Edit a sent message (native replace-key publish). */
+  canEditMessage: false,
+  /** Delete / tombstone a sent message. */
+  canDeleteMessage: false,
+  /** Toggle a reaction on a message. */
+  canToggleReaction: false,
+} as const;
 
 /** Resolve the daemon's canonical durable-history scope for a Buzz channel. */
 export function nativeScopeForChannel(channel: Channel): X0xScope {
@@ -66,16 +93,182 @@ export function nativeScopeForChannel(channel: Channel): X0xScope {
   return x0xScope("dm", unique[0]);
 }
 
-/** Resolve the named group's authenticated chat topic for native publish. */
-export async function nativePublishTopic(channel: Channel): Promise<string> {
+/**
+ * Resolve the durable-history REST scope for a channel, or `null` when it is
+ * not yet authoritatively known.
+ *
+ * `nativeScopeForChannel` yields the *live WS backfill* scope — for groups the
+ * transient id derived from `channel.id`. Durable history (`x0x_history_list` /
+ * `_search` / `_get`) is bound to the daemon-resolved *stable* group id,
+ * captured at subscribe time in the history-scope registry, which may differ
+ * from the transient id. This resolver returns that authoritative scope ONLY;
+ * it never falls back to the REST-derived transient id, so a group whose ids
+ * diverge never loads against the wrong scope. Callers must fail, hold, or skip
+ * honestly when this returns `null`. DM scopes are deterministic (derived from
+ * the single peer AgentId); an unresolvable DM also yields `null`.
+ */
+export function resolveNativeHistoryScope(channel: Channel): X0xScope | null {
   if (channel.channelType === "dm") {
-    throw new Error(NATIVE_DM_SEND_BLOCKER);
+    try {
+      return nativeScopeForChannel(channel);
+    } catch {
+      return null;
+    }
   }
-  const group = await x0xGetGroup(channel.id);
-  if (!group.chatTopic.trim()) {
-    throw new Error(`x0xd group ${channel.id} has no chat topic.`);
+  return getResolvedHistoryScope(channel.id);
+}
+
+/**
+ * Require the durable-history scope for a single-channel history consumer
+ * (cold-load / pagination / thread / get), throwing honestly when it is not
+ * yet resolved rather than targeting the wrong scope. The cold-load path holds
+ * on the registry (see `useChannelMessagesQuery`), so a resolved scope is known
+ * by the time these run in the normal flow; this throw surfaces a genuine
+ * unresolved state as a visible failure instead of silent wrong results.
+ */
+function requireHistoryScope(channel: Channel): X0xScope {
+  const scope = resolveNativeHistoryScope(channel);
+  if (scope === null) {
+    throw new Error(
+      `Native durable-history scope for channel ${channel.id} is not resolved; waiting for the live subscription to surface the stable historyScope.`,
+    );
   }
-  return group.chatTopic;
+  return scope;
+}
+
+/**
+ * Resolve the single peer AgentId for a one-to-one DM channel. Native DM
+ * projections use the peer AgentId as the channel id; the compatibility
+ * projection may instead carry it in participants/participantPubkeys. The
+ * local agent's own id is excluded so a self-id in the roster is harmless.
+ * Throws when the channel does not identify exactly one peer (group-DMs have
+ * no native contract — the UI must limit DM open to one recipient).
+ */
+export function nativeDmRecipientAgentId(
+  channel: Channel,
+  ownAgentId: string | null | undefined,
+): X0xAgentId {
+  const own = ownAgentId?.trim().toLowerCase();
+  const fromId =
+    AGENT_ID_PATTERN.test(channel.id) && channel.id.toLowerCase() !== own
+      ? channel.id.toLowerCase()
+      : null;
+  if (fromId) {
+    return fromId;
+  }
+  const candidates = [
+    ...(channel.participantPubkeys ?? []),
+    ...(channel.participants ?? []),
+  ]
+    .filter((value) => AGENT_ID_PATTERN.test(value))
+    .map((value) => value.toLowerCase())
+    .filter((value) => value !== own);
+  const unique = [...new Set(candidates)];
+  if (unique.length !== 1) {
+    throw new Error(
+      "Cannot resolve the native DM recipient: the channel does not identify exactly one peer AgentId.",
+    );
+  }
+  return unique[0];
+}
+
+/**
+ * Send a one-to-one direct message over `POST /direct/send`.
+ *
+ * Builds the typed content envelope (same shape as topic publishes), resolves
+ * the recipient AgentId, and forwards optional native thread ancestry
+ * (`threadRoot`/`threadParent`, 64-hex canonical msg_ids) which x0xd validates
+ * to 32 bytes. Returns the envelope's `clientId` so the caller can key the
+ * optimistic row and reconcile it with the canonical (msgId-keyed) row when
+ * `/history` cold-loads the durable `dm:<peer>` scope — `/ws/direct` does not
+ * echo the sender's own outbound.
+ */
+export async function sendNativeDirectMessage(input: {
+  channel: Channel;
+  content: string;
+  identity: Identity;
+  mentionPubkeys?: string[];
+  threadRoot?: string | null;
+  threadParent?: string | null;
+}): Promise<{ clientId: string; createdAt: number }> {
+  const recipient = nativeDmRecipientAgentId(
+    input.channel,
+    input.identity.agentId,
+  );
+  const native = buildChannelMessagePayload({
+    text: input.content.trim(),
+    mentions: input.mentionPubkeys,
+  });
+  await x0xSendDirectMessage({
+    agentId: recipient,
+    payload: native.payload,
+    threadRoot: input.threadRoot ?? null,
+    threadParent: input.threadParent ?? null,
+  });
+  return { clientId: native.clientId, createdAt: native.createdAt };
+}
+
+/** Send one native durable message and return its optimistic timeline row. */
+export async function sendNativeMessage(input: {
+  channel: Channel;
+  content: string;
+  identity: Identity;
+  mentionPubkeys?: string[];
+  threadRoot?: string | null;
+  threadParent?: string | null;
+}): Promise<RelayEvent> {
+  const content = input.content.trim();
+  const native = buildChannelMessagePayload({
+    text: content,
+    mentions: input.mentionPubkeys,
+  });
+
+  let canonicalId: string | null = null;
+  if (input.channel.channelType === "dm") {
+    const recipient = nativeDmRecipientAgentId(
+      input.channel,
+      input.identity.agentId,
+    );
+    await x0xSendDirectMessage({
+      agentId: recipient,
+      payload: native.payload,
+      threadRoot: input.threadRoot ?? null,
+      threadParent: input.threadParent ?? null,
+    });
+  } else {
+    canonicalId = await x0xSendGroupMessage({
+      groupId: input.channel.id,
+      body: new TextDecoder().decode(native.payload),
+      kind: "chat",
+      threadRoot: input.threadRoot ?? null,
+      threadParent: input.threadParent ?? null,
+    });
+  }
+
+  const tags: string[][] = [
+    ["h", input.channel.id],
+    ["p", input.identity.agentId],
+  ];
+  for (const agentId of input.mentionPubkeys ?? []) {
+    if (agentId !== input.identity.agentId) tags.push(["p", agentId]);
+  }
+  if (input.threadRoot) {
+    tags.push(["e", input.threadRoot, "", "root"]);
+    if (input.threadParent) {
+      tags.push(["e", input.threadParent, "", "reply"]);
+    }
+  }
+
+  return {
+    id: canonicalId ?? native.clientId,
+    localKey: native.clientId,
+    pubkey: input.identity.agentId,
+    created_at: Math.floor(native.createdAt / 1_000),
+    kind: KIND_STREAM_MESSAGE,
+    tags,
+    content,
+    sig: "",
+  };
 }
 
 function historyCursor(page: X0xHistoryPage): ChannelWindowCursor | null {
@@ -139,7 +332,7 @@ export async function fetchNativeChannelWindow(
   limit = 50,
 ): Promise<ChannelWindowPage> {
   const page = await x0xHistoryList({
-    scope: nativeScopeForChannel(channel),
+    scope: requireHistoryScope(channel),
     beforeId: startCursor?.beforeId,
     limit,
   });
@@ -159,7 +352,7 @@ export async function fetchNativeThreadReplies(
     pageNumber += 1
   ) {
     const page = await x0xHistoryList({
-      scope: nativeScopeForChannel(channel),
+      scope: requireHistoryScope(channel),
       beforeId,
       limit: NATIVE_HISTORY_PAGE_SIZE,
     });
@@ -181,33 +374,33 @@ export async function fetchNativeThreadReplies(
   );
 }
 
-/** Resolve specific native messages without falling back to relay get_event. */
+/**
+ * Resolve specific native messages by canonical msg_id via the daemon's
+ * indexed `x0x_history_get` point lookup — no history paging, no payload
+ * scan. Lookups run in parallel; a canonical id is globally unique within one
+ * daemon's store, so each resolves to at most one local row.
+ *
+ * Scope-scoping is preserved: only rows whose `scope` matches this channel's
+ * canonical scope are projected (a hit in another scope is a different
+ * conversation). Rows that are not renderable channel messages are skipped.
+ */
 export async function fetchNativeMessagesById(
   channel: Channel,
   messageIds: Set<string>,
 ): Promise<RelayEvent[]> {
-  const pending = new Set([...messageIds].map((id) => id.toLowerCase()));
-  const found: RelayEvent[] = [];
-  let beforeId: number | undefined;
-  for (
-    let pageNumber = 0;
-    pageNumber < MAX_NATIVE_HISTORY_PAGES;
-    pageNumber += 1
-  ) {
-    const page = await x0xHistoryList({
-      scope: nativeScopeForChannel(channel),
-      beforeId,
-      limit: NATIVE_HISTORY_PAGE_SIZE,
-    });
-    for (const row of page.rows) {
-      if (!pending.delete(row.msgId.toLowerCase())) continue;
-      const event = historyRowToRelayEvent(row, channel.id);
-      if (event) found.push(event);
-    }
-    if (pending.size === 0 || !page.nextCursor) return found;
-    beforeId = page.nextCursor.beforeId;
+  if (messageIds.size === 0) return [];
+  const expectedScope = requireHistoryScope(channel);
+  const rows = await Promise.all(
+    [...messageIds].map((id) => x0xHistoryGet(id.toLowerCase())),
+  );
+  const events: RelayEvent[] = [];
+  for (const row of rows) {
+    if (!row) continue;
+    if (row.scope !== expectedScope) continue;
+    const event = historyRowToRelayEvent(row, channel.id);
+    if (event) events.push(event);
   }
-  return found;
+  return events;
 }
 
 function rowToSearchHit(row: X0xHistoryRow, channel: Channel) {
@@ -233,11 +426,21 @@ export async function searchNativeMessages(
   channels: Channel[],
   limit: number,
 ): Promise<SearchMessagesResponse> {
+  // Only channels whose durable scope is authoritatively resolved can be
+  // searched honestly; unresolved groups are skipped (never queried against the
+  // transient REST id) so one unresolved channel cannot yield wrong/empty hits
+  // or leak across scopes.
+  const scoped: Array<{ channel: Channel; scope: X0xScope }> = [];
+  for (const channel of channels) {
+    const scope = resolveNativeHistoryScope(channel);
+    if (scope !== null) scoped.push({ channel, scope });
+  }
+  if (scoped.length === 0) return { hits: [], found: 0 };
   const pages = await Promise.all(
-    channels.map(async (channel) => ({
+    scoped.map(async ({ channel, scope }) => ({
       channel,
       page: await x0xHistorySearch({
-        scope: nativeScopeForChannel(channel),
+        scope,
         q: query,
         limit,
       }),

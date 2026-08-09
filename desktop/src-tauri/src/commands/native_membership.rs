@@ -1,36 +1,42 @@
 //! Native named-group membership command surface (M3 workspace cutover).
 //!
-//! Typed Tauri commands over the authenticated loopback [`X0xClient`] that
-//! proxy the embedded `x0xd` daemon's named-group REST surface (`/groups`,
+//! Typed Tauri commands over the token-authenticated loopback [`X0xClient`]
+//! that proxy the embedded `x0xd` daemon's named-group REST surface (`/groups`,
 //! `/groups/:id`, `/groups/:id/members`, `/groups/:id/ban/:agent_id`,
-//! `/groups/:id/invite`, `/groups/:id/policy`, `/groups/:id/requests`).
+//! `/groups/:id/policy`, `/groups/:id/requests`).
 //!
 //! These are the native transport path the M3 membership cutover binds to.
 //! They emit **no** relay events and publish **no** Nostr kinds, and they
 //! perform **no** authority reconstruction (ADR-0001): roster/policy state is
-//! accepted only as the daemon's authenticated frontier and re-serialized for
-//! the frontend. Every call resolves the transient daemon token/port inside
+//! accepted only as token-authenticated loopback delegation (the daemon's
+//! transient bearer token over the loopback socket) and re-serialized for the
+//! frontend — it carries display data, not a verified secure-group guarantee.
+//! Every call resolves the transient daemon token/port inside
 //! [`X0xClient`](crate::x0x_client::X0xClient) and returns a human-readable
 //! `String` error (never the token) on failure.
+//!
+//! The one-time invite mint (`POST /groups/:id/invite`) and join
+//! (`POST /groups/join`) surfaces are intentionally NOT exposed here: the
+//! opaque invite contract cannot authenticate, version, or canonically bind
+//! the secure-group bootstrap, so the invite bootstrap is gated pending x0x
+//! frontier review. Public group creation and roster reads remain.
 //!
 //! # serde convention
 //! Daemon responses are snake_case; the frozen TS seam
 //! (`tauriNativeX0x.ts`) exposes camelCase types to features. Raw structs
 //! deserialize the daemon verbatim; output structs carry
 //! `#[serde(rename_all = "camelCase")]`; a trivial `From` bridges them. The
-//! two wrappers where the TS seam does its own key conversion
-//! (`x0x_list_groups`, `x0x_get_group_members`, `x0x_list_group_join_requests`,
-//! `x0x_mint_group_invite`) return the exact raw shape the seam unpacks.
+//! wrappers where the TS seam does its own key conversion
+//! (`x0x_list_groups`, `x0x_get_group_members`) return the exact raw shape
+//! the seam unpacks.
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_state::AppState;
+use crate::commands::native_auxiliary::path_segment;
+use crate::commands::native_social::validate_agent_id;
 use crate::x0x_client::X0xClient;
-
-#[path = "native_social.rs"]
-mod native_social;
-pub use native_social::*;
 
 // ── TS-facing output types (camelCase) ───────────────────────────────────────
 
@@ -52,7 +58,7 @@ pub struct GroupMember {
 
 /// Full named-group detail — mirrors `X0xNamedGroup`. `members` is
 /// `#[serde(default)]`: GET /groups/:id may omit the inline roster (the UI
-/// fetches the authoritative frontier via `x0x_get_group_members`).
+/// fetches the roster via `x0x_get_group_members`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NamedGroup {
@@ -78,6 +84,12 @@ pub struct NamedGroup {
     pub member_count: i64,
     #[serde(default)]
     pub members: Vec<GroupMember>,
+    /// `policy.confidentiality` from the daemon (`signed_public` for creatable
+    /// groups). The channel projection omits any group that is not
+    /// `signed_public` so a non-public group is never laundered as an open
+    /// channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidentiality: Option<String>,
 }
 
 /// Lightweight list entry — mirrors `X0xNamedGroupSummary`.
@@ -92,25 +104,6 @@ pub struct NamedGroupSummary {
     pub member_count: i64,
 }
 
-/// A request-to-join — mirrors `X0xJoinRequest`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct JoinRequest {
-    pub request_id: String,
-    pub group_id: String,
-    pub requester_agent_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requester_user_id: Option<String>,
-    pub requested_role: String,
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub treekem_key_package_b64: Option<String>,
-    pub created_at_ms: i64,
-    pub reviewed_at_ms: Option<i64>,
-    pub reviewed_by: Option<String>,
-    pub status: String,
-}
-
 // ── Daemon-facing raw types (snake_case in) ──────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,14 +116,41 @@ struct RawGroupMember {
     state: String,
     #[serde(default)]
     display_name: Option<String>,
-    #[serde(default)]
+    /// Daemon emits `joined_at` (ms epoch); renamed at the serde edge.
+    #[serde(default, rename = "joined_at")]
     joined_at_ms: i64,
-    #[serde(default)]
-    updated_at_ms: i64,
+    /// Daemon omits `updated_at` for never-edited members; the `From` impl
+    /// falls back to `joined_at_ms` so `updatedAtMs` is never stale-zero.
+    #[serde(default, rename = "updated_at")]
+    updated_at_ms: Option<i64>,
     #[serde(default)]
     added_by: Option<String>,
     #[serde(default)]
     removed_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawMembershipMutationResponse {
+    #[serde(default)]
+    members: Vec<RawGroupMember>,
+}
+
+fn mutation_member(
+    response: RawMembershipMutationResponse,
+    target_agent_id: &str,
+) -> Result<GroupMember, String> {
+    response
+        .members
+        .into_iter()
+        .find(|member| member.agent_id == target_agent_id)
+        .map(Into::into)
+        .ok_or_else(|| "daemon membership response omitted the target member".to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawGroupPolicy {
+    #[serde(default)]
+    confidentiality: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,6 +178,8 @@ struct RawNamedGroup {
     member_count: i64,
     #[serde(default)]
     members: Vec<RawGroupMember>,
+    #[serde(default)]
+    policy: Option<RawGroupPolicy>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,29 +193,6 @@ struct RawNamedGroupSummary {
     member_count: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct RawJoinRequest {
-    request_id: String,
-    group_id: String,
-    requester_agent_id: String,
-    #[serde(default)]
-    requester_user_id: Option<String>,
-    #[serde(default)]
-    requested_role: String,
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    treekem_key_package_b64: Option<String>,
-    #[serde(default)]
-    created_at_ms: i64,
-    #[serde(default)]
-    reviewed_at_ms: Option<i64>,
-    #[serde(default)]
-    reviewed_by: Option<String>,
-    #[serde(default)]
-    status: String,
-}
-
 impl From<RawGroupMember> for GroupMember {
     fn from(r: RawGroupMember) -> Self {
         GroupMember {
@@ -203,7 +202,7 @@ impl From<RawGroupMember> for GroupMember {
             state: r.state,
             display_name: r.display_name,
             joined_at_ms: r.joined_at_ms,
-            updated_at_ms: r.updated_at_ms,
+            updated_at_ms: r.updated_at_ms.unwrap_or(r.joined_at_ms),
             added_by: r.added_by,
             removed_by: r.removed_by,
         }
@@ -225,6 +224,7 @@ impl From<RawNamedGroup> for NamedGroup {
             roster_revision: r.roster_revision,
             member_count: r.member_count,
             members: r.members.into_iter().map(Into::into).collect(),
+            confidentiality: r.policy.and_then(|p| p.confidentiality),
         }
     }
 }
@@ -236,24 +236,6 @@ impl From<RawNamedGroupSummary> for NamedGroupSummary {
             name: r.name,
             description: r.description,
             member_count: r.member_count,
-        }
-    }
-}
-
-impl From<RawJoinRequest> for JoinRequest {
-    fn from(r: RawJoinRequest) -> Self {
-        JoinRequest {
-            request_id: r.request_id,
-            group_id: r.group_id,
-            requester_agent_id: r.requester_agent_id,
-            requester_user_id: r.requester_user_id,
-            requested_role: r.requested_role,
-            message: r.message,
-            treekem_key_package_b64: r.treekem_key_package_b64,
-            created_at_ms: r.created_at_ms,
-            reviewed_at_ms: r.reviewed_at_ms,
-            reviewed_by: r.reviewed_by,
-            status: r.status,
         }
     }
 }
@@ -270,15 +252,10 @@ pub struct MembersList {
     pub members: Vec<GroupMember>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct JoinRequestsList {
-    pub requests: Vec<JoinRequest>,
-}
-
-/// POST /groups / POST /groups/join response holder. Both surfaces return at
-/// least `group_id`; a full group object also carries it, so this extracts the
-/// id whether the daemon returns a thin ack or the full record. We then fetch
-/// the authoritative full group via GET /groups/:id so create/join return the
+/// POST /groups response holder. The surface returns at least `group_id`; a
+/// full group object also carries it, so this extracts the id whether the
+/// daemon returns a thin ack or the full record. We then fetch the
+/// authoritative full group via GET /groups/:id so create returns the
 /// complete `NamedGroup` the frozen seam types promise.
 #[derive(Debug, Deserialize)]
 struct GroupIdHolder {
@@ -298,54 +275,15 @@ struct CreateGroupBody<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct JoinGroupBody<'a> {
-    invite: &'a str,
-    display_name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 struct AddMemberBody<'a> {
     agent_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    treekem_key_package_b64: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
 struct SetRoleBody<'a> {
     role: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct MintInviteBody {
-    /// `None` ⇒ daemon default (7 days); `Some(0)` ⇒ never.
-    expiry_secs: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-struct RequestJoinBody<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    treekem_key_package_b64: Option<&'a str>,
-}
-
-/// Mutable policy axes. All `Option`; omitted axes are unchanged daemon-side.
-#[derive(Debug, Default, Serialize)]
-struct PolicyUpdateBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    preset: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    discoverability: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    admission: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    confidentiality: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    read_access: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    write_access: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -366,6 +304,16 @@ async fn fetch_full_group(client: &X0xClient, group_id: &str) -> Result<NamedGro
     Ok(raw.into())
 }
 
+/// Validate the AgentId and percent-encode both dynamic path segments for a
+/// membership mutation. Group ids are opaque daemon strings (encoded so `/`,
+/// `?`, `#` cannot re-route the loopback request); agent ids must be 64-char
+/// lowercase hex (validated, then encoded for uniformity).
+fn encode_member_path_segments(group_id: &str, agent_id: &str) -> Result<(String, String), String> {
+    let agent = path_segment(&validate_agent_id(agent_id)?)?;
+    let group = path_segment(group_id)?;
+    Ok((group, agent))
+}
+
 // ── Active group resolution ──────────────────────────────────────────────────
 
 /// The active workspace's bound native named-group id (opaque stable string).
@@ -381,7 +329,7 @@ pub async fn x0x_get_active_group_id(state: State<'_, AppState>) -> Result<Strin
 }
 
 /// Bind the active workspace to a native named-group id. Called by the
-/// community create/join cutover after `x0x_create_group` / `x0x_join_group`.
+/// community create cutover after `x0x_create_group`.
 #[tauri::command]
 pub async fn x0x_set_active_group_id(
     group_id: String,
@@ -422,7 +370,8 @@ pub async fn x0x_get_group(
     fetch_full_group(&state.x0x_client, &group_id).await
 }
 
-/// GET /groups/:id/members — the authenticated roster frontier (ADR-0001).
+/// GET /groups/:id/members — the roster as token-authenticated loopback
+/// delegation (ADR-0001: display data, not a verified secure-group guarantee).
 #[tauri::command]
 pub async fn x0x_get_group_members(
     group_id: String,
@@ -440,7 +389,7 @@ pub async fn x0x_get_group_members(
     })
 }
 
-// ── Create / join ────────────────────────────────────────────────────────────
+// ── Create ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,44 +408,29 @@ pub async fn x0x_create_group(
     input: CreateGroupRequest,
     state: State<'_, AppState>,
 ) -> Result<NamedGroup, String> {
+    // Only `public_open` groups are creatable: secure-group (MLS / GSS /
+    // TreeKEM) crypto is NOT approved, so any other preset is refused at the
+    // boundary with a visible error rather than reaching the daemon. A missing
+    // preset defaults to `public_open` (the only creatable kind).
+    let preset = match input.preset.as_deref() {
+        None | Some("public_open") => "public_open",
+        Some(other) => {
+            return Err(format!(
+                "Cannot create group with preset '{other}': only public_open groups are available (secure-group crypto is not approved)."
+            ));
+        }
+    };
     let client = &state.x0x_client;
     let body = CreateGroupBody {
         name: &input.name,
         description: &input.description,
         display_name: input.display_name,
-        preset: input.preset,
+        preset: Some(preset.to_string()),
     };
     let holder: GroupIdHolder = client.post_json("/groups", &body).await?;
     let group_id = holder
         .group_id
         .ok_or_else(|| "daemon create response missing group_id".to_string())?;
-    fetch_full_group(client, &group_id).await
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct JoinGroupRequest {
-    invite: String,
-    display_name: Option<String>,
-}
-
-/// POST /groups/join — join a named group via a one-time invite link. The
-/// joiner self-adds; the inviter publishes the authoritative MemberAdded
-/// commit. Returns the full record (fetched via GET after the ack).
-#[tauri::command]
-pub async fn x0x_join_group(
-    input: JoinGroupRequest,
-    state: State<'_, AppState>,
-) -> Result<NamedGroup, String> {
-    let client = &state.x0x_client;
-    let body = JoinGroupBody {
-        invite: &input.invite,
-        display_name: input.display_name,
-    };
-    let holder: GroupIdHolder = client.post_json("/groups/join", &body).await?;
-    let group_id = holder
-        .group_id
-        .ok_or_else(|| "daemon join response missing group_id".to_string())?;
     fetch_full_group(client, &group_id).await
 }
 
@@ -508,24 +442,25 @@ pub(crate) struct AddMemberRequest {
     group_id: String,
     agent_id: String,
     display_name: Option<String>,
-    treekem_key_package_b64: Option<String>,
 }
 
-/// POST /groups/:id/members — add an agent (admin-or-higher). TreeKEM groups
-/// require `treekem_key_package_b64` (the UI surfaces the daemon's rejection).
+/// POST /groups/:id/members — add an agent (admin-or-higher). The daemon adds
+/// the agent to the roster; no TreeKEM/secure-group key material is forwarded
+/// (secure-group crypto is not approved — the boundary carries no key package).
 #[tauri::command]
 pub async fn x0x_add_group_member(
     input: AddMemberRequest,
     state: State<'_, AppState>,
 ) -> Result<GroupMember, String> {
-    let path = format!("/groups/{}/members", input.group_id);
+    let group = path_segment(&input.group_id)?;
+    let agent_id = validate_agent_id(&input.agent_id)?;
+    let path = format!("/groups/{group}/members");
     let body = AddMemberBody {
-        agent_id: &input.agent_id,
+        agent_id: &agent_id,
         display_name: input.display_name.as_deref(),
-        treekem_key_package_b64: input.treekem_key_package_b64.as_deref(),
     };
-    let raw: RawGroupMember = state.x0x_client.post_json(&path, &body).await?;
-    Ok(raw.into())
+    let raw: RawMembershipMutationResponse = state.x0x_client.post_json(&path, &body).await?;
+    mutation_member(raw, &agent_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -543,7 +478,8 @@ pub async fn x0x_set_group_member_role(
     input: SetRoleRequest,
     state: State<'_, AppState>,
 ) -> Result<GroupMember, String> {
-    let path = format!("/groups/{}/members/{}/role", input.group_id, input.agent_id);
+    let (group, agent) = encode_member_path_segments(&input.group_id, &input.agent_id)?;
+    let path = format!("/groups/{group}/members/{agent}/role");
     let body = SetRoleBody { role: &input.role };
     let raw: RawGroupMember = state.x0x_client.patch_json(&path, &body).await?;
     Ok(raw.into())
@@ -562,19 +498,22 @@ pub async fn x0x_remove_group_member(
     input: MemberTarget,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = format!("/groups/{}/members/{}", input.group_id, input.agent_id);
+    let (group, agent) = encode_member_path_segments(&input.group_id, &input.agent_id)?;
+    let path = format!("/groups/{group}/members/{agent}");
     state.x0x_client.delete(&path).await?;
     Ok(())
 }
 
-/// POST /groups/:id/ban/:agent_id — ban an agent (rekeys survivors; the crypto
-/// frontier rotates the shared secret / advances epoch — the REST call exists).
+/// POST /groups/:id/ban/:agent_id — ban an agent. The daemon advances the
+/// group epoch server-side; this command only forwards the REST call and
+/// asserts no local crypto / TreeKEM guarantee.
 #[tauri::command]
 pub async fn x0x_ban_group_member(
     input: MemberTarget,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = format!("/groups/{}/ban/{}", input.group_id, input.agent_id);
+    let (group, agent) = encode_member_path_segments(&input.group_id, &input.agent_id)?;
+    let path = format!("/groups/{group}/ban/{agent}");
     let _: serde_json::Value = state
         .x0x_client
         .post_json(&path, &serde_json::json!({}))
@@ -588,7 +527,8 @@ pub async fn x0x_unban_group_member(
     input: MemberTarget,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let path = format!("/groups/{}/ban/{}", input.group_id, input.agent_id);
+    let (group, agent) = encode_member_path_segments(&input.group_id, &input.agent_id)?;
+    let path = format!("/groups/{group}/ban/{agent}");
     state.x0x_client.delete(&path).await?;
     Ok(())
 }
@@ -601,121 +541,7 @@ pub async fn x0x_leave_group(group_id: String, state: State<'_, AppState>) -> Re
     Ok(())
 }
 
-// ── Invites ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MintInviteRequest {
-    group_id: String,
-    expiry_secs: Option<i64>,
-}
-
-/// Raw mint-invite response — returned verbatim (snake_case) because the TS
-/// seam performs the camelCase conversion itself.
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct MintInviteResponse {
-    invite_link: String,
-    group_id: String,
-    group_name: String,
-    #[serde(default)]
-    expires_at: i64,
-}
-
-/// POST /groups/:id/invite — mint a one-time invite (admin-or-higher).
-///
-/// NOTE: the daemon exposes NO list-invite and NO revoke-invite endpoint.
-/// Invites are one-time secrets that age out via `expires_at`; for an
-/// already-joined member, ban is the only revocation path.
-#[tauri::command]
-pub async fn x0x_mint_group_invite(
-    input: MintInviteRequest,
-    state: State<'_, AppState>,
-) -> Result<MintInviteResponse, String> {
-    let path = format!("/groups/{}/invite", input.group_id);
-    let body = MintInviteBody {
-        expiry_secs: input.expiry_secs,
-    };
-    let raw: MintInviteResponse = state.x0x_client.post_json(&path, &body).await?;
-    Ok(raw)
-}
-
-// ── Join requests (preset-gated groups) ──────────────────────────────────────
-
-/// GET /groups/:id/requests — pending/approved/rejected/cancelled requests.
-#[tauri::command]
-pub async fn x0x_list_group_join_requests(
-    group_id: String,
-    state: State<'_, AppState>,
-) -> Result<JoinRequestsList, String> {
-    let path = format!("/groups/{group_id}/requests");
-    #[derive(Deserialize)]
-    struct RawJoinRequestsList {
-        #[serde(default)]
-        requests: Vec<RawJoinRequest>,
-    }
-    let raw: RawJoinRequestsList = state.x0x_client.get_json(&path, &[]).await?;
-    Ok(JoinRequestsList {
-        requests: raw.requests.into_iter().map(Into::into).collect(),
-    })
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RequestJoinInput {
-    group_id: String,
-    message: Option<String>,
-    treekem_key_package_b64: Option<String>,
-}
-
-/// POST /groups/:id/requests — submit a request-to-join (requires non-member,
-/// non-banned; used by `public_request_secure` admission).
-#[tauri::command]
-pub async fn x0x_request_group_join(
-    input: RequestJoinInput,
-    state: State<'_, AppState>,
-) -> Result<JoinRequest, String> {
-    let path = format!("/groups/{}/requests", input.group_id);
-    let body = RequestJoinBody {
-        message: input.message.as_deref(),
-        treekem_key_package_b64: input.treekem_key_package_b64.as_deref(),
-    };
-    let raw: RawJoinRequest = state.x0x_client.post_json(&path, &body).await?;
-    Ok(raw.into())
-}
-
-// ── Policy / metadata ────────────────────────────────────────────────────────
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PolicyUpdateRequest {
-    group_id: String,
-    preset: Option<String>,
-    discoverability: Option<String>,
-    admission: Option<String>,
-    confidentiality: Option<String>,
-    read_access: Option<String>,
-    write_access: Option<String>,
-}
-
-/// PATCH /groups/:id/policy — mutate one or more policy axes. Any subset may
-/// be supplied; omitted fields are unchanged. `preset` is the convenience name.
-#[tauri::command]
-pub async fn x0x_update_group_policy(
-    input: PolicyUpdateRequest,
-    state: State<'_, AppState>,
-) -> Result<NamedGroup, String> {
-    let path = format!("/groups/{}/policy", input.group_id);
-    let body = PolicyUpdateBody {
-        preset: input.preset,
-        discoverability: input.discoverability,
-        admission: input.admission,
-        confidentiality: input.confidentiality,
-        read_access: input.read_access,
-        write_access: input.write_access,
-    };
-    let raw: RawNamedGroup = state.x0x_client.patch_json(&path, &body).await?;
-    Ok(raw.into())
-}
+// ── Metadata (rename / redescribe) ───────────────────────────────────────────
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -753,7 +579,7 @@ mod tests {
             state: "active".to_string(),
             display_name: Some("Ada".to_string()),
             joined_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_000_000,
+            updated_at_ms: Some(1_700_000_000_000),
             added_by: Some("b".repeat(64)),
             removed_by: None,
         };
@@ -817,69 +643,186 @@ mod tests {
     }
 
     #[test]
-    fn mint_invite_response_round_trips_snake_case() {
-        // Daemon sends {ok, invite_link, group_id, group_name, expires_at};
-        // serde ignores the extra `ok` and the command returns the raw shape
-        // the TS seam converts.
+    fn raw_group_member_reads_daemon_joined_at_and_falls_back_for_updated() {
+        // Daemon member JSON uses `joined_at` and omits `updated_at`.
+        let daemon = serde_json::json!({
+            "agent_id": "a".repeat(64),
+            "role": "member",
+            "state": "active",
+            "display_name": "Ada",
+            "joined_at": 1_700_000_000_000_i64,
+            "added_by": "b".repeat(64),
+        });
+        let member: GroupMember = serde_json::from_value::<RawGroupMember>(daemon)
+            .unwrap()
+            .into();
+        let json = serde_json::to_value(&member).unwrap();
+        assert_eq!(json["joinedAtMs"], 1_700_000_000_000_i64);
+        // updated_at absent → falls back to joined_at, never stale zero.
+        assert_eq!(json["updatedAtMs"], 1_700_000_000_000_i64);
+    }
+
+    #[test]
+    fn add_member_response_selects_the_target_from_the_roster_wrapper() {
+        let target = "b".repeat(64);
         let daemon = serde_json::json!({
             "ok": true,
-            "invite_link": "x0x://invite/abc",
             "group_id": "g1",
-            "group_name": "Eng",
-            "expires_at": 0
+            "member_count": 2,
+            "members": [
+                {
+                    "agent_id": "a".repeat(64),
+                    "role": "admin",
+                    "state": "active",
+                    "joined_at": 1_i64
+                },
+                {
+                    "agent_id": target,
+                    "role": "member",
+                    "state": "active",
+                    "joined_at": 2_i64
+                }
+            ]
         });
-        let resp: MintInviteResponse = serde_json::from_value(daemon).unwrap();
-        assert_eq!(resp.invite_link, "x0x://invite/abc");
-        assert_eq!(resp.group_id, "g1");
-        assert_eq!(resp.group_name, "Eng");
-        assert_eq!(resp.expires_at, 0);
+        let raw: RawMembershipMutationResponse = serde_json::from_value(daemon).unwrap();
+        let member = mutation_member(raw, &"b".repeat(64)).unwrap();
+        assert_eq!(member.agent_id, "b".repeat(64));
+        assert_eq!(member.role, "member");
+        assert_eq!(member.joined_at_ms, 2);
     }
 
     #[test]
-    fn join_request_raw_to_camel_case() {
-        let raw = RawJoinRequest {
-            request_id: "r1".to_string(),
-            group_id: "g1".to_string(),
-            requester_agent_id: "a".repeat(64),
-            requester_user_id: None,
-            requested_role: "member".to_string(),
-            message: Some("let me in".to_string()),
-            treekem_key_package_b64: None,
-            created_at_ms: 1,
-            reviewed_at_ms: None,
-            reviewed_by: None,
-            status: "Pending".to_string(),
-        };
-        let req: JoinRequest = raw.into();
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["requestId"], "r1");
-        assert_eq!(json["requesterAgentId"], "a".repeat(64));
-        assert_eq!(json["requestedRole"], "member");
-        assert_eq!(json["status"], "Pending");
-        assert_eq!(json["createdAtMs"], 1);
+    fn raw_group_member_honors_explicit_daemon_updated_at() {
+        let daemon = serde_json::json!({
+            "agent_id": "a".repeat(64),
+            "role": "member",
+            "state": "active",
+            "joined_at": 100_i64,
+            "updated_at": 200_i64,
+        });
+        let member: GroupMember = serde_json::from_value::<RawGroupMember>(daemon)
+            .unwrap()
+            .into();
+        let json = serde_json::to_value(&member).unwrap();
+        assert_eq!(json["joinedAtMs"], 100_i64);
+        assert_eq!(json["updatedAtMs"], 200_i64);
     }
 
     #[test]
-    fn policy_update_body_omits_absent_axes() {
-        let body = PolicyUpdateBody {
-            preset: Some("public_open".to_string()),
-            discoverability: None,
-            admission: None,
-            confidentiality: None,
-            read_access: None,
-            write_access: None,
+    fn member_path_segments_validate_agent_and_encode_group() {
+        // Valid 64-hex agent passes; opaque group id with route delimiters is encoded.
+        let (group, agent) =
+            encode_member_path_segments("group:opaque/7", &"ab".repeat(32)).unwrap();
+        assert_eq!(group, "group%3Aopaque%2F7");
+        assert_eq!(agent, "ab".repeat(32));
+
+        // npub / too-short / slash-bearing agents are rejected pre-request.
+        assert!(encode_member_path_segments("g", "npub1deadbeef").is_err());
+        assert!(encode_member_path_segments("g", "deadbeef").is_err());
+        let slash_agent = format!("{}{}{}", "a".repeat(31), "/", "b".repeat(32));
+        assert_eq!(slash_agent.len(), 64);
+        assert!(encode_member_path_segments("g", &slash_agent).is_err());
+        // Empty group id is rejected.
+        assert!(encode_member_path_segments("", &"ab".repeat(32)).is_err());
+    }
+    #[test]
+    fn named_group_projection_preserves_signed_public_and_never_launders() {
+        // `confidentiality` is the security-critical label a consumer branches
+        // on. It MUST preserve an explicit `signed_public` (the only creatable
+        // kind) and NEVER relabel an `mls_encrypted` or unresolved group as
+        // `signed_public` — that would launder a non-public group onto the
+        // open-channel path. An absent/null policy resolves to `None`, never a
+        // fabricated public label.
+        let signed = serde_json::json!({
+            "group_id": "g1", "name": "Eng",
+            "policy": { "confidentiality": "signed_public" }
+        });
+        let group: NamedGroup = serde_json::from_value::<RawNamedGroup>(signed)
+            .unwrap()
+            .into();
+        assert_eq!(
+            group.confidentiality.as_deref(),
+            Some("signed_public"),
+            "signed_public must be preserved verbatim"
+        );
+
+        let mls = serde_json::json!({
+            "group_id": "g2", "name": "Secret",
+            "policy": { "confidentiality": "mls_encrypted" }
+        });
+        let group: NamedGroup = serde_json::from_value::<RawNamedGroup>(mls).unwrap().into();
+        // Never laundered to public: keeps its true label, never signed_public.
+        assert_ne!(
+            group.confidentiality.as_deref(),
+            Some("signed_public"),
+            "mls_encrypted must never be relabeled as signed_public"
+        );
+        assert_eq!(group.confidentiality.as_deref(), Some("mls_encrypted"));
+
+        // Null confidentiality (policy present, axis unset) → None, not public.
+        let null_axis = serde_json::json!({
+            "group_id": "g3", "name": "Mystery",
+            "policy": { "confidentiality": null }
+        });
+        let group: NamedGroup = serde_json::from_value::<RawNamedGroup>(null_axis)
+            .unwrap()
+            .into();
+        assert_eq!(group.confidentiality, None);
+
+        // No policy at all → None, never fabricated as public.
+        let no_policy = serde_json::json!({ "group_id": "g4", "name": "Bare" });
+        let group: NamedGroup = serde_json::from_value::<RawNamedGroup>(no_policy)
+            .unwrap()
+            .into();
+        assert_eq!(group.confidentiality, None);
+    }
+
+    #[test]
+    fn add_member_body_carries_no_treekem_or_key_package_field() {
+        // The add-member wire body forwards only the roster addition;
+        // secure-group (TreeKEM / MLS) crypto is NOT approved, so NO key-package
+        // material may cross this boundary. Re-adding a `treekem_key_package_b64`
+        // (or any key-package-shaped field) here would re-open the secure-group
+        // ingress; this pins the body to exactly `{ agent_id, display_name? }`.
+        let agent = "ab".repeat(32);
+        let with_name = AddMemberBody {
+            agent_id: &agent,
+            display_name: Some("Ada"),
         };
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["preset"], "public_open");
-        // Absent axes are skipped so the daemon leaves them unchanged.
-        for key in [
-            "discoverability",
-            "admission",
-            "confidentiality",
-            "read_access",
-            "write_access",
-        ] {
-            assert!(json.get(key).is_none(), "{key} should be absent");
-        }
+        let v: serde_json::Value =
+            serde_json::to_value(&with_name).expect("serialize add-member body");
+        assert_eq!(v["agent_id"], agent);
+        assert_eq!(v["display_name"], "Ada");
+        assert!(
+            v.get("treekem_key_package_b64").is_none(),
+            "treekem key package must not cross the Tauri boundary: {v}"
+        );
+        let keys: Vec<&str> = v
+            .as_object()
+            .expect("add-member body is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["agent_id", "display_name"],
+            "exact add-member body keys: {v}"
+        );
+
+        // An omitted display_name is dropped; still no key material leaks.
+        let no_name = AddMemberBody {
+            agent_id: &agent,
+            display_name: None,
+        };
+        let v: serde_json::Value =
+            serde_json::to_value(&no_name).expect("serialize add-member body without name");
+        assert!(v.get("display_name").is_none());
+        assert!(v.get("treekem_key_package_b64").is_none());
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec!["agent_id"],
+            "no display_name, no key material: {v}"
+        );
     }
 }

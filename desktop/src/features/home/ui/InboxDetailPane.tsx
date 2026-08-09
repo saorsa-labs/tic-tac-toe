@@ -65,7 +65,7 @@ type InboxDetailPaneProps = {
   replies?: InboxReply[];
   channel: Channel | null;
   contextChannelName?: string | null;
-  currentPubkey?: string;
+  currentAgentId?: string;
   /**
    * The event anchor: the specific event ID the user selected or navigated to
    * via `?item=`. Used for message highlighting and as the stable identity for
@@ -118,7 +118,7 @@ export function InboxDetailPane({
   replies = [],
   channel,
   contextChannelName = null,
-  currentPubkey,
+  currentAgentId,
   selectedEventId,
   latchedDefaultParentId = null,
   onBack,
@@ -171,9 +171,9 @@ export function InboxDetailPane({
         }
       : null;
   const initialAgentPubkeys = rootMessage
-    ? currentPubkey &&
+    ? currentAgentId &&
       normalizePubkey(rootMessage.authorPubkey) ===
-        normalizePubkey(currentPubkey)
+        normalizePubkey(currentAgentId)
       ? orderMentionPubkeysByText(
           rootMessage.content,
           rootMessage.mentionPubkeysByName,
@@ -453,7 +453,7 @@ export function InboxDetailPane({
                   {channel ? (
                     <ChannelMembersBar
                       channel={channel}
-                      currentPubkey={currentPubkey}
+                      currentAgentId={currentAgentId}
                       onManageChannel={() => {
                         if (contextChannelId) {
                           onManageChannel(contextChannelId);
@@ -582,10 +582,10 @@ export function InboxDetailPane({
         <React.Suspense fallback={null}>
           <MembersSidebar
             channel={channel}
-            currentPubkey={currentPubkey}
+            currentAgentId={currentAgentId}
             onOpenChange={setIsMembersSidebarOpen}
             open={isMembersSidebarOpen}
-            relayUrl={activeCommunity?.relayUrl}
+            groupId={activeCommunity?.groupId}
           />
         </React.Suspense>
       ) : null}

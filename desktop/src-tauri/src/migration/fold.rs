@@ -154,7 +154,7 @@ mod tests {
         serde_json::json!({
             "name": name,
             "pubkey": pubkey,
-            "relay_url": "ws://localhost:3000",
+            "relay_url": "ws://relay.test:3000",
             "acp_command": "buzz-acp",
             "agent_command": "goose",
             "agent_args": [],

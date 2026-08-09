@@ -5,6 +5,8 @@ import {
   buildVirtualizedItems,
   didPrependVirtualizedTimeline,
   estimateVirtualizedTimelineItemHeight,
+  isVirtualizedAtBottom,
+  VIRTUALIZED_AT_BOTTOM_THRESHOLD_PX,
   virtualizedItemKey,
 } from "./virtualizedTimelineItems.ts";
 
@@ -224,4 +226,47 @@ test("virtualized rows preserve their heterogeneous height estimates", () => {
   assert.equal(estimates[0], 32);
   assert.ok(estimates[2] > estimates[1] + 200);
   assert.equal(estimates.at(-1), 96);
+});
+
+// The affordance ("Jump to latest") + settle decision share one verdict via
+// isVirtualizedAtBottom. These pin the exact contract the resize/settle
+// recompute relies on: the DOM-distance poll (<8) and the affordance count
+// (0) must agree for the same geometry, so a spacer/composer resize that
+// grows content without a scroll event cannot leave the verdict stale.
+test("isVirtualizedAtBottom is true at the very bottom and within the threshold", () => {
+  const scrollSize = 2_000;
+  const viewportSize = 500;
+  // Pinned to the very bottom (spacer visible): distance 0.
+  assert.equal(isVirtualizedAtBottom(scrollSize, viewportSize, 1_500), true);
+  // Just inside the threshold.
+  assert.equal(
+    isVirtualizedAtBottom(
+      scrollSize,
+      viewportSize,
+      1_500 - VIRTUALIZED_AT_BOTTOM_THRESHOLD_PX,
+    ),
+    true,
+  );
+});
+
+test("isVirtualizedAtBottom is false past the threshold (reading history)", () => {
+  const scrollSize = 2_000;
+  const viewportSize = 500;
+  // One pixel past the threshold.
+  assert.equal(
+    isVirtualizedAtBottom(
+      scrollSize,
+      viewportSize,
+      1_500 - VIRTUALIZED_AT_BOTTOM_THRESHOLD_PX - 1,
+    ),
+    false,
+  );
+  // Well into history.
+  assert.equal(isVirtualizedAtBottom(scrollSize, viewportSize, 0), false);
+});
+
+test("isVirtualizedAtBottom handles overshoot (offset past the floor) as at-bottom", () => {
+  // A programmatic pin can land a sub-pixel past scrollSize - viewportSize.
+  // Overshoot must count as at-bottom so a settle completion hides the pill.
+  assert.equal(isVirtualizedAtBottom(2_000, 500, 1_510), true);
 });

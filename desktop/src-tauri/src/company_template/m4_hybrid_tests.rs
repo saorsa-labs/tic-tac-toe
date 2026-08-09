@@ -16,12 +16,8 @@
 //! module owner via `#[cfg(test)] #[path = "m4_hybrid_tests.rs"] mod m4_hybrid_tests;`
 //! (the same convention as `local_stack_tests.rs`).
 
-use super::instantiate::{
-    instantiate_company, InMemorySink, JsonManifestSink, ManifestSink, ManifestStatus,
-};
-use super::parse::{parse_company_template, parse_lenient, validate, ParseError, ValidationIssue};
+use super::parse::{parse_company_template, validate, ParseError, ValidationIssue};
 use super::plan::{instance_slug, plan_instantiation, PlanStep};
-use super::provisioner::RecordingProvisioner;
 use super::spec::{CompanyTemplate, GroupVisibility, StoreKind, StorePolicy};
 use super::workflow::generate_workflow_md;
 
@@ -512,7 +508,6 @@ fn plan_store_topics_are_company_scoped_and_instance_namespaced() {
     let t = parsed_dev_sales();
     let plan = plan_instantiation(&t, "Acme Co. 2026!");
 
-    // instance_slug lowercases + collapses non-topic-safe chars to '-'.
     let store_step = plan
         .steps
         .iter()
@@ -528,9 +523,86 @@ fn plan_store_topics_are_company_scoped_and_instance_namespaced() {
         !store_step.contains("x0x.group"),
         "topic must be company-scoped: {store_step}"
     );
+    // Instance-namespaced via instance_topic_fragment: display slug + hash suffix.
     assert!(
-        store_step.starts_with("ttt.acme-co-2026.store.proofs.company-proofs"),
-        "topic must be instance-namespaced: {store_step}"
+        store_step.starts_with("ttt.acme-co-2026-"),
+        "topic must carry the instance display slug + hash: {store_step}"
+    );
+    assert!(
+        store_step.contains(".store.proofs.company-proofs"),
+        "topic must name the store kind + local id: {store_step}"
+    );
+}
+
+#[test]
+fn plan_topics_are_unique_per_instance_sharing_a_display_name() {
+    let t = parsed_dev_sales();
+    let a = plan_instantiation(&t, "acme-1700000000000");
+    let b = plan_instantiation(&t, "acme-1800000000000");
+
+    let topic_a = a
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            PlanStep::CreateStore { topic, .. } => Some(topic.clone()),
+            _ => None,
+        })
+        .expect("at least one store");
+    let topic_b = b
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            PlanStep::CreateStore { topic, .. } => Some(topic.clone()),
+            _ => None,
+        })
+        .expect("at least one store");
+    // Same display slug, different instance_id → distinct topics (isolation).
+    assert_ne!(topic_a, topic_b, "topics must differ across instances");
+}
+
+#[test]
+fn plan_group_names_are_instance_scoped() {
+    let t = parsed_dev_sales();
+    let a = plan_instantiation(&t, "acme-1700000000000");
+    let b = plan_instantiation(&t, "acme-1800000000000");
+
+    let name_a = a
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            PlanStep::CreateGroup { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .expect("at least one group");
+    let name_b = b
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            PlanStep::CreateGroup { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .expect("at least one group");
+    // The template display name is preserved…
+    assert!(
+        name_a.contains("Engineering") || name_a.contains("Sales") || name_a.contains("All-Hands")
+    );
+    // …but the dedup key is unique per instance (prevents cross-instance adoption).
+    assert_ne!(name_a, name_b, "group names must differ across instances");
+}
+
+#[test]
+fn instance_key_preserves_uniqueness_without_truncation() {
+    use crate::company_template::plan::instance_key;
+    // Two instance_ids with the same long display-name slug but different
+    // timestamps must produce distinct keys (the original instance_slug bug).
+    let long = "a".repeat(60);
+    let key_a = instance_key(&format!("{long}-1700000000000"));
+    let key_b = instance_key(&format!("{long}-1800000000000"));
+    assert_ne!(key_a, key_b, "instance_key must preserve the unique suffix");
+    // No truncation: the timestamp is still present.
+    assert!(
+        key_a.ends_with("-1700000000000"),
+        "key must not truncate: {key_a}"
     );
 }
 
@@ -574,118 +646,4 @@ fn workflow_md_is_deterministic() {
     let a = generate_workflow_md(&t, &plan);
     let b = generate_workflow_md(&t, &plan_instantiation(&t, "det"));
     assert_eq!(a, b);
-}
-
-// ─── #7 Resumable native provisioning ──────────────────────────────────────
-
-#[tokio::test]
-async fn instantiation_is_checkpointed_and_idempotent() {
-    let template = parsed_dev_sales();
-    let plan = plan_instantiation(&template, "resumable-company");
-    let provisioner = RecordingProvisioner::new();
-    let sink = InMemorySink::new();
-
-    let first = instantiate_company(&plan, &provisioner, &sink).await;
-    assert!(first.is_complete());
-    assert_eq!(provisioner.group_calls(), 3);
-    assert_eq!(provisioner.store_calls(), 2);
-    assert_eq!(provisioner.task_list_calls(), 1);
-    let calls = provisioner.total_calls();
-
-    let second = instantiate_company(&plan, &provisioner, &sink).await;
-    assert!(second.is_complete());
-    assert_eq!(provisioner.total_calls(), calls);
-    let manifest = sink.load().expect("manifest checkpoint");
-    assert!(manifest.is_complete());
-}
-
-#[tokio::test]
-async fn provisioning_failure_leaves_a_resumable_manifest() {
-    let template = parsed_dev_sales();
-    let plan = plan_instantiation(&template, "partial-company");
-    let provisioner = RecordingProvisioner::new();
-    provisioner.fail_next(1);
-    let sink = InMemorySink::new();
-
-    let outcome = instantiate_company(&plan, &provisioner, &sink).await;
-    assert!(!outcome.is_complete());
-    assert_eq!(outcome.errors().len(), 1);
-    assert_eq!(
-        sink.load().expect("resumable checkpoint").status,
-        ManifestStatus::Resumable
-    );
-}
-
-#[test]
-fn template_count_helpers_cover_the_product_picker_summary() {
-    let template = parse_lenient(SOFTWARE_DEV_AND_SALES_TOML).expect("lenient parse");
-    assert_eq!(template.group_count(), 3);
-    assert_eq!(template.role_count(), 2);
-    assert_eq!(template.store_count(), 2);
-    assert_eq!(template.task_list_count(), 1);
-
-    let manifest = JsonManifestSink::new("/tmp/x0x-company/manifest.json");
-    assert_eq!(
-        manifest.path(),
-        std::path::Path::new("/tmp/x0x-company/manifest.json")
-    );
-}
-
-// ─── #8 Zero relay events (static source proof) ──────────────────────────────
-//
-// The M4 contract: the template/Symphony path never emits a Nostr relay event.
-// This reads the module's own source at test time and asserts none of the
-// relay-emit code paths are reachable. It adapts to files added later.
-
-#[test]
-fn company_template_module_emits_no_relay_events() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/company_template");
-    let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read dir {:?}: {e}", dir));
-
-    // Symbols that would indicate a relay-event emit or Nostr coupling.
-    // (Comments saying "no relay events" are fine — we match code shapes.)
-    let forbidden = [
-        "crate::relay",
-        "publish_event",
-        "submit_event",
-        "sign_event",
-        "create_auth_event",
-        "nostr::",
-        "KIND_",
-        "::relay::",
-        "relay_publish",
-    ];
-
-    let mut offenders: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        // This very test file mentions the forbidden tokens in assertions, so
-        // skip it to avoid a self-match.
-        if path.file_name().and_then(|n| n.to_str()) == Some("m4_hybrid_tests.rs") {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {:?}: {e}", path));
-        for needle in forbidden {
-            // Ignore occurrences inside line comments (// ...).
-            for (lineno, line) in src.lines().enumerate() {
-                let code = line.split("//").next().unwrap_or("");
-                if code.contains(needle) {
-                    offenders.push(format!(
-                        "{}:{} `{}`",
-                        path.file_name().unwrap().to_string_lossy(),
-                        lineno + 1,
-                        needle
-                    ));
-                }
-            }
-        }
-    }
-
-    assert!(
-        offenders.is_empty(),
-        "company_template reaches relay/Nostr code paths: {offenders:?}"
-    );
 }

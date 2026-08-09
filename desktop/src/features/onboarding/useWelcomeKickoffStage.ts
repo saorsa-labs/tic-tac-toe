@@ -38,7 +38,7 @@ export type WelcomeKickoffStagePhase =
 export const WELCOME_KICKOFF_STAGE_TIMEOUT_MS = 90_000;
 
 export type WelcomeKickoffStageInput = {
-  /** The active channel is the private Welcome channel. */
+  /** The active channel is the personal Welcome channel. */
   isWelcome: boolean;
   /** The timeline query has settled — an empty list means truly empty. */
   timelineSettled: boolean;

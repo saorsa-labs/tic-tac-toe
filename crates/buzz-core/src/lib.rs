@@ -52,24 +52,33 @@ pub mod test_helpers {
     use nostr::{EventBuilder, Keys, Kind};
 
     /// Create a signed test event with the given kind and random keys.
-    pub fn make_event(kind: Kind) -> nostr::Event {
+    pub fn make_event(kind: Kind) -> Result<nostr::Event, nostr::event::builder::Error> {
         let keys = Keys::generate();
         EventBuilder::new(kind, "test")
             .tags([])
             .sign_with_keys(&keys)
-            .expect("sign")
     }
 
     /// Create a signed test event with the given keys and kind.
-    pub fn make_event_with_keys(keys: &Keys, kind: Kind) -> nostr::Event {
+    pub fn make_event_with_keys(
+        keys: &Keys,
+        kind: Kind,
+    ) -> Result<nostr::Event, nostr::event::builder::Error> {
         EventBuilder::new(kind, "test")
             .tags([])
             .sign_with_keys(keys)
-            .expect("sign")
     }
 
     /// Create a [`StoredEvent`] wrapper around a test event.
-    pub fn make_stored_event(kind: Kind, channel_id: Option<uuid::Uuid>) -> StoredEvent {
-        StoredEvent::with_received_at(make_event(kind), Utc::now(), channel_id, true)
+    pub fn make_stored_event(
+        kind: Kind,
+        channel_id: Option<uuid::Uuid>,
+    ) -> Result<StoredEvent, nostr::event::builder::Error> {
+        Ok(StoredEvent::with_received_at(
+            make_event(kind)?,
+            Utc::now(),
+            channel_id,
+            true,
+        ))
     }
 }

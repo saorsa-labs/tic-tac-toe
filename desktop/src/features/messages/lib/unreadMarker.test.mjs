@@ -235,7 +235,7 @@ test("computeChannelUnreadMarker_allSelfAuthored_returnsNoUnread", () => {
 });
 
 test("computeChannelUnreadMarker_noPubkey_countsNormally", () => {
-  // When currentPubkey is not provided, all messages count.
+  // When currentAgentId is not provided, all messages count.
   const messages = [
     { ...topLevel("a", 10), pubkey: "me" },
     { ...topLevel("b", 20), pubkey: "other" },

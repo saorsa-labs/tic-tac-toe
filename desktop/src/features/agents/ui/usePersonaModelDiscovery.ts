@@ -61,7 +61,7 @@ export function getDiscoveredPersonaModelOptions(
           {
             id: "",
             label:
-              provider === "relay-mesh"
+              provider === "shared-compute"
                 ? "Default (auto)"
                 : agentDefaultModel
                   ? `Default model (${agentDefaultModel})`

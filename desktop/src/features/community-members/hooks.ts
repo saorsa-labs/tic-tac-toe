@@ -9,58 +9,55 @@ import {
   x0xAddGroupMember,
   x0xBanGroupMember,
   x0xGetGroupMembers,
+  x0xRemoveGroupMember,
   x0xSetGroupMemberRole,
   type X0xGroupMember,
 } from "@/shared/api/tauriNativeX0x";
-import type { RelayMember, RelayMemberRole } from "@/shared/api/types";
+import type { CommunityMember, CommunityMemberRole } from "@/shared/api/types";
 
-export const relayMembersQueryKey = ["nativeGroupMembers"] as const;
-export const myRelayMembershipQueryKey = ["myNativeGroupMembership"] as const;
-export const myRelayMembershipLookupQueryKey = [
+export const nativeMembersQueryKey = ["nativeGroupMembers"] as const;
+export const myNativeMembershipQueryKey = ["myNativeGroupMembership"] as const;
+export const myNativeMembershipLookupQueryKey = [
   "myNativeGroupMembershipLookup",
 ] as const;
 
-export type NativeMemberRenderShape = RelayMember & {
-  /** Daemon-owned roster display name (not a relay profile lookup). */
+export type NativeGroupMemberView = CommunityMember & {
+  /** Daemon-owned roster display name. */
   displayName: string | null;
 };
 
 type NativeMembershipLookup = {
   snapshotFound: boolean;
   membershipRequired: boolean;
-  membership: RelayMember | null;
+  membership: CommunityMember | null;
 };
 
-function legacyRole(role: X0xGroupMember["role"]): RelayMemberRole {
+function communityRole(role: X0xGroupMember["role"]): CommunityMemberRole {
   if (role === "owner" || role === "admin") return role;
   return "member";
 }
 
-/**
- * Adapter for existing Buzz member rows. `pubkey` contains an x0x AgentId on
- * this native-only path; inputs are validated before they reach the daemon and
- * legacy encoded identifiers are never decoded or reinterpreted.
- */
-export function nativeMemberToRelayShape(
+/** Convert the daemon roster shape into the existing member-row view model. */
+export function nativeMemberToView(
   member: X0xGroupMember,
-): NativeMemberRenderShape {
+): NativeGroupMemberView {
   return {
     pubkey: member.agentId,
-    role: legacyRole(member.role),
+    role: communityRole(member.role),
     addedBy: member.addedBy,
     createdAt: new Date(member.joinedAtMs).toISOString(),
     displayName: member.displayName,
   };
 }
 
-async function listNativeMembers(): Promise<NativeMemberRenderShape[]> {
+async function listNativeMembers(): Promise<NativeGroupMemberView[]> {
   const groupId = await getActiveNativeGroupId();
   return (await x0xGetGroupMembers(groupId))
     .filter((member) => member.state === "active")
-    .map(nativeMemberToRelayShape);
+    .map(nativeMemberToView);
 }
 
-async function myNativeMembership(): Promise<NativeMemberRenderShape | null> {
+async function myNativeMembership(): Promise<NativeGroupMemberView | null> {
   const [{ agentId }, members] = await Promise.all([
     getIdentity(),
     listNativeMembers(),
@@ -68,7 +65,7 @@ async function myNativeMembership(): Promise<NativeMemberRenderShape | null> {
   return members.find((member) => member.pubkey === agentId) ?? null;
 }
 
-async function myNativeMembershipLookup(): Promise<NativeMembershipLookup> {
+export async function myNativeMembershipLookup(): Promise<NativeMembershipLookup> {
   return {
     snapshotFound: true,
     membershipRequired: true,
@@ -91,6 +88,11 @@ async function banNativeMember(agentIdInput: string): Promise<void> {
   await x0xBanGroupMember(groupId, requireAgentId(agentIdInput));
 }
 
+async function removeNativeMember(agentIdInput: string): Promise<void> {
+  const groupId = await getActiveNativeGroupId();
+  await x0xRemoveGroupMember(groupId, requireAgentId(agentIdInput));
+}
+
 async function changeNativeMemberRole(agentIdInput: string, role: string) {
   if (role !== "admin" && role !== "member") {
     throw new Error("Native groups only allow admin or member assignment.");
@@ -107,40 +109,40 @@ function invalidateMembershipQueries(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
   return Promise.all([
-    queryClient.invalidateQueries({ queryKey: relayMembersQueryKey }),
-    queryClient.invalidateQueries({ queryKey: myRelayMembershipQueryKey }),
+    queryClient.invalidateQueries({ queryKey: nativeMembersQueryKey }),
+    queryClient.invalidateQueries({ queryKey: myNativeMembershipQueryKey }),
     queryClient.invalidateQueries({
-      queryKey: myRelayMembershipLookupQueryKey,
+      queryKey: myNativeMembershipLookupQueryKey,
     }),
   ]);
 }
 
-export function useRelayMembersQuery(enabled = true) {
+export function useNativeMembersQuery(enabled = true) {
   return useQuery({
     enabled,
-    queryKey: relayMembersQueryKey,
+    queryKey: nativeMembersQueryKey,
     queryFn: listNativeMembers,
     staleTime: 30_000,
   });
 }
 
-export function useMyRelayMembershipQuery() {
+export function useMyNativeMembershipQuery() {
   return useQuery({
-    queryKey: myRelayMembershipQueryKey,
+    queryKey: myNativeMembershipQueryKey,
     queryFn: myNativeMembership,
     staleTime: 60_000,
   });
 }
 
-export function useMyRelayMembershipLookupQuery() {
+export function useMyNativeMembershipLookupQuery() {
   return useQuery({
-    queryKey: myRelayMembershipLookupQueryKey,
+    queryKey: myNativeMembershipLookupQueryKey,
     queryFn: myNativeMembershipLookup,
     staleTime: 60_000,
   });
 }
 
-export function useAddRelayMemberMutation() {
+export function useAddNativeMemberMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ pubkey, role }: { pubkey: string; role: string }) =>
@@ -151,7 +153,17 @@ export function useAddRelayMemberMutation() {
   });
 }
 
-export function useRemoveRelayMemberMutation() {
+export function useRemoveNativeMemberMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: removeNativeMember,
+    onSettled: async () => {
+      await invalidateMembershipQueries(queryClient);
+    },
+  });
+}
+
+export function useBanNativeMemberMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: banNativeMember,
@@ -161,7 +173,7 @@ export function useRemoveRelayMemberMutation() {
   });
 }
 
-export function useChangeRelayMemberRoleMutation() {
+export function useChangeNativeMemberRoleMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({

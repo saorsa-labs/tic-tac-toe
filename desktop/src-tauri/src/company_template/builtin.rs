@@ -2,10 +2,12 @@
 //!
 //! Templates are embedded as TOML text and parsed once (validated) via a
 //! [`std::sync::LazyLock`]. The canonical M4 slice is
-//! [`software_dev_and_sales`]: Engineering + Sales (`private_secure`) and
-//! All-Hands (`public_open`), with the canonical Symphony pipeline stores
+//! [`software_dev_and_sales`]: Engineering, Sales, and All-Hands as native
+//! `public_open` x0xd groups (M4 realizes roles identity-only — no
+//! TreeKEM/MLS member-add), with the canonical Symphony pipeline stores
 //! (backlog / claims / runs / handoffs / proofs) shared company-wide plus
-//! group-scoped extras, a shared task list, and a role-agent roster.
+//! group-scoped extras, a shared task list, and a single-harness role roster
+//! driven by one supported Symphony runner preset.
 
 #[cfg(test)]
 use std::sync::LazyLock;
@@ -17,9 +19,11 @@ use crate::company_template::spec::CompanyTemplate;
 
 /// The `software-dev-and-sales` company template (TOML).
 ///
-/// Groups: Engineering, Sales (both `private_secure` — MLS-encrypted /
-/// invite-only) and All-Hands (`public_open`). The canonical Symphony pipeline
-/// stores are company-shared; group-scoped stores are extras.
+/// Groups: Engineering, Sales, and All-Hands are all native `public_open`
+/// x0xd groups — M4 realizes roles identity-only (no secure/TreeKEM member
+/// add). Every role shares one supported Symphony runner preset (a single
+/// uniform runner). The canonical Symphony pipeline stores are company-shared;
+/// group-scoped stores are extras.
 pub const SOFTWARE_DEV_AND_SALES_TOML: &str = r#"
 id = "software-dev-and-sales"
 name = "Software Dev & Sales"
@@ -30,14 +34,14 @@ version = "1"
 [[groups]]
 id = "engineering"
 name = "Engineering"
-visibility = "private_secure"
+visibility = "public_open"
 purpose = "Product engineering, code review, and releases."
 members = ["staff-engineer", "frontend-engineer"]
 
 [[groups]]
 id = "sales"
 name = "Sales"
-visibility = "private_secure"
+visibility = "public_open"
 purpose = "Discovery, demos, and account management."
 members = ["sales-engineer", "account-executive"]
 
@@ -59,21 +63,21 @@ groups = ["engineering", "all-hands"]
 [[roles]]
 id = "frontend-engineer"
 name = "Frontend Engineer"
-harness = "claude"
+harness = "codex"
 skills = ["ui", "a11y", "design-systems"]
 groups = ["engineering", "all-hands"]
 
 [[roles]]
 id = "sales-engineer"
 name = "Sales Engineer"
-harness = "buzz"
+harness = "codex"
 skills = ["discovery", "demos", "solutions"]
 groups = ["sales", "all-hands"]
 
 [[roles]]
 id = "account-executive"
 name = "Account Executive"
-harness = "claude"
+harness = "codex"
 skills = ["crm", "outreach", "forecasting"]
 groups = ["sales", "all-hands"]
 
@@ -160,18 +164,19 @@ mod tests {
     fn builtin_template_parses_and_has_expected_topology() {
         let tpl = software_dev_and_sales();
         assert_eq!(tpl.id, "software-dev-and-sales");
-        // Three groups: Engineering + Sales private_secure, All-Hands public_open.
+        // M4 public-only contract: every shipping group is public_open
+        // (Engineering + Sales + All-Hands) — validate_supported_contract
+        // rejects any non-public group before reservation, so the builtin the
+        // production gate runs against must itself be all-public.
         assert_eq!(tpl.groups.len(), 3);
-        let eng = tpl.group("engineering").unwrap();
-        assert_eq!(
-            eng.visibility,
-            crate::company_template::spec::GroupVisibility::PrivateSecure
-        );
-        let ah = tpl.group("all-hands").unwrap();
-        assert_eq!(
-            ah.visibility,
-            crate::company_template::spec::GroupVisibility::PublicOpen
-        );
+        for group in &tpl.groups {
+            assert_eq!(
+                group.visibility,
+                crate::company_template::spec::GroupVisibility::PublicOpen,
+                "shipping group `{}` must be public_open",
+                group.id
+            );
+        }
         // Canonical pipeline stores present.
         let kinds: Vec<_> = tpl.stores.iter().map(|s| s.kind).collect();
         assert!(kinds.contains(&crate::company_template::spec::StoreKind::Backlog));

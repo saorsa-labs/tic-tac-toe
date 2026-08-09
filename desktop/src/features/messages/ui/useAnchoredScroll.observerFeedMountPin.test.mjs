@@ -209,6 +209,24 @@ function ObserverFeedHarness({ isLoading, messages, refs }) {
   return null;
 }
 
+// Mirrors MessageTimeline's virtualized wiring: the virtualizer owns prepend
+// anchoring and reports bottom state via `onVirtualizerAtBottomStateChange`.
+// Captures the hook's public surface into `resultRef` so the test can drive
+// that callback and read `newMessageCount` / `isAtBottom` between commits.
+function VirtualizerBottomHarness({ messages, resultRef, refs }) {
+  const result = useAnchoredScroll({
+    channelId: "channel:virtualized-timeline",
+    contentRef: refs.content,
+    isLoading: false,
+    messages,
+    scrollContainerRef: refs.container,
+    virtualizerOwnsPrependAnchoring: true,
+    virtualScrollToBottom() {},
+  });
+  resultRef.current = result;
+  return null;
+}
+
 test("re-pins to the new floor once observer content commits after mount, even with no isLoading transition", async () => {
   const refs = {
     container: { current: null },
@@ -385,6 +403,86 @@ test("stays glued to the floor as further messages stream in after the initial p
   });
 
   assert.equal(refs.container.current.scrollTop, 1_800);
+
+  await act(async () => {
+    root.unmount();
+  });
+});
+
+// Regression: a virtualizer false bottom transition must take effect via the
+// ref-backed anchor on the SAME tick it is reported, so an append landing
+// before the deferred semantic-bottom React commit still counts as unread. If
+// the transition were deferred to a later render, the append would hit the
+// stale at-bottom anchor and `setNewMessageCount(0)` would swallow it.
+test("a same-tick append after a virtualizer false-bottom transition counts as unread before the semantic-bottom commit", async () => {
+  const refs = {
+    container: { current: null },
+    content: { current: {} },
+  };
+  const resultRef = { current: null };
+  const root = createRoot(document.createElement("div"));
+
+  refs.container.current = makeContainer({
+    clientHeight: 400,
+    scrollHeight: 1_000,
+    scrollTop: 1_000,
+  });
+
+  // Establish bottom: mount pinned at the floor.
+  await act(async () => {
+    root.render(
+      React.createElement(VirtualizerBottomHarness, {
+        messages: [{ id: "m1" }],
+        resultRef,
+        refs,
+      }),
+    );
+  });
+  // Flush the mount settling rAF so the baseline floor pin is complete and no
+  // deferred pin can clobber the transition under test.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(resultRef.current.isAtBottom, true);
+  assert.equal(resultRef.current.newMessageCount, 0);
+
+  // The virtualizer reports it has scrolled away from the floor, then a message
+  // arrives in the SAME render cycle — before the deferred semantic-bottom
+  // commit could land. The hook must honor the synchronous ref-backed false
+  // transition and count the append as unread rather than reading the stale
+  // at-bottom anchor and dropping the message.
+  await act(async () => {
+    resultRef.current.onVirtualizerAtBottomStateChange(false);
+    root.render(
+      React.createElement(VirtualizerBottomHarness, {
+        messages: [{ id: "m1" }, { id: "m2" }],
+        resultRef,
+        refs,
+      }),
+    );
+  });
+
+  assert.equal(
+    resultRef.current.isAtBottom,
+    false,
+    "virtual bottom must stay false after the transition",
+  );
+  assert.equal(
+    resultRef.current.newMessageCount,
+    1,
+    "a same-tick append after a false bottom transition must count as unread",
+  );
+
+  // Returning to the floor clears the unread tally.
+  await act(async () => {
+    resultRef.current.onVirtualizerAtBottomStateChange(true);
+  });
+  assert.equal(
+    resultRef.current.newMessageCount,
+    0,
+    "reporting bottom again must clear the unread count",
+  );
 
   await act(async () => {
     root.unmount();

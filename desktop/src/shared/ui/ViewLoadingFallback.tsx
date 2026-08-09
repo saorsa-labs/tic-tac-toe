@@ -7,7 +7,6 @@ import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 type ViewLoadingFallbackKind =
   | "agents"
   | "channel"
-  | "forum"
   | "projects"
   | "pulse"
   | "workflows";
@@ -353,49 +352,11 @@ function ChannelLoadingBody({ hasHeader = false }: { hasHeader?: boolean }) {
   );
 }
 
-function ForumLoadingBody({ hasHeader = false }: { hasHeader?: boolean }) {
-  return (
-    <div
-      className={cn(
-        "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-        !hasHeader && channelChrome.contentPadding,
-      )}
-    >
-      <div className="border-b border-border/60 p-4">
-        <Skeleton className="h-10 w-full rounded-xl" />
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="space-y-3">
-          {["first", "second", "third"].map((card) => (
-            <Card className="p-4" key={card}>
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="h-5 w-16 rounded-full" />
-                </div>
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-5/6" />
-                <div className="flex items-center gap-3">
-                  <Skeleton className="h-4 w-20" />
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-4 w-14" />
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function ViewLoadingFallback({
   includeHeader = false,
   kind,
 }: ViewLoadingFallbackProps) {
-  const shouldShowChannelHeader =
-    includeHeader && (kind === "channel" || kind === "forum");
+  const shouldShowChannelHeader = includeHeader && kind === "channel";
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -405,9 +366,6 @@ export function ViewLoadingFallback({
       {kind === "projects" ? <CardListLoadingBody /> : null}
       {kind === "channel" ? (
         <ChannelLoadingBody hasHeader={shouldShowChannelHeader} />
-      ) : null}
-      {kind === "forum" ? (
-        <ForumLoadingBody hasHeader={shouldShowChannelHeader} />
       ) : null}
       {kind === "pulse" ? (
         <ChannelLoadingBody hasHeader={shouldShowChannelHeader} />

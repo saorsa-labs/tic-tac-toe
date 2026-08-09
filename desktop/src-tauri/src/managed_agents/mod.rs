@@ -1,5 +1,4 @@
 mod agent_env;
-pub(crate) mod agent_events;
 pub(crate) mod agent_identity;
 pub(crate) mod agent_snapshot;
 pub(crate) mod team_snapshot;
@@ -20,17 +19,14 @@ mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
 pub(crate) mod readiness;
-pub(crate) mod reconcile;
-mod relay_mesh;
 mod repos;
 mod restore;
-pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+mod shared_compute;
 pub(crate) mod spawn_hash;
 pub(crate) mod storage;
-pub(crate) mod team_events;
 mod team_repair;
 mod teams;
 mod types;
@@ -62,15 +58,12 @@ pub use process_lifecycle::*;
 pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
 };
-pub use relay_mesh::*;
-pub use repos::{
-    effective_repos_dir, ensure_repos_symlink, resolve_repos_at_boot, validate_repos_dir,
-    write_persisted_repos_dir,
-};
+pub use repos::{resolve_repos_at_boot, validate_repos_dir};
 pub use restore::*;
 pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
+pub use shared_compute::*;
 pub use storage::*;
 pub use teams::*;
 pub use types::*;

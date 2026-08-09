@@ -29,8 +29,6 @@ import {
 } from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
-import { useUserStatusQuery } from "@/features/user-status/hooks";
-import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import {
   createOptimisticMessage,
@@ -39,9 +37,8 @@ import {
 import { buildWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
-import { sendChannelMessage } from "@/shared/api/tauri";
+import { sendNativeMessage } from "@/features/messages/lib/nativeMessaging";
 import type { Channel, RelayEvent } from "@/shared/api/types";
-import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
@@ -90,11 +87,11 @@ function InfoBadge({ children }: { children: React.ReactNode }) {
 function findCachedOneToOneDm(
   channels: Channel[] | undefined,
   targetPubkey: string,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
 ) {
   const normalizedTargetPubkey = normalizePubkey(targetPubkey);
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
 
   return (
@@ -109,10 +106,10 @@ function findCachedOneToOneDm(
         return false;
       }
 
-      const otherParticipantPubkeys = normalizedCurrentPubkey
+      const otherParticipantPubkeys = normalizedCurrentAgentId
         ? participantPubkeys.filter(
             (participantPubkey) =>
-              participantPubkey !== normalizedCurrentPubkey,
+              participantPubkey !== normalizedCurrentAgentId,
           )
         : participantPubkeys;
 
@@ -156,17 +153,6 @@ function HoverPubkeyName({
   );
 }
 
-function StatusLine({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      className="flex w-full min-w-0 items-center gap-1 py-1 text-xs leading-4 text-muted-foreground"
-      data-testid="user-profile-status"
-    >
-      {children}
-    </div>
-  );
-}
-
 export function UserProfilePopover({
   children,
   pubkey,
@@ -201,7 +187,6 @@ export function UserProfilePopover({
   const presenceQuery = usePresenceQuery(open ? [pubkey] : [], {
     enabled: open,
   });
-  const userStatusQuery = useUserStatusQuery(open ? [pubkey] : []);
 
   const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
   const { openProfilePanel } = useProfilePanel();
@@ -242,22 +227,22 @@ export function UserProfilePopover({
   // this only decides whether to paint the "View activity log" button.
   const isOwner = useIsManagedAgent(isBotProfile ? pubkey : null);
   const identityQuery = useIdentityQuery();
-  const currentPubkey = identityQuery.data?.pubkey;
+  const currentAgentId = identityQuery.data?.agentId;
   const ownerLabel = isBotProfile
     ? formatOwnerLabel(
         ownerPubkey,
-        currentPubkey,
+        currentAgentId,
         ownerProfileQuery.data?.profiles,
       )
     : null;
   const isSelf =
-    currentPubkey !== undefined &&
-    currentPubkey.toLowerCase() === pubkey.toLowerCase();
-  const showProfileActions = currentPubkey !== undefined && !isSelf;
+    currentAgentId !== undefined &&
+    currentAgentId.toLowerCase() === pubkey.toLowerCase();
+  const showProfileActions = currentAgentId !== undefined && !isSelf;
   const showHumanProfileActions =
     showProfileActions && !isBotProfile && !isAgentClassificationPending;
   const selfProfileQuery = useProfileQuery(open && showProfileActions);
-  const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
+  const isCurrentUserOwner = ownsAuthorAgent(profile, currentAgentId);
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
   const showMessageAction =
     showProfileActions &&
@@ -267,9 +252,6 @@ export function UserProfilePopover({
   const canViewActivity =
     isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
   const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
-  const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];
-  const userStatusText = userStatus?.text.trim() ?? "";
-  const hasUserStatus = Boolean(userStatusText || userStatus?.emoji);
   const profileDescription = profile?.about?.trim() ?? "";
   const profileSubheader = profileDescription || profile?.nip05Handle?.trim();
   const activeTurns = useAgentWorking(isBotProfile ? pubkey : null).channels;
@@ -414,12 +396,11 @@ export function UserProfilePopover({
       }
 
       const dm =
-        findCachedOneToOneDm(channelsQuery.data, pubkey, currentPubkey) ??
+        findCachedOneToOneDm(channelsQuery.data, pubkey, currentAgentId) ??
         (await openDmMutation.mutateAsync({ pubkeys: [pubkey] }));
       const senderName =
         selfProfileQuery.data?.displayName?.trim() ||
-        identity.displayName.trim() ||
-        truncatePubkey(identity.pubkey);
+        identity.identityWords.join(" ").trim();
       const content = buildWaveMessageContent(senderName);
       const queryKey = channelMessagesKey(dm.id);
 
@@ -444,21 +425,20 @@ export function UserProfilePopover({
           setOpen(false);
         }
 
-        const result = await sendChannelMessage(dm.id, content);
+        const sent = await sendNativeMessage({
+          channel: dm,
+          content,
+          identity,
+        });
         queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          mergeTimelineCacheMessages(current, {
-            id: result.eventId,
-            localKey: optimisticMessage.id,
-            pubkey: identity.pubkey,
-            created_at: result.createdAt,
-            kind: KIND_STREAM_MESSAGE,
-            tags: [
-              ["h", dm.id],
-              ["p", identity.pubkey],
-            ],
-            content: content.trim(),
-            sig: "",
-          }),
+          mergeTimelineCacheMessages(
+            current.filter(
+              (message) =>
+                message.id !== optimisticMessage.id &&
+                message.localKey !== optimisticMessage.localKey,
+            ),
+            sent,
+          ),
         );
       } catch (error) {
         queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
@@ -482,7 +462,7 @@ export function UserProfilePopover({
   }, [
     channelsQuery.data,
     clearHoverTimer,
-    currentPubkey,
+    currentAgentId,
     goChannel,
     identityQuery.data,
     openDmMutation,
@@ -647,25 +627,12 @@ export function UserProfilePopover({
             </button>
           ) : null}
 
-          {hasUserStatus || showAnyProfileActions ? (
+          {showAnyProfileActions ? (
             <>
               <div
                 aria-hidden="true"
                 className="my-1 border-t border-border/60"
               />
-              {hasUserStatus ? (
-                <StatusLine>
-                  {userStatus?.emoji ? (
-                    <StatusEmoji
-                      className="h-3.5 w-3.5 shrink-0"
-                      value={userStatus.emoji}
-                    />
-                  ) : null}
-                  {userStatusText ? (
-                    <span className="truncate">{userStatusText}</span>
-                  ) : null}
-                </StatusLine>
-              ) : null}
               {showAnyProfileActions ? (
                 <div className="flex gap-2">
                   {showHumanProfileActions ? (

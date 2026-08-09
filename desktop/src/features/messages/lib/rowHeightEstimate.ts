@@ -24,14 +24,14 @@ const MEDIA_MAX_WIDTH = 384; // max-w-[min(24rem,100%)]
 const MEDIA_MAX_HEIGHT = 256; // max-h-64
 const TEXT_LINE_HEIGHT = 20;
 const CODE_LINE_HEIGHT = 19;
-const CHARS_PER_LINE = 64; // rough wrap width at the timeline column
+const CHARS_PER_LINE = 160; // rough wrap width at the timeline column
 const ROW_CHROME = 26; // author/time header + denser row padding
 const CONTINUATION_ROW_CHROME = 8; // dense row padding only; header/avatar are hidden
 const MEDIA_BLOCK_MARGIN_TOP = 4; // image/video blocks use mt-1 in markdown
 const REACTION_ROW = 24;
 const PREVIEW_CARD = 70;
 const MESSAGE_ITEM_BOTTOM_PADDING = 10; // TimelineMessageList pb-2.5
-const MIN_ESTIMATE = 60; // never reserve less than the old flat floor
+const MIN_ESTIMATE = 46; // one-line row chrome plus text, before item padding
 const CONTINUATION_MIN_ESTIMATE = 34;
 
 function mediaHeightFromDim(dim: string | undefined): number {

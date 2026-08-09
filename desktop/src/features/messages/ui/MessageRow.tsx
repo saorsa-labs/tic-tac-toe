@@ -13,7 +13,6 @@ import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
-import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
   getThreadReplyAvatarCenterRem,
   getThreadReplyAvatarCenterYRem,
@@ -166,19 +165,6 @@ export const MessageRow = React.memo(
       errorMessage: reactionErrorMessage,
       select: handleReactionSelect,
     } = useReactionHandler(message, onToggleReaction);
-    const { openReminder, activeReminderEventIds } = useRemindLater();
-    const hasActiveReminder = activeReminderEventIds.has(message.id);
-    const handleRemindLater = React.useCallback(
-      (msg: TimelineMessage) => {
-        openReminder({
-          eventId: msg.id,
-          channelId: channelId ?? "",
-          preview: msg.body.slice(0, 100),
-          authorPubkey: msg.pubkey ?? "",
-        });
-      },
-      [channelId, openReminder],
-    );
     const { mentionNames, mentionPubkeysByName } = React.useMemo(
       () => resolveMentionProps(message.tags, profiles),
       [profiles, message.tags],
@@ -492,7 +478,6 @@ export const MessageRow = React.memo(
           onReactionSelect={
             canToggleReactions ? handleReactionSelect : undefined
           }
-          onRemindLater={handleRemindLater}
           onReply={onReply}
           onUnfollowThread={onUnfollowThread}
           reactionErrorMessage={reactionErrorMessage}
@@ -781,7 +766,6 @@ export const MessageRow = React.memo(
                 : "px-2",
             "flex gap-2.5",
             isContinuation ? "items-center" : "items-start",
-            hasActiveReminder ? "bg-blue-500/10" : "",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
               : "",

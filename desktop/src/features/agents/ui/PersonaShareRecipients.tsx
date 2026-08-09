@@ -68,14 +68,14 @@ export function PersonaShareRecipients({
   });
   const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
   const searchResults = React.useMemo(() => {
-    const currentPubkey = identityQuery.data?.pubkey
-      ? normalizePubkey(identityQuery.data.pubkey)
+    const currentAgentId = identityQuery.data?.agentId
+      ? normalizePubkey(identityQuery.data.agentId)
       : null;
     const candidates = userSearchResults.filter((user) => {
       const pubkey = normalizePubkey(user.pubkey);
       return (
         !user.isAgent &&
-        pubkey !== currentPubkey &&
+        pubkey !== currentAgentId &&
         !excludedPubkeySet.has(pubkey) &&
         !selectedPubkeys.has(pubkey) &&
         !isArchived(pubkey)
@@ -92,7 +92,7 @@ export function PersonaShareRecipients({
   }, [
     deferredSearchQuery,
     excludedPubkeySet,
-    identityQuery.data?.pubkey,
+    identityQuery.data?.agentId,
     isArchived,
     selectedPubkeys,
     userSearchResults,

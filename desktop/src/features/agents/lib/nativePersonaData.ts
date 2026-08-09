@@ -17,12 +17,11 @@
  * relay events and carry no relay URL or pubkey-as-identity.
  */
 
+import type { X0xAgentCard, X0xAgentId } from "@/shared/api/tauriNativeX0x";
 import type {
-  X0xAgentCard,
-  X0xAgentId,
   X0xStorePolicy,
   X0xStoreSummary,
-} from "@/shared/api/tauriNativeX0x";
+} from "@/shared/api/tauriNativeAuxiliary";
 import type { AgentPersona, RespondToMode } from "@/shared/api/types";
 
 /** Schema tag carried on every persona definition payload. */

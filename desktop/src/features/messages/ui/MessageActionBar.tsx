@@ -1,11 +1,9 @@
 import {
   BellOff,
   BellRing,
-  Clock,
   Copy,
   CornerUpLeft,
   EllipsisVertical,
-  Flag,
   Link2,
   MailCheck,
   MailOpen,
@@ -17,10 +15,8 @@ import * as React from "react";
 
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
-import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import { getThreadReference } from "@/features/messages/lib/threading";
-import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
-import { MessageModerationMenuItems } from "@/features/moderation/ui/MessageModerationMenuItems";
 import type {
   TimelineMessage,
   TimelineReaction,
@@ -33,7 +29,7 @@ import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+
 import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import {
   AlertDialog,
@@ -57,6 +53,7 @@ import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
+const EMPTY_CUSTOM_EMOJI: CustomEmoji[] = [];
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
 
@@ -69,7 +66,6 @@ function MoreActionsMenu({
   onMarkUnread,
   onMarkRead,
   onOpenChange,
-  onRemindLater,
   onUnfollowThread,
   open,
   isFollowingThread,
@@ -85,14 +81,12 @@ function MoreActionsMenu({
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onOpenChange: (open: boolean) => void;
-  onRemindLater?: (message: TimelineMessage) => void;
   onUnfollowThread?: (message: TimelineMessage) => void;
   open: boolean;
   isFollowingThread?: boolean;
   isUnread?: boolean;
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
-  const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
   // Set true the moment the user picks "Edit message". The
   // `onCloseAutoFocus` handler on `DropdownMenuContent` reads it to
   // suppress Radix's default focus-restoration (which would yank focus
@@ -105,14 +99,6 @@ function MoreActionsMenu({
 
   const hasCopyActions =
     !message.pending && message.kind !== KIND_HUDDLE_STARTED;
-
-  // A report needs a real, delivered event to target and a known author to
-  // name in the NIP-56 `p` tag. Pending sends and system huddle rows have
-  // neither, so the entry is hidden for them.
-  const canReport =
-    !message.pending &&
-    message.kind !== KIND_HUDDLE_STARTED &&
-    Boolean(message.pubkey);
 
   return (
     <>
@@ -211,17 +197,6 @@ function MoreActionsMenu({
             </DropdownMenuItem>
           ) : null}
 
-          {onRemindLater ? (
-            <DropdownMenuItem
-              onClick={() => {
-                onRemindLater(message);
-              }}
-            >
-              <Clock className="h-4 w-4" />
-              Remind me later
-            </DropdownMenuItem>
-          ) : null}
-
           {hasCopyActions && channelId ? (
             <DropdownMenuItem
               data-testid={`copy-message-link-${message.id}`}
@@ -240,19 +215,7 @@ function MoreActionsMenu({
             </DropdownMenuItem>
           ) : null}
 
-          {canReport || onDelete ? <DropdownMenuSeparator /> : null}
-
-          {canReport ? (
-            <DropdownMenuItem
-              data-testid={`report-message-${message.id}`}
-              onClick={() => {
-                setIsReportDialogOpen(true);
-              }}
-            >
-              <Flag className="h-4 w-4" />
-              Report message
-            </DropdownMenuItem>
-          ) : null}
+          {onDelete ? <DropdownMenuSeparator /> : null}
 
           {onDelete ? (
             <DropdownMenuItem
@@ -265,13 +228,6 @@ function MoreActionsMenu({
               <Trash2 className="h-4 w-4" />
               Delete message
             </DropdownMenuItem>
-          ) : null}
-
-          {canReport ? (
-            <MessageModerationMenuItems
-              channelId={channelId}
-              message={message}
-            />
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -307,15 +263,6 @@ function MoreActionsMenu({
           </AlertDialogContent>
         </AlertDialog>
       ) : null}
-
-      {canReport ? (
-        <ReportMessageDialog
-          open={isReportDialogOpen}
-          onOpenChange={setIsReportDialogOpen}
-          authorPubkey={message.pubkey ?? ""}
-          eventId={message.id}
-        />
-      ) : null}
     </>
   );
 }
@@ -330,7 +277,7 @@ function QuickReactionButton({
   onSelect: (emoji: string) => void;
 }) {
   const displayName = emojiDisplayName(emoji);
-  const mediaUrl = customEmojiUrl ? rewriteRelayUrl(customEmojiUrl) : null;
+  const mediaUrl = customEmojiUrl ? customEmojiUrl : null;
 
   return (
     <Tooltip>
@@ -375,7 +322,6 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onMarkRead,
   onReactionBadgeBurstRequest,
   onReactionSelect,
-  onRemindLater,
   onReply,
   onUnfollowThread,
   reactionErrorMessage = null,
@@ -394,7 +340,6 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onMarkRead?: (message: TimelineMessage) => void;
   onReactionBadgeBurstRequest?: (emoji: string) => void;
   onReactionSelect?: (emoji: string) => Promise<void>;
-  onRemindLater?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onUnfollowThread?: (message: TimelineMessage) => void;
   reactionErrorMessage?: string | null;
@@ -406,7 +351,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
-  const customEmoji = useCustomEmoji();
+  const customEmoji = EMPTY_CUSTOM_EMOJI;
   const quickReactionEmojis = useQuickReactionEmojis(4, customEmoji);
   const quickReactionItems = React.useMemo(
     () =>
@@ -418,7 +363,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
         .filter(
           (item) => !isCustomEmojiShortcode(item.emoji) || item.customEmojiUrl,
         ),
-    [customEmoji, quickReactionEmojis],
+    [quickReactionEmojis],
   );
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
@@ -430,7 +375,6 @@ export const MessageActionBar = React.memo(function MessageActionBar({
     Boolean(onMarkRead) ||
     Boolean(onFollowThread) ||
     Boolean(onUnfollowThread) ||
-    Boolean(onRemindLater) ||
     !message.pending;
 
   const wouldAddReaction = React.useCallback(
@@ -577,7 +521,6 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               onMarkUnread={onMarkUnread}
               onMarkRead={onMarkRead}
               onOpenChange={setIsDropdownOpen}
-              onRemindLater={onRemindLater}
               onUnfollowThread={onUnfollowThread}
               open={isDropdownOpen}
               isFollowingThread={isFollowingThread}

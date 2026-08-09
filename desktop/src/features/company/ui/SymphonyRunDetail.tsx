@@ -21,7 +21,7 @@ const RUN_STATUS_LABEL: Record<SymphonyRunStatus, string> = {
 };
 
 type Props = {
-  instanceId: string;
+  instanceId: string | null;
   runId: string;
   onLeave: () => void;
 };
@@ -46,19 +46,31 @@ export function SymphonyRunDetail({ instanceId, runId, onLeave }: Props) {
           <p className="text-xs text-muted-foreground">{runId}</p>
         </div>
         <div className="flex gap-2">
-          <Button
-            disabled={cancel.isPending}
-            onClick={() => cancel.mutate(instanceId, { onSuccess: onLeave })}
-            size="sm"
-            variant="destructive"
-          >
-            Cancel
-          </Button>
+          {instanceId ? (
+            <Button
+              disabled={cancel.isPending}
+              onClick={() =>
+                cancel.mutate({ instanceId, runId }, { onSuccess: onLeave })
+              }
+              size="sm"
+              variant="destructive"
+            >
+              {cancel.isPending ? "Cancelling…" : "Cancel"}
+            </Button>
+          ) : null}
           <Button onClick={onLeave} size="sm" variant="outline">
             Leave
           </Button>
         </div>
       </div>
+      {cancel.isError ? (
+        <p className="flex items-center gap-1.5 text-xs text-red-400">
+          <AlertCircle className="h-3.5 w-3.5" /> Failed to cancel:{" "}
+          {cancel.error instanceof Error
+            ? cancel.error.message
+            : String(cancel.error)}
+        </p>
+      ) : null}
 
       {runQuery.isLoading ? (
         <Skeleton className="h-16 w-full" />
@@ -131,7 +143,10 @@ export function SymphonyRunDetail({ instanceId, runId, onLeave }: Props) {
 
       {runQuery.isError ? (
         <p className="flex items-center gap-1.5 text-xs text-red-400">
-          <AlertCircle className="h-3.5 w-3.5" /> Failed to load run detail.
+          <AlertCircle className="h-3.5 w-3.5" /> Failed to load run detail:{" "}
+          {runQuery.error instanceof Error
+            ? runQuery.error.message
+            : String(runQuery.error)}
         </p>
       ) : null}
     </div>

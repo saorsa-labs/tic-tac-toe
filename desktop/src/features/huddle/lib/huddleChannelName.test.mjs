@@ -48,7 +48,7 @@ test("buildHuddleChannelName names one-on-one DMs with current user first", () =
         participants: ["Tyler", "Kenny"],
         participantPubkeys: [OTHER, SELF],
       }),
-      currentPubkey: SELF,
+      currentAgentId: SELF,
       members: [
         member({ pubkey: SELF, displayName: "Kenny Lopez" }),
         member({ pubkey: OTHER, displayName: "Tyler Durden" }),
@@ -66,7 +66,7 @@ test("buildHuddleChannelName falls back to channel participant names", () => {
         participants: ["Other Person", "Self User"],
         participantPubkeys: [OTHER, SELF],
       }),
-      currentPubkey: SELF,
+      currentAgentId: SELF,
     }),
     "Self <> Other huddle",
   );
@@ -80,7 +80,7 @@ test("buildHuddleChannelName keeps group DM participants readable", () => {
         participants: ["Other", "Self", "Third"],
         participantPubkeys: [OTHER, SELF, THIRD],
       }),
-      currentPubkey: SELF,
+      currentAgentId: SELF,
     }),
     "Self <> Other <> Third huddle",
   );
@@ -90,7 +90,7 @@ test("buildHuddleChannelName names stream huddles after the channel", () => {
   assert.equal(
     buildHuddleChannelName({
       channel: channel({ name: "engineering" }),
-      currentPubkey: SELF,
+      currentAgentId: SELF,
     }),
     "engineering huddle",
   );

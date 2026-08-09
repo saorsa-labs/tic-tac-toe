@@ -1,15 +1,12 @@
 //! Opens an OS terminal window at a project's local git checkout, cloning
-//! the repository from the relay first when no local checkout exists.
+//! the repository first when no local checkout exists.
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tauri::State;
-
-use crate::app_state::AppState;
 
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
-use super::project_git_exec::{build_git_auth_config, run_git, validate_workspace_clone_url};
+use super::project_git_exec::{build_git_auth_config, run_git, validate_clone_url};
 use super::project_git_workflow::clone_project_repository_blocking;
 use super::project_repo_paths::find_local_repo_dir;
 
@@ -108,14 +105,13 @@ pub async fn open_project_terminal(
     project_dtag: String,
     clone_url: Option<String>,
     default_branch: Option<String>,
-    state: State<'_, AppState>,
 ) -> Result<ProjectTerminalResult, String> {
     if let Some(clone_url) = clone_url.as_deref() {
-        validate_workspace_clone_url(clone_url, &state)?;
+        validate_clone_url(clone_url)?;
     }
     // Auth is only needed for the clone path — keep the result outside the
     // blocking task so it owns no borrowed Tauri state.
-    let auth = build_git_auth_config(&state);
+    let auth = build_git_auth_config();
     tauri::async_runtime::spawn_blocking(move || {
         // An inaccessible repos root (fresh machine, nothing cloned yet) is
         // not fatal here — the clone path below creates the default root. A
@@ -161,17 +157,16 @@ pub async fn open_project_terminal(
 #[tauri::command]
 pub async fn open_project_merge_recovery_terminal(
     input: ProjectMergeRecoveryTerminalInput,
-    state: State<'_, AppState>,
 ) -> Result<ProjectMergeRecoveryTerminalResult, String> {
-    validate_workspace_clone_url(&input.target_clone_url, &state)?;
-    validate_workspace_clone_url(&input.source_clone_url, &state)?;
+    validate_clone_url(&input.target_clone_url)?;
+    validate_clone_url(&input.source_clone_url)?;
     let target_branch = normalize_branch_option(Some(&input.target_branch))
         .ok_or_else(|| "Invalid target branch.".to_string())?;
     let source_branch = normalize_branch_option(Some(&input.source_branch))
         .ok_or_else(|| "Invalid source branch.".to_string())?;
     let expected_commit = clean_commit(Some(input.expected_commit.trim().to_ascii_lowercase()))
         .ok_or_else(|| "Invalid pull request commit.".to_string())?;
-    let auth = build_git_auth_config(&state)?;
+    let auth = build_git_auth_config()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let existing_dir = find_local_repo_dir(

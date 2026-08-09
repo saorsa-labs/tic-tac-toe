@@ -9,7 +9,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export function usePrepareDmSendChannel(
   activeChannel: Channel | null,
-  currentPubkey?: string,
+  currentAgentId?: string,
 ) {
   const openDmMutation = useOpenDmMutation();
   const upsertCachedChannel = useUpsertCachedChannel();
@@ -30,8 +30,8 @@ export function usePrepareDmSendChannel(
         return activeChannel.id;
       }
 
-      const currentNormalizedPubkey = currentPubkey
-        ? normalizePubkey(currentPubkey)
+      const currentNormalizedPubkey = currentAgentId
+        ? normalizePubkey(currentAgentId)
         : null;
       const pubkeys = [
         ...new Set(
@@ -47,7 +47,7 @@ export function usePrepareDmSendChannel(
     },
     [
       activeChannel,
-      currentPubkey,
+      currentAgentId,
       openDmMutation.mutateAsync,
       upsertCachedChannel,
     ],

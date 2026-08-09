@@ -13,14 +13,14 @@ import { toast } from "sonner";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
-  useAddRelayMemberMutation,
-  useChangeRelayMemberRoleMutation,
-  useMyRelayMembershipQuery,
-  useRelayMembersQuery,
-  useRemoveRelayMemberMutation,
-  type NativeMemberRenderShape,
+  useAddNativeMemberMutation,
+  useChangeNativeMemberRoleMutation,
+  useMyNativeMembershipQuery,
+  useNativeMembersQuery,
+  useRemoveNativeMemberMutation,
+  type NativeGroupMemberView,
 } from "@/features/community-members/hooks";
-import type { RelayMemberRole } from "@/shared/api/types";
+import type { CommunityMemberRole } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -36,11 +36,9 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
-import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
-import { InviteLinkSection } from "./InviteLinkSection";
 
-type AssignableRelayRole = Exclude<RelayMemberRole, "owner">;
+type AssignableCommunityRole = Exclude<CommunityMemberRole, "owner">;
 
 function normalizeAgentIdInput(value: string): string {
   return value.trim().toLowerCase();
@@ -50,7 +48,7 @@ function isValidHexPubkey(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
 }
 
-function formatDisplayName(member: NativeMemberRenderShape) {
+function formatDisplayName(member: NativeGroupMemberView) {
   return member.displayName?.trim() || truncatePubkey(member.pubkey);
 }
 
@@ -62,7 +60,7 @@ function formatDate(dateString: string): string {
   });
 }
 
-function roleBadgeClass(role: RelayMemberRole): string {
+function roleBadgeClass(role: CommunityMemberRole): string {
   switch (role) {
     case "owner":
       return "bg-amber-500/10 text-amber-500";
@@ -73,7 +71,7 @@ function roleBadgeClass(role: RelayMemberRole): string {
   }
 }
 
-function RoleBadge({ role }: { role: RelayMemberRole }) {
+function RoleBadge({ role }: { role: CommunityMemberRole }) {
   return (
     <span
       className={cn(
@@ -86,19 +84,19 @@ function RoleBadge({ role }: { role: RelayMemberRole }) {
   );
 }
 
-function RelayMemberRow({
+function CommunityMemberRow({
   currentRole,
-  currentPubkey,
+  currentAgentId,
   member,
 }: {
-  currentRole: RelayMemberRole;
-  currentPubkey?: string;
-  member: NativeMemberRenderShape;
+  currentRole: CommunityMemberRole;
+  currentAgentId?: string;
+  member: NativeGroupMemberView;
 }) {
-  const removeMutation = useRemoveRelayMemberMutation();
-  const changeRoleMutation = useChangeRelayMemberRoleMutation();
-  const isSelf = currentPubkey
-    ? currentPubkey.trim().toLowerCase() === member.pubkey.toLowerCase()
+  const removeMutation = useRemoveNativeMemberMutation();
+  const changeRoleMutation = useChangeNativeMemberRoleMutation();
+  const isSelf = currentAgentId
+    ? currentAgentId.trim().toLowerCase() === member.pubkey.toLowerCase()
     : false;
   const isBusy = removeMutation.isPending || changeRoleMutation.isPending;
   const canRemove =
@@ -226,7 +224,7 @@ function RelayMemberRow({
 const ROLE_OPTIONS: {
   description: string;
   label: string;
-  value: AssignableRelayRole;
+  value: AssignableCommunityRole;
 }[] = [
   {
     value: "member",
@@ -241,23 +239,23 @@ const ROLE_OPTIONS: {
 ];
 
 export function CommunityMembersSettingsCard({
-  currentPubkey: _currentPubkey,
+  currentAgentId: _currentAgentId,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
 }) {
   const identityQuery = useIdentityQuery();
   const currentAgentId = identityQuery.data?.agentId;
-  const myMembershipQuery = useMyRelayMembershipQuery();
+  const myMembershipQuery = useMyNativeMembershipQuery();
   const currentRole = myMembershipQuery.data?.role ?? null;
   const canManageRelay = currentRole === "owner" || currentRole === "admin";
-  const membersQuery = useRelayMembersQuery(canManageRelay);
+  const membersQuery = useNativeMembersQuery(canManageRelay);
   const members = React.useMemo(
     () => membersQuery.data ?? [],
     [membersQuery.data],
   );
-  const addMutation = useAddRelayMemberMutation();
+  const addMutation = useAddNativeMemberMutation();
   const [pubkeyInput, setPubkeyInput] = React.useState("");
-  const [role, setRole] = React.useState<AssignableRelayRole>("member");
+  const [role, setRole] = React.useState<AssignableCommunityRole>("member");
   const [search, setSearch] = React.useState("");
 
   const filteredMembers = React.useMemo(() => {
@@ -324,7 +322,6 @@ export function CommunityMembersSettingsCard({
       />
 
       <div className="space-y-6">
-        <CommunityIconSettingsCard />
         <form className="space-y-1.5" onSubmit={handleAddMember}>
           <label className="text-sm font-medium" htmlFor="relay-member-pubkey">
             Invite a person
@@ -370,7 +367,7 @@ export function CommunityMembersSettingsCard({
                     <DropdownMenuSeparator />
                     <DropdownMenuRadioGroup
                       onValueChange={(value) =>
-                        setRole(value as AssignableRelayRole)
+                        setRole(value as AssignableCommunityRole)
                       }
                       value={role}
                     >
@@ -403,8 +400,6 @@ export function CommunityMembersSettingsCard({
             </p>
           ) : null}
         </form>
-
-        <InviteLinkSection />
 
         {membersQuery.error instanceof Error ? (
           <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -459,8 +454,8 @@ export function CommunityMembersSettingsCard({
               items={filteredMembers}
               renderItem={(member) => (
                 <div className="pb-2">
-                  <RelayMemberRow
-                    currentPubkey={currentAgentId}
+                  <CommunityMemberRow
+                    currentAgentId={currentAgentId}
                     currentRole={currentRole}
                     member={member}
                   />

@@ -157,7 +157,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
 
     const input = page.getByTestId("message-input");
     await input.click();
-    await input.pressSequentially("@npub");
+    await input.pressSequentially("@bodily");
     // Self's suggestion appears in autocomplete despite being in the archived
     // set — the predicate's self-exemption fires.
     await expect(

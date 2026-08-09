@@ -349,7 +349,7 @@ export function ProfileInfoTabContent({
       {hasInfoFields ? <ProfileFieldGroup fields={infoFields} /> : null}
       {hasInstances ? (
         <ProfileInstancesSection
-          currentPubkey={pubkey}
+          currentAgentId={pubkey}
           instances={instances}
           onOpenInstance={onOpenInstance}
         />
@@ -359,11 +359,11 @@ export function ProfileInfoTabContent({
 }
 
 function ProfileInstancesSection({
-  currentPubkey,
+  currentAgentId,
   instances,
   onOpenInstance,
 }: {
-  currentPubkey: string | null;
+  currentAgentId: string | null;
   instances: ManagedAgent[];
   onOpenInstance: (pubkey: string) => void;
 }) {
@@ -392,7 +392,7 @@ function ProfileInstancesSection({
       {expanded ? (
         <div className="border-t border-border/60 px-2 py-2">
           {instances.map((instance) => {
-            const isCurrent = instance.pubkey === currentPubkey;
+            const isCurrent = instance.pubkey === currentAgentId;
             return (
               <button
                 className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors hover:bg-muted/40"

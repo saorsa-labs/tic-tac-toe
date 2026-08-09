@@ -1,30 +1,15 @@
-import {
-  deriveCommunityName,
-  normalizeRelayUrl,
-} from "@/features/communities/communityStorage";
+import * as React from "react";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
-import type { Profile } from "@/shared/api/types";
 
-const STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
+const STORAGE_KEY = "buzz-community-onboarding-transaction.v2";
 
-export type CommunityOnboardingSource =
-  | "first-community"
-  | "add-community"
-  | "membership-recovery"
-  | "deep-link-connect"
-  | "deep-link-join";
+export type CommunityOnboardingSource = "first-community" | "add-community";
 
 export type CommunityOnboardingStage =
-  | "claiming"
   | "connecting"
   | "profile"
   | "team-intro"
   | "finalizing"
-  /**
-   * Backend setup is done and the app is mounting directly on the Welcome
-   * channel underneath the onboarding screen, which stays up as an opaque
-   * curtain until Welcome reports settled (or a safety timeout), then fades.
-   */
   | "entering";
 
 export type FirstCommunityPage = "join" | "member";
@@ -32,30 +17,17 @@ export type FirstCommunityPage = "join" | "member";
 export type CommunityOnboardingTransaction = {
   id: string;
   source: CommunityOnboardingSource;
-  /** First-run screen that launched this transaction, restored on cancel. */
   firstCommunityPage?: FirstCommunityPage;
   stage: CommunityOnboardingStage;
-  relayUrl: string;
-  inviteCode?: string;
   communityName: string;
-  token?: string;
   reposDir?: string;
-  /**
-   * Join-policy acceptance receipt minted before the claim (bound to the
-   * invite code). Forwarded to `claimInvite` so relays with a configured
-   * join policy admit the claim.
-   */
-  policyReceipt?: string;
   communityId?: string;
-  /** Daemon-owned named-group id for native x0xd onboarding. */
   groupId?: string;
   previousCommunityId?: string;
   addedCommunity?: boolean;
   createdAt: string;
   updatedAt: string;
   error?: string;
-  // Deep links are persisted before machine onboarding completes. Set when
-  // the user dismisses the acknowledgment so it stays dismissed on relaunch.
   acknowledged?: boolean;
 };
 
@@ -63,7 +35,6 @@ export type CommunityOnboardingTransactionPatch = Partial<
   Pick<
     CommunityOnboardingTransaction,
     | "stage"
-    | "relayUrl"
     | "communityId"
     | "groupId"
     | "previousCommunityId"
@@ -77,27 +48,10 @@ export type CommunityOnboardingTransactionPatch = Partial<
 export type StartCommunityOnboardingInput = {
   source: CommunityOnboardingSource;
   firstCommunityPage?: FirstCommunityPage;
-  relayUrl: string;
-  inviteCode?: string;
-  communityName?: string;
-  token?: string;
+  communityName: string;
   reposDir?: string;
-  policyReceipt?: string;
   groupId?: string;
 };
-
-function canonicalRelayUrl(rawRelayUrl: string) {
-  const trimmed = rawRelayUrl.trim();
-  if (trimmed.startsWith("x0x://")) return trimmed;
-  const withScheme = /^(ws|wss):\/\//i.test(trimmed)
-    ? trimmed
-    : normalizeRelayUrl(trimmed);
-  const parsed = new URL(withScheme);
-  parsed.protocol = parsed.protocol.toLowerCase();
-  parsed.hostname = parsed.hostname.toLowerCase();
-  parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
-  return parsed.toString().replace(/\/$/, "");
-}
 
 function isTransaction(
   value: unknown,
@@ -106,18 +60,13 @@ function isTransaction(
   const transaction = value as Partial<CommunityOnboardingTransaction>;
   return (
     typeof transaction.id === "string" &&
-    typeof transaction.relayUrl === "string" &&
     typeof transaction.communityName === "string" &&
     typeof transaction.createdAt === "string" &&
     typeof transaction.updatedAt === "string" &&
-    [
-      "claiming",
-      "connecting",
-      "profile",
-      "team-intro",
-      "finalizing",
-      "entering",
-    ].includes(transaction.stage ?? "")
+    ["connecting", "profile", "team-intro", "finalizing", "entering"].includes(
+      transaction.stage ?? "",
+    ) &&
+    typeof transaction.groupId === "string"
   );
 }
 
@@ -138,10 +87,11 @@ export function saveCommunityOnboardingTransaction(
   transaction: CommunityOnboardingTransaction,
   storage: Storage = localStorage,
 ): void {
+  const serialized = JSON.stringify(transaction);
   if (typeof localStorage !== "undefined" && storage === localStorage) {
-    setLocalStorageItemWithRecovery(STORAGE_KEY, JSON.stringify(transaction));
+    setLocalStorageItemWithRecovery(STORAGE_KEY, serialized);
   } else {
-    storage.setItem(STORAGE_KEY, JSON.stringify(transaction));
+    storage.setItem(STORAGE_KEY, serialized);
   }
 }
 
@@ -156,22 +106,18 @@ export function startCommunityOnboarding(
   storage: Storage = localStorage,
   now = new Date(),
 ): CommunityOnboardingTransaction {
-  const relayUrl = canonicalRelayUrl(input.relayUrl);
   const existing = loadCommunityOnboardingTransaction(storage);
-  if (existing?.relayUrl === relayUrl) {
+  const scope = input.groupId;
+  const existingScope = existing?.groupId;
+  if (existing && scope === existingScope) {
     const updated = {
       ...existing,
       firstCommunityPage:
         input.firstCommunityPage ?? existing.firstCommunityPage,
-      inviteCode: input.inviteCode?.trim() || existing.inviteCode,
-      communityName: input.communityName?.trim() || existing.communityName,
-      token: input.token?.trim() || existing.token,
+      communityName: input.communityName.trim() || existing.communityName,
       reposDir: input.reposDir ?? existing.reposDir,
-      policyReceipt: input.policyReceipt ?? existing.policyReceipt,
       updatedAt: now.toISOString(),
       error: undefined,
-      // A freshly opened link deserves fresh feedback — re-present the gate
-      // even if a previous link for this relay was already dismissed.
       acknowledged: undefined,
     };
     saveCommunityOnboardingTransaction(updated, storage);
@@ -183,14 +129,10 @@ export function startCommunityOnboarding(
     id: crypto.randomUUID(),
     source: input.source,
     firstCommunityPage: input.firstCommunityPage,
-    stage: input.inviteCode?.trim() ? "claiming" : "connecting",
-    relayUrl,
-    inviteCode: input.inviteCode?.trim() || undefined,
-    communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
+    stage: "connecting",
+    communityName: input.communityName.trim(),
     groupId: input.groupId,
-    token: input.token?.trim() || undefined,
     reposDir: input.reposDir,
-    policyReceipt: input.policyReceipt,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -220,106 +162,6 @@ export function updateCurrentCommunityOnboardingTransaction(
   return updateCommunityOnboardingTransaction(current, patch, storage, now);
 }
 
-export function markCommunityOnboardingComplete(
-  pubkey: string,
-  relayUrl: string,
-  storage: Storage = localStorage,
-): void {
-  storage.setItem(
-    `buzz-community-onboarding-complete.v1:${encodeURIComponent(relayUrl)}:${pubkey}`,
-    "true",
-  );
-  // The legacy gate is identity-scoped. Marking it here prevents the old profile
-  // flow from reopening after the first community transaction completes.
-  storage.setItem(`buzz-onboarding-complete.v1:${pubkey}`, "true");
-}
-
-/**
- * Returns true when a relay-profile check result means the user should skip
- * community onboarding entirely and land directly in the app.
- *
- * A profile fetch error is represented as `null` and always returns false so
- * that the fallback (show the profile step) applies — the skip must never
- * block or strand onboarding.
- */
-export function shouldSkipCommunityOnboarding(
-  profile: Profile | null,
-): boolean {
-  return profile !== null && profile.hasProfileEvent === true;
-}
-
-/**
- * Outcome of a profile-check attempt during the connecting → profile
- * transition. Produced by `resolveProfileCheckAction`.
- *
- * - `{ action: "skip", profile }` — kind:0 exists; mark complete and enter
- *   the app. The resolved `Profile` is included so callers have the pubkey
- *   for `markCommunityOnboardingComplete` without a second fetch.
- * - `{ action: "show-profile" }` — no kind:0, or the fetch failed / timed
- *   out; show the profile setup step.
- */
-export type ProfileCheckAction =
-  | { action: "skip"; profile: Profile }
-  | { action: "show-profile" };
-
-/**
- * Returns true when a live transaction snapshot still represents the
- * same connecting request that launched the profile check.
- *
- * Extracted as a pure predicate so the stale-result guard in App.tsx can
- * be unit-tested without mounting a component.
- */
-export function isTransactionStillConnecting(
-  live: CommunityOnboardingTransaction | null | undefined,
-  transactionId: string,
-): boolean {
-  return live?.id === transactionId && live.stage === "connecting";
-}
-
-/**
- * Runs a bounded profile fetch and returns the action to take at the
- * `connecting → profile` transition.
- *
- * Accepts `fetchProfile`, `timeoutMs`, and `scheduleTimeout` as parameters so
- * callers (and tests) can supply controlled implementations. `scheduleTimeout`
- * must return a cancellation handle (like `window.setTimeout`) so the timer
- * can be cleared when the fetch settles before the deadline.
- *
- * Any fetch error or timeout → `{ action: "show-profile" }` (never strands
- * onboarding).
- */
-export async function resolveProfileCheckAction(
-  fetchProfile: () => Promise<Profile>,
-  timeoutMs: number,
-  scheduleTimeout: (
-    fn: () => void,
-    ms: number,
-  ) => ReturnType<typeof setTimeout> = (fn, ms) => window.setTimeout(fn, ms),
-): Promise<ProfileCheckAction> {
-  let timerId: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const profile = await Promise.race([
-      fetchProfile(),
-      new Promise<never>(
-        (_, reject) =>
-          (timerId = scheduleTimeout(
-            () => reject(new Error("profile-check-timeout")),
-            timeoutMs,
-          )),
-      ),
-    ]);
-    return shouldSkipCommunityOnboarding(profile)
-      ? { action: "skip", profile }
-      : { action: "show-profile" };
-  } catch {
-    return { action: "show-profile" };
-  } finally {
-    if (timerId !== undefined) clearTimeout(timerId);
-  }
-}
-
-import * as React from "react";
-
 type CommunityOnboardingContextValue = {
   transaction: CommunityOnboardingTransaction | null;
   start: (input: StartCommunityOnboardingInput) => boolean;
@@ -343,12 +185,9 @@ export function CommunityOnboardingProvider({
   );
   const start = React.useCallback(
     (input: StartCommunityOnboardingInput) => {
-      if (
-        transaction &&
-        canonicalRelayUrl(input.relayUrl) !== transaction.relayUrl
-      ) {
-        return false;
-      }
+      const scope = input.groupId;
+      const activeScope = transaction?.groupId;
+      if (transaction && scope !== activeScope) return false;
       setTransaction(startCommunityOnboarding(input));
       return true;
     },
@@ -379,9 +218,10 @@ export function CommunityOnboardingProvider({
 
 export function useCommunityOnboarding() {
   const context = React.useContext(CommunityOnboardingContext);
-  if (!context)
+  if (!context) {
     throw new Error(
       "useCommunityOnboarding must be used within CommunityOnboardingProvider",
     );
+  }
   return context;
 }

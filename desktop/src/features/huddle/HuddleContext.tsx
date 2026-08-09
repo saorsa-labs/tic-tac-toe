@@ -4,7 +4,6 @@ import * as React from "react";
 
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { useAudioDevices } from "./lib/useAudioDevices";
-import { useTtsSubscription } from "./lib/useTtsSubscription";
 
 /**
  * Huddle lifecycle (React context):
@@ -123,8 +122,6 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   const [ephemeralChannelId, setEphemeralChannelId] = React.useState<
     string | null
   >(null);
-  /** Self pubkey — fetched once, used to filter out own messages from TTS */
-  const selfPubkeyRef = React.useRef<string | null>(null);
   /** Pubkeys of participants currently speaking (from Rust backend via Tauri event) */
   const [activeSpeakers, setActiveSpeakers] = React.useState<string[]>([]);
   const {
@@ -348,16 +345,6 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       worklet: AudioWorkletHandle;
       stream: MediaStream;
     }> => {
-      // Fetch self pubkey once for TTS filtering
-      if (!selfPubkeyRef.current) {
-        try {
-          const identity = await invoke<{ pubkey: string }>("get_identity");
-          selfPubkeyRef.current = identity.pubkey;
-        } catch {
-          /* best-effort */
-        }
-      }
-
       if (tokenRef.current !== myToken) throw new Error("superseded");
 
       // Get mic — Rust backend owns the audio WS connection.
@@ -513,8 +500,6 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
     },
     [cleanupFailedStart, connectAndSetupMedia],
   );
-
-  useTtsSubscription(ephemeralChannelId, selfPubkeyRef);
 
   // Pipeline hot-start — check if voice models finished downloading mid-huddle
   React.useEffect(() => {

@@ -38,14 +38,14 @@ import {
 export function useMessageProfiles({
   channelMembers,
   currentProfile,
-  currentPubkey,
+  currentAgentId,
   managedAgents,
   profiles,
   relayAgents,
 }: {
   channelMembers: ChannelMember[] | undefined;
   currentProfile: Profile | undefined;
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   managedAgents: ManagedAgent[];
   profiles: UserProfileLookup | undefined;
   relayAgents: RelayAgent[];
@@ -57,14 +57,14 @@ export function useMessageProfiles({
         base,
         managedAgents,
         relayAgents,
-        currentPubkey,
+        currentAgentId,
       ),
       channelMembers,
     );
   }, [
     channelMembers,
     currentProfile,
-    currentPubkey,
+    currentAgentId,
     managedAgents,
     profiles,
     relayAgents,

@@ -7,7 +7,7 @@ import type {
 
 export const WELCOME_CHANNEL_NAME = "Welcome";
 export const WELCOME_CHANNEL_DESCRIPTION =
-  "A private channel for getting oriented in this community.";
+  "A channel for getting oriented in this community.";
 export const STARTER_GENERAL_CHANNEL_NAME = "general";
 export const STARTER_GENERAL_CHANNEL_DESCRIPTION =
   "General conversation and community updates.";
@@ -59,7 +59,7 @@ type PendingWelcomeChannel = {
 const welcomeChannelInput = {
   name: WELCOME_CHANNEL_NAME,
   channelType: "stream",
-  visibility: "private",
+  visibility: "open",
   description: WELCOME_CHANNEL_DESCRIPTION,
 } satisfies CreateChannelInput;
 
@@ -130,7 +130,7 @@ export function isWelcomeChannel(channel: Channel | null | undefined) {
     channel !== undefined &&
     channel.name === WELCOME_CHANNEL_NAME &&
     channel.channelType === "stream" &&
-    channel.visibility === "private"
+    channel.visibility === "open"
   );
 }
 
@@ -147,7 +147,7 @@ export function isStarterWelcomeChannel(channel: Channel | null | undefined) {
 /**
  * Channels that get the welcome experience (intro action cards, guide
  * composer banner, chat-first agent creation): the starter
- * #welcome-everyone channel, plus the legacy private Welcome channel.
+ * #welcome-everyone channel, plus the legacy personal Welcome channel.
  */
 export function isWelcomeExperienceChannel(
   channel: Channel | null | undefined,
@@ -155,28 +155,28 @@ export function isWelcomeExperienceChannel(
   return isWelcomeChannel(channel) || isStarterWelcomeChannel(channel);
 }
 
-function isPrivateWelcomeChannelCandidate(channel: Channel) {
+function isPersonalWelcomeChannelCandidate(channel: Channel) {
   return (
     isWelcomeChannel(channel) && channel.archivedAt === null && channel.isMember
   );
 }
 
-export function isPrivateWelcomeChannel(
+export function isPersonalWelcomeChannel(
   channel: Channel,
   options: WelcomeChannelOptions = {},
 ) {
   return (
-    isPrivateWelcomeChannelCandidate(channel) &&
+    isPersonalWelcomeChannelCandidate(channel) &&
     hasOnlyCurrentOrAllowedMembers(channel, options.allowedMemberPubkeys)
   );
 }
 
-export function findPrivateWelcomeChannel(
+export function findPersonalWelcomeChannel(
   channels: Channel[],
   options: WelcomeChannelOptions = {},
 ) {
   return (
-    channels.find((channel) => isPrivateWelcomeChannel(channel, options)) ??
+    channels.find((channel) => isPersonalWelcomeChannel(channel, options)) ??
     null
   );
 }
@@ -229,7 +229,7 @@ export async function ensureWelcomeChannel(
   options: WelcomeChannelOptions = {},
 ) {
   const channels = await client.getChannels();
-  const existingWelcome = findPrivateWelcomeChannel(channels, options);
+  const existingWelcome = findPersonalWelcomeChannel(channels, options);
   if (options.replaceExisting && existingWelcome) {
     if (!client.deleteChannel) {
       throw new Error("Replacing Welcome requires deleteChannel.");
@@ -241,7 +241,7 @@ export async function ensureWelcomeChannel(
     return ensureCurrentWelcomeChannelMetadata(client, existingWelcome);
   }
 
-  for (const channel of channels.filter(isPrivateWelcomeChannelCandidate)) {
+  for (const channel of channels.filter(isPersonalWelcomeChannelCandidate)) {
     if (await hasOnlyCurrentHumanMember(client, channel)) {
       if (options.replaceExisting) {
         if (!client.deleteChannel) {

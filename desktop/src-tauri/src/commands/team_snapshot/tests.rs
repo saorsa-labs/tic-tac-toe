@@ -176,9 +176,6 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         display_name: None,
         slug: None,
         persona_id: Some("alice".to_string()),
-        private_key_nsec: String::new(),
-        auth_tag: None,
-        relay_url: String::new(),
         avatar_url: None,
         acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
         agent_command: String::new(),
@@ -219,7 +216,6 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
-        relay_mesh: None,
         runtime: None,
         name_pool: vec![],
     };

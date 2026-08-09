@@ -22,7 +22,8 @@ const TRUE_BOTTOM_THRESHOLD_PX = 1;
 type AnchorState =
   | { kind: "at-bottom" }
   | { kind: "message"; messageId: string; topOffset: number }
-  | { kind: "pinned-center"; messageId: string; contentTop: number };
+  | { kind: "pinned-center"; messageId: string; contentTop: number }
+  | { kind: "virtualized-away" };
 
 export function getPinnedCenterDrift({
   contentTop,
@@ -704,26 +705,30 @@ export function useAnchoredScroll({
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       }
       if (newLatestArrived) setNewMessageCount(0);
-    } else if (messagesArrived > 0 && !virtualizerOwnsPrependAnchoring) {
-      // Anchored mid-history. An older-history prepend grows the content above
-      // the reading row; the browser's native scroll anchoring does NOT correct
-      // this at the top edge (no anchor node above the viewport when scrollTop
-      // is ~0), so re-pin the anchored row to its saved offset by id. This is
-      // the single scroll writer for the prepend — the load-older observer only
-      // triggers the fetch. We run it in this post-commit layout effect (not the
-      // observer's promise callback) because the prepended rows commit on a
-      // deferred snapshot a few frames later, so the row's true position is only
-      // known here.
-      const row = container.querySelector<HTMLElement>(
-        `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
-      );
-      if (row) {
-        const currentTopOffset =
-          row.getBoundingClientRect().top -
-          container.getBoundingClientRect().top;
-        const drift = currentTopOffset - anchor.topOffset;
-        if (Math.abs(drift) > 0.5) {
-          container.scrollBy(0, drift);
+    } else if (messagesArrived > 0) {
+      if (!virtualizerOwnsPrependAnchoring) {
+        // Anchored mid-history. An older-history prepend grows the content above
+        // the reading row; the browser's native scroll anchoring does NOT correct
+        // this at the top edge (no anchor node above the viewport when scrollTop
+        // is ~0), so re-pin the anchored row to its saved offset by id. This is
+        // the single scroll writer for the prepend — the load-older observer only
+        // triggers the fetch. We run it in this post-commit layout effect (not the
+        // observer's promise callback) because the prepended rows commit on a
+        // deferred snapshot a few frames later, so the row's true position is only
+        // known here.
+        if (anchor.kind === "message") {
+          const row = container.querySelector<HTMLElement>(
+            `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
+          );
+          if (row) {
+            const currentTopOffset =
+              row.getBoundingClientRect().top -
+              container.getBoundingClientRect().top;
+            const drift = currentTopOffset - anchor.topOffset;
+            if (Math.abs(drift) > 0.5) {
+              container.scrollBy(0, drift);
+            }
+          }
         }
       }
       if (!isPrepend) {
@@ -891,8 +896,10 @@ export function useAnchoredScroll({
     (atBottom: boolean) => {
       if (!virtualizerOwnsPrependAnchoring) return;
       virtualizerAtBottomRef.current = atBottom;
+      anchorRef.current = atBottom
+        ? { kind: "at-bottom" }
+        : { kind: "virtualized-away" };
       if (atBottom) {
-        anchorRef.current = { kind: "at-bottom" };
         setNewMessageCount(0);
       }
       setIsAtBottom(atBottom);

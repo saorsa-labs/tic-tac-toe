@@ -103,6 +103,20 @@ pub struct EnsureTaskListRequest {
     pub topic: String,
 }
 
+/// Request to ensure a native x0xd agent is a member of a realized
+/// `public_open` group via `POST /groups/:id/members`.
+///
+/// M4 staffs Company roles identity-only: the secure member-add path (private
+/// groups requiring a TreeKEM key package) is removed, so this request carries
+/// NO cryptographic material. This is the public-membership capability retained
+/// for `public_open` groups. A 409 (already a member) is adopted as success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsureMemberRequest {
+    pub group_id: String,
+    pub agent_id: String,
+    pub display_name: Option<String>,
+}
+
 /// The provisioning boundary. Implementations call native x0xd REST APIs.
 ///
 /// Methods return boxed `Send` futures (see [`BoxFut`]) so the trait is usable
@@ -121,6 +135,13 @@ pub trait CompanyProvisioner: Send + Sync {
         &self,
         req: EnsureTaskListRequest,
     ) -> BoxFut<'_, Result<EnsureResult, ProvisionError>>;
+    /// Ensure a native x0xd agent is a member of a realized group via
+    /// `POST /groups/:id/members`. Idempotent: a 409 (already member) is
+    /// adopted as success.
+    fn ensure_group_member(
+        &self,
+        req: EnsureMemberRequest,
+    ) -> BoxFut<'_, Result<EnsureResult, ProvisionError>>;
 }
 
 // ── Recording test double ──────────────────────────────────────────────────
@@ -136,6 +157,7 @@ pub struct RecordingProvisioner {
     group_calls: std::sync::atomic::AtomicUsize,
     store_calls: std::sync::atomic::AtomicUsize,
     task_list_calls: std::sync::atomic::AtomicUsize,
+    member_calls: std::sync::atomic::AtomicUsize,
     /// When set, the next N calls fail with `DaemonUnavailable` to exercise
     /// the resumable-failure path.
     fail_next: std::sync::atomic::AtomicUsize,
@@ -155,6 +177,7 @@ impl RecordingProvisioner {
             group_calls: 0.into(),
             store_calls: 0.into(),
             task_list_calls: 0.into(),
+            member_calls: 0.into(),
             fail_next: 0.into(),
         }
     }
@@ -177,8 +200,12 @@ impl RecordingProvisioner {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub fn member_calls(&self) -> usize {
+        self.member_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn total_calls(&self) -> usize {
-        self.group_calls() + self.store_calls() + self.task_list_calls()
+        self.group_calls() + self.store_calls() + self.task_list_calls() + self.member_calls()
     }
 
     fn maybe_fail(&self) -> Result<(), ProvisionError> {
@@ -241,6 +268,20 @@ impl CompanyProvisioner for RecordingProvisioner {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let fail = self.maybe_fail();
         let id = deterministic_id("tasklist", &req.topic);
+        Box::pin(async move {
+            fail?;
+            Ok(EnsureResult { id, created: true })
+        })
+    }
+
+    fn ensure_group_member(
+        &self,
+        req: EnsureMemberRequest,
+    ) -> BoxFut<'_, Result<EnsureResult, ProvisionError>> {
+        self.member_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let fail = self.maybe_fail();
+        let id = deterministic_id("member", &format!("{}|{}", req.group_id, req.agent_id));
         Box::pin(async move {
             fail?;
             Ok(EnsureResult { id, created: true })
@@ -402,6 +443,32 @@ impl<T: X0xTransport> CompanyProvisioner for X0xHttpProvisioner<'_, T> {
                 }),
                 Err(ProvisionError::Status { code: 409, .. }) => Ok(EnsureResult {
                     id: req.topic,
+                    created: false,
+                }),
+                Err(e) => Err(e),
+            }
+        })
+    }
+
+    fn ensure_group_member(
+        &self,
+        req: EnsureMemberRequest,
+    ) -> BoxFut<'_, Result<EnsureResult, ProvisionError>> {
+        let transport = self.transport;
+        Box::pin(async move {
+            let path = format!("/groups/{}/members", req.group_id);
+            let body = json!({
+                "agent_id": req.agent_id,
+                "display_name": req.display_name,
+            });
+            match transport.post_json(&path, body).await {
+                Ok(_) => Ok(EnsureResult {
+                    id: req.agent_id.clone(),
+                    created: true,
+                }),
+                // 409 = agent already a member → adopt (idempotent).
+                Err(ProvisionError::Status { code: 409, .. }) => Ok(EnsureResult {
+                    id: req.agent_id,
                     created: false,
                 }),
                 Err(e) => Err(e),

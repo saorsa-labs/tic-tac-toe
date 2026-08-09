@@ -2,25 +2,23 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
-  addChannelMembers,
   archiveChannel,
   createChannel,
   deleteChannel,
-  getCanvas,
   getChannelDetails,
   getChannelMembers,
-  getChannels,
   hideDm,
-  joinChannel,
-  leaveChannel,
   openDm,
-  removeChannelMember,
-  setCanvas,
   setChannelPurpose,
   setChannelTopic,
   unarchiveChannel,
   updateChannel,
 } from "@/shared/api/tauri";
+import {
+  addChannelMembers,
+  leaveChannel,
+  removeChannelMember,
+} from "@/shared/api/tauriChannels";
 import type {
   AddChannelMembersInput,
   Channel,
@@ -36,6 +34,7 @@ import {
   readChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import { listNativeChannels } from "@/features/channels/nativeChannelProjection";
 
 export const channelsQueryKey = ["channels"] as const;
 const channelDetailQueryKey = (channelId: string) =>
@@ -189,24 +188,24 @@ function setChannelArchivedState(
 
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
-  const relayUrl = activeCommunity?.relayUrl ?? null;
+  const groupId = activeCommunity?.groupId ?? null;
 
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: channelsQueryKey,
     queryFn: async () => {
-      const channels = sortChannels(await getChannels());
-      if (relayUrl) {
-        writeChannelSnapshot(relayUrl, channels);
+      const channels = sortChannels(await listNativeChannels());
+      if (groupId) {
+        writeChannelSnapshot(groupId, channels);
       }
       return channels;
     },
-    // Paint the sidebar instantly from the last-known list for this relay, then
+    // Paint the sidebar instantly from the last-known list for this group, then
     // revalidate. initialDataUpdatedAt:0 marks the seed as already-stale so the
     // background refetch still fires immediately.
-    initialData: relayUrl
+    initialData: groupId
       ? () => {
-          const snapshot = readChannelSnapshot(relayUrl);
+          const snapshot = readChannelSnapshot(groupId);
           return snapshot ? sortChannels(snapshot) : undefined;
         }
       : undefined,
@@ -547,23 +546,6 @@ export function useRemoveChannelMemberMutation(channelId: string | null) {
   });
 }
 
-export function useJoinChannelMutation(channelId: string | null) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async () => {
-      if (!channelId) {
-        throw new Error("No channel selected.");
-      }
-
-      await joinChannel(channelId);
-    },
-    onSettled: async () => {
-      await invalidateChannelState(queryClient, channelId);
-    },
-  });
-}
-
 export function useLeaveChannelMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
@@ -622,38 +604,4 @@ export function useSelectedChannel(
     selectedChannelId,
     setSelectedChannelId,
   };
-}
-
-// ── Canvas ────────────────────────────────────────────────────────────────────
-export function useCanvasQuery(channelId: string | null, enabled = true) {
-  return useQuery({
-    queryKey: ["channel-canvas", channelId],
-    queryFn: () => {
-      if (!channelId) {
-        return Promise.reject(new Error("No channel selected"));
-      }
-      return getCanvas(channelId);
-    },
-    enabled: enabled && channelId !== null,
-  });
-}
-
-export function useSetCanvasMutation(channelId: string | null) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (content: string) => {
-      if (!channelId) {
-        return Promise.reject(new Error("No channel selected"));
-      }
-      return setCanvas({ channelId, content });
-    },
-    onSuccess: () => {
-      if (channelId) {
-        void queryClient.invalidateQueries({
-          queryKey: ["channel-canvas", channelId],
-        });
-      }
-    },
-  });
 }

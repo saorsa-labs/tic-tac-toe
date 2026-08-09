@@ -12,7 +12,6 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import { formatTimelineMessages } from "../lib/formatTimelineMessages.ts";
 import { getConfigNudgeAuthorPubkey } from "./configNudgeAuthPubkey.ts";
@@ -25,8 +24,7 @@ const HUMAN_SIGNER =
 // The attributed agent pubkey (appears in actor/p tag).
 const AGENT_PUBKEY =
   "2222222222222222222222222222222222222222222222222222222222222222";
-const RELAY_SECRET = new Uint8Array(32).fill(4);
-const RELAY_SIGNER = getPublicKey(RELAY_SECRET);
+const RELAY_SIGNER = "44".repeat(32);
 
 // MessageRow passes a predicate combining the community known-agent set with
 // per-pubkey profile `isAgent` checks; the set-membership form is the minimal
@@ -48,15 +46,10 @@ function makeEvent(overrides = {}) {
 }
 
 function makeRelayEvent(tags) {
-  return finalizeEvent(
-    {
-      kind: 9,
-      created_at: 1_700_000_000,
-      content: "**Fizz** needs configuration.\n\n```buzz:config-nudge\n{}\n```",
-      tags,
-    },
-    RELAY_SECRET,
-  );
+  return makeEvent({
+    pubkey: RELAY_SIGNER,
+    tags,
+  });
 }
 
 function format(event, relaySelfPubkey) {

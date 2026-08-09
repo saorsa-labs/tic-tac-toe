@@ -14,6 +14,8 @@ import {
   getSymphonyDaemonStatus,
   getSymphonyRun,
   instantiateCompanyTemplate,
+  resumeCompanyInstance,
+  listCompanyInstances,
   listCompanyTemplates,
   listSymphonyApprovals,
   listSymphonyProofs,
@@ -32,6 +34,7 @@ export const symphonyApprovalsQueryKey = (runId: string) =>
 export const symphonyProofsQueryKey = (runId: string) =>
   ["symphony-proofs", runId] as const;
 export const companyTemplatesQueryKey = ["company-templates"] as const;
+export const companyInstancesQueryKey = ["company-instances"] as const;
 
 function isActive(status: SymphonyRunStatus): boolean {
   return (
@@ -112,6 +115,14 @@ export function useCompanyTemplatesQuery() {
   });
 }
 
+export function useCompanyInstancesQuery() {
+  return useQuery({
+    queryKey: companyInstancesQueryKey,
+    queryFn: listCompanyInstances,
+    staleTime: 5_000,
+  });
+}
+
 export function useInstantiateCompanyTemplateMutation() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -127,6 +138,31 @@ export function useInstantiateCompanyTemplateMutation() {
       });
       void queryClient.invalidateQueries({ queryKey: symphonyTasksQueryKey });
       void queryClient.invalidateQueries({ queryKey: symphonyWorkersQueryKey });
+      // New instance/run: refresh the persisted-instance list so the task
+      // stream filter and active-instance signal stay consistent.
+      void queryClient.invalidateQueries({
+        queryKey: companyInstancesQueryKey,
+      });
+    },
+  });
+}
+
+/** Resume an existing in_progress/resumable Company instance by its exact id —
+ * never mints a new id. Invalidates the same caches as instantiate so the task
+ * stream filter, active-instance signal, and persisted-instance list refresh. */
+export function useResumeCompanyInstanceMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (instanceId: string) => resumeCompanyInstance(instanceId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: symphonyDaemonStatusQueryKey,
+      });
+      void queryClient.invalidateQueries({ queryKey: symphonyTasksQueryKey });
+      void queryClient.invalidateQueries({ queryKey: symphonyWorkersQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: companyInstancesQueryKey,
+      });
     },
   });
 }
@@ -148,13 +184,23 @@ export function useApprovalDecisionMutation(verdict: "approve" | "deny") {
 export function useCancelCompanyRunMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: cancelCompanyRun,
-    onSuccess: () => {
+    mutationFn: (input: { instanceId: string; runId?: string | null }) =>
+      // Cancel only the mapped Company instance id — never a raw Symphony run id.
+      cancelCompanyRun(input.instanceId),
+    onSuccess: (_data, input) => {
+      void queryClient.invalidateQueries({
+        queryKey: companyInstancesQueryKey,
+      });
       void queryClient.invalidateQueries({
         queryKey: symphonyDaemonStatusQueryKey,
       });
       void queryClient.invalidateQueries({ queryKey: symphonyTasksQueryKey });
       void queryClient.invalidateQueries({ queryKey: symphonyWorkersQueryKey });
+      if (input.runId) {
+        void queryClient.invalidateQueries({
+          queryKey: symphonyRunQueryKey(input.runId),
+        });
+      }
     },
   });
 }
@@ -172,6 +218,9 @@ export function useSymphonyLiveEventCache(): void {
         void queryClient.invalidateQueries({ queryKey: symphonyTasksQueryKey });
         void queryClient.invalidateQueries({
           queryKey: symphonyWorkersQueryKey,
+        });
+        void queryClient.invalidateQueries({
+          queryKey: companyInstancesQueryKey,
         });
         void queryClient.invalidateQueries({ queryKey: ["symphony-run"] });
         void queryClient.invalidateQueries({

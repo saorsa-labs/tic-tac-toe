@@ -7,7 +7,6 @@ import {
   POOF_POINTER_ORIGIN_CLASS,
   POOF_TRIGGER_CLASS,
 } from "@/shared/ui/PoofBurstProvider";
-import { PubKey } from "@/shared/ui/PubKey";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 
 import { ProfileAvatar } from "./ProfileAvatar";
@@ -106,14 +105,6 @@ export function SelectedRecipientChip({
             onOpenAutoFocus={(event) => event.preventDefault()}
           >
             <p className="text-sm font-medium">Verify {label}</p>
-            <PubKey
-              pubkey={user.pubkey}
-              testId={testIds?.pubkey}
-              variant="full"
-            />
-            <p className="break-all font-mono text-xs text-muted-foreground">
-              {user.pubkey}
-            </p>
           </PopoverContent>
         </Popover>
       ) : (

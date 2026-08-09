@@ -33,16 +33,17 @@ import {
   NATIVE_EDIT_BLOCKER,
   NATIVE_REACTION_BLOCKER,
   NATIVE_RICH_MESSAGE_BLOCKER,
-  NATIVE_THREAD_WRITE_BLOCKER,
   fetchNativeChannelWindow,
-  nativePublishTopic,
   nativeScopeForChannel,
+  sendNativeMessage,
 } from "@/features/messages/lib/nativeMessaging";
+import { setResolvedHistoryScope } from "@/features/messages/lib/nativeHistoryScopeStore";
+import { useResolvedHistoryScope } from "@/features/messages/lib/useResolvedHistoryScope";
 import {
-  buildChannelMessagePayload,
+  liveDirectMessageToRelayEvent,
   liveMessageToRelayEvent,
 } from "@/shared/api/nativeMessageAdapter";
-import { subscribeX0xLive, x0xPublish } from "@/shared/api/tauriNativeX0x";
+import { subscribeX0xLive } from "@/shared/api/tauriNativeX0x";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 import {
   emptyChannelWindowStore,
@@ -59,9 +60,13 @@ type MessageQueryContext = {
   optimisticId: string;
   previousMessages: RelayEvent[];
   previousWindow: ChannelWindowStore | undefined;
+  previousThreadReplies: RelayEvent[] | undefined;
+  threadRootId: string | null;
   channelId: string;
   queryKey: ReturnType<typeof channelMessagesKey>;
 };
+
+const NATIVE_HISTORY_REFRESH_MS = 2_000;
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 
@@ -206,7 +211,11 @@ export function resolveThreadReplyTarget(
 
 export function useChannelWindowQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
-  const queryKey = channelWindowKey(channel?.id ?? "none");
+  // Subscribe to the resolved scope so the scope-aware window key recomputes
+  // (and the store re-renders) when the group's stable historyScope arrives.
+  const channelId = channel?.id ?? null;
+  useResolvedHistoryScope(channelId);
+  const queryKey = channelWindowKey(channelId ?? "none");
   return useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
     queryKey,
@@ -219,11 +228,24 @@ export function useChannelWindowQuery(channel: Channel | null) {
 
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
-  const queryKey = channelMessagesKey(channel?.id ?? "none");
-  const windowKey = channelWindowKey(channel?.id ?? "none");
+  const channelId = channel?.id ?? null;
+  const queryKey = channelMessagesKey(channelId ?? "none");
+  const windowKey = channelWindowKey(channelId ?? "none");
+  // Groups must not cold-load on the REST id before the live subscription
+  // resolves the durable (stable) historyScope; hold until the registry knows
+  // it. DMs resolve deterministically and never block.
+  const resolvedHistoryScope = useResolvedHistoryScope(channelId);
+  const isAwaitingGroupScope =
+    channel !== null &&
+    channel.channelType !== "forum" &&
+    channel.channelType !== "dm" &&
+    resolvedHistoryScope === null;
 
   return useQuery({
-    enabled: channel !== null && channel.channelType !== "forum",
+    enabled:
+      channel !== null &&
+      channel.channelType !== "forum" &&
+      !isAwaitingGroupScope,
     queryKey,
     queryFn: async () => {
       if (!channel) throw new Error("No channel selected.");
@@ -239,6 +261,10 @@ export function useChannelMessagesQuery(channel: Channel | null) {
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
+    // The daemon's authenticated direct fallback is durable but does not emit
+    // a `/ws` topic frame. Refresh the active window so direct-only delivery
+    // converges in the open UI without requiring navigation or a reload.
+    refetchInterval: NATIVE_HISTORY_REFRESH_MS,
   });
 }
 
@@ -285,6 +311,16 @@ export function useChannelSubscription(channel: Channel | null) {
       return;
     }
 
+    // DM scopes open /ws/direct, which delivers EVERY peer's inbound DMs to
+    // this session. Keep only the active conversation's peer (the scope id is
+    // the recipient AgentId, already validated by nativeScopeForChannel). Own
+    // outbound rows are not echoed here — they persist optimistically and
+    // reconcile via the dm:<peer> cold-load keyed by clientId.
+    const isDm = channel.channelType === "dm";
+    const dmPeer = isDm
+      ? scope.slice(scope.indexOf(":") + 1).toLowerCase()
+      : null;
+
     void subscribeX0xLive({ scope, backfill: { limit: 50 } }, (frame) => {
       if (isDisposed) return;
       if (frame.type === "error") {
@@ -293,6 +329,13 @@ export function useChannelSubscription(channel: Channel | null) {
           channelId,
           frame.message,
         );
+        return;
+      }
+      if (isDm) {
+        if (frame.type !== "direct_message") return;
+        if (dmPeer && frame.sender.toLowerCase() !== dmPeer) return;
+        const event = liveDirectMessageToRelayEvent(frame, channelId);
+        if (event) appendMessage(event);
         return;
       }
       if (frame.type !== "message") return;
@@ -304,6 +347,13 @@ export function useChannelSubscription(channel: Channel | null) {
           void opened.close();
         } else {
           subscription = opened;
+          // Capture the daemon-resolved durable history scope (the stable group
+          // id, which may differ from the live backfill `scope` above) so the
+          // history REST consumers load against the right scope. DMs resolve
+          // deterministically and need no registry entry.
+          if (!isDm && channelId) {
+            setResolvedHistoryScope(channelId, opened.historyScope);
+          }
         }
       })
       .catch((error) => {
@@ -376,9 +426,6 @@ export function useSendMessageMutation(
         throw new Error("No identity available for sending messages.");
       }
 
-      if (parentEventId) {
-        throw new Error(NATIVE_THREAD_WRITE_BLOCKER);
-      }
       const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
       if (imetaTags.length > 0 || emojiTags.length > 0) {
         throw new Error(NATIVE_RICH_MESSAGE_BLOCKER);
@@ -389,29 +436,24 @@ export function useSendMessageMutation(
         identity.agentId,
         mentionPubkeys,
       );
-      const topic = await nativePublishTopic(effectiveChannel);
-      const native = buildChannelMessagePayload({
-        text: content.trim(),
-        mentions: recipientAgentIds,
-      });
-      await x0xPublish({ topic, payload: native.payload });
 
-      return {
-        id: native.clientId,
-        localKey: native.clientId,
-        pubkey: identity.agentId,
-        created_at: Math.floor(native.createdAt / 1_000),
-        kind: KIND_STREAM_MESSAGE,
-        tags: [
-          ["h", effectiveChannel.id],
-          ["p", identity.agentId],
-          ...normalizeMentionPubkeys(recipientAgentIds, identity.agentId).map(
-            (agentId) => ["p", agentId],
-          ),
-        ],
-        content: content.trim(),
-        sig: "",
-      };
+      const currentMessages =
+        queryClient.getQueryData<RelayEvent[]>(
+          channelMessagesKey(effectiveChannel.id),
+        ) ?? [];
+      const threadParent = parentEventId ?? null;
+      const threadRoot = threadParent
+        ? (resolveReplyRootId(threadParent, currentMessages) ?? threadParent)
+        : null;
+
+      return sendNativeMessage({
+        channel: effectiveChannel,
+        content,
+        identity,
+        mentionPubkeys: recipientAgentIds,
+        threadRoot,
+        threadParent,
+      });
     },
     onMutate: async ({
       channelId: capturedChannelId,
@@ -464,10 +506,27 @@ export function useSendMessageMutation(
       queryClient.setQueryData(windowKey, nextWindow);
       projectChannelWindowMessages(queryClient, effectiveChannel.id);
 
+      const threadReference = getThreadReference(optimisticMessage.tags);
+      const threadRootId =
+        threadReference.parentId !== null ? threadReference.rootId : null;
+      const threadKey = threadRootId
+        ? threadRepliesKey(effectiveChannel.id, threadRootId)
+        : null;
+      const previousThreadReplies = threadKey
+        ? queryClient.getQueryData<RelayEvent[]>(threadKey)
+        : undefined;
+      if (threadKey) {
+        queryClient.setQueryData<RelayEvent[]>(threadKey, (current = []) =>
+          mergeMessages(current, optimisticMessage),
+        );
+      }
+
       return {
         optimisticId: optimisticMessage.id,
         previousMessages,
         previousWindow,
+        previousThreadReplies,
+        threadRootId,
         channelId: effectiveChannel.id,
         queryKey,
       };
@@ -486,6 +545,12 @@ export function useSendMessageMutation(
         channelWindowKey(context.channelId),
         context.previousWindow,
       );
+      if (context.threadRootId) {
+        queryClient.setQueryData(
+          threadRepliesKey(context.channelId, context.threadRootId),
+          context.previousThreadReplies,
+        );
+      }
     },
     onSuccess: (message, _variables, context) => {
       // An accepted send proves the write-block is lifted; clear any recorded
@@ -511,6 +576,16 @@ export function useSendMessageMutation(
       });
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, context.channelId);
+      if (context.threadRootId) {
+        queryClient.setQueryData<RelayEvent[]>(
+          threadRepliesKey(context.channelId, context.threadRootId),
+          (current = []) =>
+            mergeMessages(
+              current.filter((event) => event.id !== context.optimisticId),
+              { ...message, localKey: context.optimisticId },
+            ),
+        );
+      }
     },
   });
 }

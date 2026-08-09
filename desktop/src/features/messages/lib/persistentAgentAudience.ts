@@ -19,7 +19,7 @@ export type PersistentAgentAudienceSnapshot = Readonly<{
 }>;
 
 type PersistentAgentAudienceScopeInput = {
-  ownerPubkey: string;
+  ownerAgentId: string;
   channelId: string;
   threadRootId?: string | null;
 };
@@ -107,11 +107,11 @@ export function setPersistentAgentAudienceEnabled(nextEnabled: boolean): void {
 }
 
 export function getPersistentAgentAudienceScope({
-  ownerPubkey,
+  ownerAgentId,
   channelId,
   threadRootId = null,
 }: PersistentAgentAudienceScopeInput): string | null {
-  const owner = ownerPubkey.trim().toLowerCase();
+  const owner = ownerAgentId.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
   if (!threadRootId) return null;
   return `${owner}:${channelId}:thread:${threadRootId}`;

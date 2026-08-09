@@ -419,20 +419,28 @@ static COMPANY_AGENT_CHILDREN: LazyLock<Mutex<HashMap<String, AgentChildHandle>>
 /// child has an isolated data directory and token artifact; only its AgentId is
 /// returned to the product layer. Handles are retained solely for process
 /// ownership and are never a protocol-state store.
+///
+/// Fail-closed for orphans: if any role fails to come up, the handles inserted
+/// during THIS call are dropped (reaping their owned children) before returning
+/// the error. A resumable identity failure therefore owns no process; a resume
+/// re-provisions every role (attaching to a warm child data dir, or spawning).
 pub(crate) fn provision_company_agent_identities(
     instance_id: &str,
     roles: &[crate::company_template::spec::RoleSpec],
 ) -> Result<Vec<CompanyAgentIdentity>, AgentChildError> {
-    let instance = crate::company_template::plan::instance_slug(instance_id);
+    let instance = crate::company_template::plan::instance_key(instance_id);
     let mut identities = Vec::with_capacity(roles.len());
     let mut children = COMPANY_AGENT_CHILDREN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Keys freshly inserted during THIS call. On any failure we drop them so a
+    // resumable run owns no partial/owned children.
+    let mut inserted: Vec<String> = Vec::new();
 
     for role in roles {
         let key = format!(
             "{instance}-{}",
-            crate::company_template::plan::instance_slug(&role.id)
+            crate::company_template::plan::instance_key(&role.id)
         );
         if let Some(handle) = children.get(&key) {
             identities.push(CompanyAgentIdentity {
@@ -443,21 +451,51 @@ pub(crate) fn provision_company_agent_identities(
             continue;
         }
 
-        let cfg = AgentChildConfig::resolve(&key)?;
-        std::fs::create_dir_all(&cfg.data_dir).map_err(|error| AgentChildError::SpawnFailed {
-            sidecar: "x0xd",
-            reason: format!("failed to create isolated data directory: {error}"),
-        })?;
+        let cfg = match AgentChildConfig::resolve(&key) {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                drop_partial_company_children(&mut children, &inserted);
+                return Err(error);
+            }
+        };
+        if let Err(error) = std::fs::create_dir_all(&cfg.data_dir) {
+            drop_partial_company_children(&mut children, &inserted);
+            return Err(AgentChildError::SpawnFailed {
+                sidecar: "x0xd",
+                reason: format!("failed to create isolated data directory: {error}"),
+            });
+        }
         let supervisor = std_supervisor(cfg);
-        let handle = supervisor.bring_up()?;
-        identities.push(CompanyAgentIdentity {
-            role: role.id.clone(),
-            agent_id: handle.agent_id.clone(),
-            data_dir: handle.data_dir.clone(),
-        });
-        children.insert(key, handle);
+        match supervisor.bring_up() {
+            Ok(handle) => {
+                identities.push(CompanyAgentIdentity {
+                    role: role.id.clone(),
+                    agent_id: handle.agent_id.clone(),
+                    data_dir: handle.data_dir.clone(),
+                });
+                children.insert(key.clone(), handle);
+                inserted.push(key);
+            }
+            Err(error) => {
+                drop_partial_company_children(&mut children, &inserted);
+                return Err(error);
+            }
+        }
     }
     Ok(identities)
+}
+
+/// Remove and drop the handles inserted during a provisioning attempt so their
+/// owned children are reaped. A resumable identity failure must leave no owned
+/// process behind; resume re-provisions (attaching to warm data dirs or
+/// re-spawning). Identities from a prior successful call are left untouched.
+fn drop_partial_company_children(
+    children: &mut HashMap<String, AgentChildHandle>,
+    inserted: &[String],
+) {
+    for key in inserted {
+        children.remove(key);
+    }
 }
 
 /// Release app-owned native x0xd children for one Company instance. Attached
@@ -465,7 +503,7 @@ pub(crate) fn provision_company_agent_identities(
 pub(crate) fn shutdown_company_agent_identities(instance_id: &str) {
     let prefix = format!(
         "{}-",
-        crate::company_template::plan::instance_slug(instance_id)
+        crate::company_template::plan::instance_key(instance_id)
     );
     let mut children = COMPANY_AGENT_CHILDREN
         .lock()
@@ -476,6 +514,95 @@ pub(crate) fn shutdown_company_agent_identities(instance_id: &str) {
 /// Release every app-owned per-role x0xd child during desktop shutdown.
 pub(crate) fn shutdown_all_company_agent_identities() {
     COMPANY_AGENT_CHILDREN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+// ── Individual (non-Company) managed-agent child identities ────────────────
+//
+// Each interactive managed agent that is NOT part of a Company template still
+// gets a dedicated x0xd child so observer telemetry + control travel over
+// authenticated PQC direct messaging (child AgentId → owner AgentId) instead of
+// the legacy kind:24200 relay. The child is keyed by the agent's stable pubkey
+// (hex, filesystem-safe) so its identity + data dir persist across restarts.
+
+/// Native identity of one individually-managed agent, surfaced to the product
+/// layer. Carries NO token (callers re-read it per request from `data_dir`).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedAgentChild {
+    pub(crate) agent_id: String,
+    pub(crate) data_dir: PathBuf,
+}
+
+static MANAGED_AGENT_CHILDREN: LazyLock<Mutex<HashMap<String, AgentChildHandle>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Stable per-agent filesystem instance key (the `x0x-managed-<instance>` dir
+/// anchor). Hex pubkeys are filesystem-safe; lowercased for canonical equality.
+fn managed_agent_instance(pubkey: &str) -> String {
+    pubkey.trim().to_ascii_lowercase()
+}
+
+/// Bring up (or reuse) the dedicated x0xd child for one managed agent and
+/// return its native identity. Idempotent: a warm child from a prior session is
+/// attached, not re-spawned. The handle is retained for process ownership only.
+pub(crate) fn provision_managed_agent_child(
+    pubkey: &str,
+) -> Result<ManagedAgentChild, AgentChildError> {
+    let instance = managed_agent_instance(pubkey);
+    let mut children = MANAGED_AGENT_CHILDREN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(handle) = children.get(&instance) {
+        return Ok(ManagedAgentChild {
+            agent_id: handle.agent_id.clone(),
+            data_dir: handle.data_dir.clone(),
+        });
+    }
+    let cfg = AgentChildConfig::resolve(&instance)?;
+    std::fs::create_dir_all(&cfg.data_dir).map_err(|error| AgentChildError::SpawnFailed {
+        sidecar: "x0xd",
+        reason: format!("failed to create isolated data directory: {error}"),
+    })?;
+    let supervisor = std_supervisor(cfg);
+    let handle = supervisor.bring_up()?;
+    let identity = ManagedAgentChild {
+        agent_id: handle.agent_id.clone(),
+        data_dir: handle.data_dir.clone(),
+    };
+    children.insert(instance, handle);
+    Ok(identity)
+}
+
+/// Look up the native identity for a managed agent, if a child was provisioned.
+pub(crate) fn managed_agent_child_identity(pubkey: &str) -> Option<ManagedAgentChild> {
+    let instance = managed_agent_instance(pubkey);
+    let children = MANAGED_AGENT_CHILDREN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    children.get(&instance).map(|handle| ManagedAgentChild {
+        agent_id: handle.agent_id.clone(),
+        data_dir: handle.data_dir.clone(),
+    })
+}
+
+/// Release the app-owned x0xd child for one managed agent. Called from the
+/// per-agent full-stop path ([`crate::managed_agents::runtime::stop_managed_agent_process`])
+/// and from agent delete. Dropping the handle reaps the child process; the
+/// identity + data dir persist (keyed by the stable pubkey) for a re-provision.
+pub(crate) fn shutdown_managed_agent_child(pubkey: &str) {
+    let instance = managed_agent_instance(pubkey);
+    let mut children = MANAGED_AGENT_CHILDREN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    children.remove(&instance);
+}
+
+/// Release every app-owned individual managed-agent child on desktop shutdown.
+pub(crate) fn shutdown_all_managed_agent_children() {
+    MANAGED_AGENT_CHILDREN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();

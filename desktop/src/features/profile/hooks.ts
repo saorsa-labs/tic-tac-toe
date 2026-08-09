@@ -33,7 +33,7 @@ import type {
 } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getAvatarSnapshotUrl } from "@/shared/lib/animatedAvatar";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+
 import {
   SELF_PROFILE_CACHE_EVENT,
   type SelfProfileCache,
@@ -65,7 +65,7 @@ async function persistSelfProfile(
   const avatarSnapshotUrl = getAvatarSnapshotUrl(profile.avatarUrl);
   const fetched =
     shouldFetchAvatar(profile.avatarUrl, existing) && avatarSnapshotUrl !== null
-      ? await fetchAvatarDataUrl(rewriteRelayUrl(avatarSnapshotUrl))
+      ? await fetchAvatarDataUrl(avatarSnapshotUrl)
       : null;
   const avatarDataUrl = resolveAvatarDataUrl(
     profile.avatarUrl,
@@ -90,7 +90,7 @@ export function useProfileQuery(enabled = true) {
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   const queryClient = useQueryClient();
-  const relayUrl = activeCommunity?.relayUrl ?? "";
+  const relayUrl = activeCommunity?.groupId ?? "";
   const pubkey = identityQuery.data?.agentId ?? "";
 
   // Parse localStorage once per relayUrl/pubkey pair — not on every render.
@@ -166,7 +166,7 @@ export function useProfileQuery(enabled = true) {
 export function useSelfProfileCache(): SelfProfileCache | null {
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
-  const relayUrl = activeCommunity?.relayUrl ?? "";
+  const relayUrl = activeCommunity?.groupId ?? "";
   const pubkey = identityQuery.data?.agentId ?? "";
 
   const [cache, setCache] = React.useState<SelfProfileCache | null>(() =>
@@ -506,7 +506,7 @@ export function useUpdateProfileMutation() {
       // Cancel again: a refetch may have started while mutationFn awaited.
       await queryClient.cancelQueries({ queryKey: profileQueryKey });
       queryClient.setQueryData(profileQueryKey, profile);
-      const relayUrl = activeCommunity?.relayUrl ?? "";
+      const relayUrl = activeCommunity?.groupId ?? "";
       const pubkey = identityQuery.data?.agentId ?? profile.pubkey;
       if (!activeCommunity?.groupId && relayUrl && pubkey) {
         void persistSelfProfile(relayUrl, pubkey, profile);

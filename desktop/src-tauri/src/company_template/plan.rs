@@ -151,6 +151,59 @@ pub fn instance_slug(instance_id: &str) -> String {
     }
 }
 
+/// Short, stable hex suffix (8 chars) derived from the FULL `instance_id`.
+///
+/// This is the uniqueness anchor: two instances that share a display-name slug
+/// (e.g. the same template instantiated twice) produce distinct suffixes, so
+/// group names, topics, dirs, and identity keys never collide across them.
+pub(crate) fn instance_hash_suffix(instance_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(instance_id.as_bytes());
+    hex::encode(&hasher.finalize()[..4])
+}
+
+/// A filesystem- and identity-safe key derived from the FULL `instance_id`.
+///
+/// Unlike [`instance_slug`], this NEVER re-truncates, so the unique timestamp
+/// (or any trailing qualifier) is preserved. Used for manifest directories and
+/// per-role child keys where two instances with the same display name MUST NOT
+/// collapse onto one directory or one child handle.
+pub fn instance_key(instance_id: &str) -> String {
+    let mut key = String::new();
+    for character in instance_id.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            key.push(character.to_ascii_lowercase());
+        } else if !key.ends_with('-') {
+            key.push('-');
+        }
+    }
+    let trimmed = key.trim_matches('-');
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// A bounded (≤ 48 char), topic-safe fragment derived from the FULL
+/// `instance_id`.
+///
+/// Combines a truncated display slug with [`instance_hash_suffix`] so the
+/// fragment is unique per instance even when the display-name slug alone would
+/// collide or exceed the topic bound. Used for store/task-list topics where
+/// per-instance isolation matters but length must stay reasonable.
+pub(crate) fn instance_topic_fragment(instance_id: &str) -> String {
+    let display = instance_slug(instance_id);
+    let suffix = instance_hash_suffix(instance_id);
+    let max_display = 39; // 39 + 1 ('-') + 8 = 48
+    let display_part = if display.len() > max_display {
+        &display[..max_display]
+    } else {
+        &display
+    };
+    format!("{display_part}-{suffix}")
+}
+
 /// Company-scoped x0xd store topic (no `x0x.group.<gid>` prefix → no
 /// group-local membership requirement, so the daemon identity owns it without
 /// crypto). Stable for a given `(instance, kind, local_id)`.
@@ -168,16 +221,19 @@ pub(crate) fn task_list_topic(instance_slug: &str, local_id: &str) -> String {
 ///
 /// Pure: same inputs → identical output (including generated config/md text).
 pub fn plan_instantiation(template: &CompanyTemplate, instance_id: &str) -> InstantiationPlan {
-    let slug = instance_slug(instance_id);
+    let fragment = instance_topic_fragment(instance_id);
 
     let mut steps = Vec::new();
 
-    // 1. Groups — native x0xd groups, in template declaration order.
+    // 1. Groups — native x0xd groups, in template declaration order. The x0xd
+    //    group `name` is the dedup key for ensure_group, so it is suffixed
+    //    with the per-instance hash to prevent a second company from adopting
+    //    the first company's private groups (display name stays template-side).
     for g in &template.groups {
         steps.push(PlanStep::CreateGroup {
             key: step_key(instance_id, "group", &g.id),
             local_id: g.id.clone(),
-            name: g.name.clone(),
+            name: format!("{} · {}", g.name, instance_hash_suffix(instance_id)),
             visibility: g.visibility,
             purpose: g.purpose.clone(),
         });
@@ -189,7 +245,7 @@ pub fn plan_instantiation(template: &CompanyTemplate, instance_id: &str) -> Inst
             key: step_key(instance_id, "store", &s.id),
             local_id: s.id.clone(),
             name: s.name.clone(),
-            topic: store_topic(&slug, s.kind, &s.id),
+            topic: store_topic(&fragment, s.kind, &s.id),
             kind: s.kind,
             policy: s.policy,
             group_local_id: s.group.clone(),
@@ -202,7 +258,7 @@ pub fn plan_instantiation(template: &CompanyTemplate, instance_id: &str) -> Inst
             key: step_key(instance_id, "task_list", &t.id),
             local_id: t.id.clone(),
             name: t.name.clone(),
-            topic: task_list_topic(&slug, &t.id),
+            topic: task_list_topic(&fragment, &t.id),
             group_local_id: t.group.clone(),
         });
     }

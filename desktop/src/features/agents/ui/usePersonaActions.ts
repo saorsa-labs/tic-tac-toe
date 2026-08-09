@@ -158,11 +158,7 @@ export function usePersonaActions() {
             ? (backendIntent ?? null)
             : null;
 
-        const avatarUrl = await resolveManagedAgentAvatarUrl(
-          input.avatarUrl,
-          undefined,
-          runtime.avatarUrl,
-        );
+        const avatarUrl = await resolveManagedAgentAvatarUrl(input.avatarUrl);
         const persona = await createPersonaMutation.mutateAsync({
           ...input,
           avatarUrl,
@@ -176,7 +172,6 @@ export function usePersonaActions() {
         const agentInput = await buildInstanceInputForDefinition(
           persona,
           runtime,
-          undefined,
           startIntent ?? undefined,
         );
 

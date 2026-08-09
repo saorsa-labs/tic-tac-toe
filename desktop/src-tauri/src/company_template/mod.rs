@@ -16,3 +16,6 @@ pub mod workflow;
 
 #[cfg(test)]
 mod m4_hybrid_tests;
+
+#[cfg(test)]
+mod m4_hybrid_runtime_tests;

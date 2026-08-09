@@ -265,17 +265,40 @@ export async function x0xHistorySearch(
   return fromRawX0xHistoryPage(raw);
 }
 
-// ─── Publish — workspace/group send (FROZEN) ─────────────────────────────────
+// ─── Single-row lookup (canonical msg_id) ───────────────────────────────────
 
 /**
- * `x0x_publish` — native workspace/group send to a pub/sub topic.
+ * `x0x_history_get` — one durable-history row by canonical `msgId`
+ * (lowercase 64-hex BLAKE3).
  *
- * The M3 send path is topic-based: a group send publishes to the group's
- * `chatTopic` (resolved via `x0xGetGroup`). Thread fields are READ-side only
- * in M3 — the daemon assigns `threadRoot`/`threadParent` at ingest; this
- * command does not yet accept them. Reply/edit/delete/reaction are not on the
- * frozen native send path and remain on the relay dialect until a transport
- * extension round-trips thread metadata on publish.
+ * This is an index-backed point lookup (the `msg_id` column is `UNIQUE`), not
+ * a scan. No scope hint is required: a canonical id is globally unique within
+ * one daemon's local store, so it identifies exactly one local row (the
+ * daemon never reaches the network for this — ADR-0023 non-goal). Use this in
+ * place of any payload/history scan that resolves a message by id.
+ *
+ * Returns `null` when the id is well-formed but absent from the local store
+ * (HTTP 404) — **distinct** from a transport or decode error, which rejects.
+ * A malformed id rejects with the daemon's 400.
+ *
+ * @param msgId Canonical lowercase 64-hex message id.
+ */
+export async function x0xHistoryGet(
+  msgId: string,
+): Promise<X0xHistoryRow | null> {
+  const raw = await invokeTauri<RawX0xHistoryRow | null>("x0x_history_get", {
+    msgId,
+  });
+  return raw ? fromRawX0xHistoryRow(raw) : null;
+}
+
+// ─── Publish / durable group send ───────────────────────────────────────────
+
+/**
+ * `x0x_publish` — publish application bytes to a true gossip **topic** scope.
+ *
+ * Topic-scope only: it gossips and does NOT record durable history, so it MUST
+ * NOT be used for group scopes. Group sends go through `x0xSendGroupMessage`.
  */
 export async function x0xPublish(input: {
   topic: string;
@@ -288,19 +311,97 @@ export async function x0xPublish(input: {
   });
 }
 
+/**
+ * `x0x_send_group_message` — durable native group send.
+ *
+ * The Tauri command resolves the group's confidentiality and selects the
+ * daemon's authority-signed or encrypted durable send route. The optional
+ * canonical message id is returned by transports that expose it.
+ */
+export async function x0xSendGroupMessage(input: {
+  groupId: string;
+  /** UTF-8 application envelope. */
+  body: string;
+  /** `"chat"` (default) or `"announcement"`. */
+  kind?: "chat" | "announcement";
+  /** Optional 64-hex canonical msg_id of the thread root. */
+  threadRoot?: string | null;
+  /** Optional 64-hex canonical msg_id of the direct parent. */
+  threadParent?: string | null;
+}): Promise<string | null> {
+  return invokeTauri<string | null>("x0x_send_group_message", {
+    input: {
+      groupId: input.groupId,
+      body: input.body,
+      kind: input.kind ?? "chat",
+      threadRoot: input.threadRoot ?? null,
+      threadParent: input.threadParent ?? null,
+    },
+  });
+}
+
+/**
+ * `x0x_send_direct_message` — native one-to-one direct message send.
+ *
+ * `POST /direct/send`: delivers base64 application bytes to a connected agent
+ * over the daemon's authenticated DM path (raw-QUIC preferred when a live
+ * connection exists, gossip-inbox fallback otherwise). The daemon records the
+ * outbound row under `dm:<recipient>`; the canonical `msg_id`
+ * (`compute_local_send_msg_id(request_id, payload)`) is reconciled with the
+ * optimistic (clientId-keyed) row via the shared `localKey` once history/live
+ * rehydrates — the receipt carries only `requestId`, never the canonical id.
+ *
+ * Optional `threadRoot`/`threadParent` are 64-hex canonical msg_ids, validated
+ * to 32 bytes daemon-side. Live inbound DMs arrive over `/ws/direct` and are
+ * peer-filtered by the consumer.
+ */
+export async function x0xSendDirectMessage(input: {
+  /** Recipient AgentId (64-hex). */
+  agentId: X0xAgentId;
+  /** Application payload bytes; base64-encoded on the wire. */
+  payload: Uint8Array;
+  /** Optional 64-hex canonical msg_id of the thread root. */
+  threadRoot?: string | null;
+  /** Optional 64-hex canonical msg_id of the direct parent. */
+  threadParent?: string | null;
+}): Promise<X0xDirectSendReceipt> {
+  return invokeTauri<X0xDirectSendReceipt>("x0x_send_direct_message", {
+    input: {
+      agentId: input.agentId,
+      payloadB64: bytesToBase64(input.payload),
+      threadRoot: input.threadRoot ?? null,
+      threadParent: input.threadParent ?? null,
+    },
+  });
+}
+
+/**
+ * Receipt returned by `POST /direct/send`. The daemon serializes the response
+ * snake_case; these fields are all `#[serde(default)]`-nullable so a minimal
+ * `{ ok: true }` body still parses.
+ */
+export type X0xDirectSendReceipt = {
+  /** Whether the daemon accepted the DM into its delivery path. */
+  ok: boolean;
+  /** Chosen delivery path (`loopback` | `gossip_inbox` | `raw_quic` | `raw_quic_acked` | `relayed`). */
+  path?: string;
+  /** Retry count the DM path used before accepting. */
+  retriesUsed?: number;
+  /** Hex `request_id` (correlates with the canonical `msg_id` derivation). */
+  requestId?: string;
+};
+
 // ─── Live subscription — backfill-then-live over one WS connection (FROZEN) ───
 
 /**
- * Backfill window for a scoped live subscription. The stream replays stored
- * rows for `scope` oldest-first (bounded by `limit` / `beforeId` / `sinceMs`),
- * then crosses a `{ type: "live" }` boundary into live delivery. There is no
- * explicit gap frame — a window smaller than the stored count simply omits the
- * older rows; page them via `x0xHistoryList`.
+ * Backfill window for a scoped live subscription. Only `limit` is honoured by
+ * the daemon's WS `WsBackfill` (it replays stored `topic:` rows). Group/DM
+ * durable history is NOT replayable on the live path — cold-load those via
+ * `x0xHistoryList` (groups; the correct scope is returned on the subscription)
+ * or rely on `/ws/direct` DM backfill. Cursors belong to `x0xHistoryList`.
  */
 export type X0xLiveBackfill = {
   limit?: number;
-  beforeId?: number;
-  sinceMs?: number;
 };
 
 /**
@@ -315,6 +416,13 @@ export type X0xLiveMessage = {
   payload: string;
   /** Sender origin (agent id when attributable), else null. */
   origin: X0xAgentId | null;
+  /**
+   * Canonical message id (64-hex). Present once the daemon ships the
+   * `msg_id` addition on `WsOutbound::Message`; null/absent on older daemons.
+   * Use this as the stable identity; fall back to a payload-derived id when
+   * absent.
+   */
+  msgId?: string | null;
   /** Canonical thread root (`msgId` hex) when carried, else null/absent. */
   threadRoot?: string | null;
   /** Canonical thread parent (`msgId` hex) when carried, else null/absent. */
@@ -322,18 +430,46 @@ export type X0xLiveMessage = {
 };
 
 /**
+ * A `direct_message` frame from `/ws/direct`. Mirrors the daemon's
+ * `WsOutbound::DirectMessage`. `payload` is base64 application bytes;
+ * `sender`/`machineId` are 64-hex ids; `receivedAt` is unix-ms.
+ */
+export type X0xLiveDirectMessage = {
+  /** Canonical message id (64-hex) when the daemon provides it. */
+  msgId?: string | null;
+  /** Sender agent id (64-hex). */
+  sender: X0xAgentId;
+  /** Sender machine id (64-hex). */
+  machineId: X0xMachineId;
+  /** Base64-encoded application payload bytes. */
+  payload: string;
+  /** Daemon receive timestamp (unix ms). */
+  receivedAt: number;
+  /** Whether the daemon verified the sender's signature. */
+  verified: boolean;
+  /** Trust-decision string when the daemon classified the sender. */
+  trustDecision?: string | null;
+  /** Canonical thread root when carried, else null/absent. */
+  threadRoot?: string | null;
+  /** Canonical thread parent when carried, else null/absent. */
+  threadParent?: string | null;
+};
+
+/**
  * Outbound WS frame union delivered over the Tauri Channel. Mirrors `WsOutbound`.
  *
- * - `connected`   — session established (carries `sessionId`/`agentId`).
- * - `message`     — a backfill-replay or live message (see `X0xLiveMessage`).
- * - `subscribed`  — subscription ack for the requested topics.
- * - `unsubscribed`— ack for a (transport-initiated) topic drop.
- * - `live`        — backfill→live boundary for `topic`; frames after this are live.
- * - `error`       — transport error (non-fatal unless followed by `closed`).
+ * - `connected`     — session established (carries `sessionId`/`agentId`).
+ * - `message`       — a backfill-replay or live topic message (see `X0xLiveMessage`).
+ * - `directMessage` — a backfill-replay or live DM (see `X0xLiveDirectMessage`).
+ * - `subscribed`    — subscription ack for the requested topics.
+ * - `unsubscribed`  — ack for a (transport-initiated) topic drop.
+ * - `live`          — backfill→live boundary; frames after this are live.
+ * - `error`         — transport error.
  */
 export type X0xLiveFrame =
   | { type: "connected"; sessionId: string; agentId: X0xAgentId }
   | ({ type: "message" } & X0xLiveMessage)
+  | ({ type: "direct_message" } & X0xLiveDirectMessage)
   | { type: "subscribed"; topics: string[] }
   | { type: "unsubscribed"; topics: string[] }
   | { type: "live"; topic: string }
@@ -343,6 +479,14 @@ export type X0xLiveFrame =
 export type X0xLiveSubscription = {
   /** Close the underlying WS stream (invokes `x0x_close_live`). */
   close: () => Promise<void>;
+  /**
+   * The canonical durable-history scope to cold-load via `x0xHistoryList`
+   * alongside this stream. Set only for groups (`group:<stableId>`, which can
+   * differ from the mls id used for REST routing); absent for topic/dm, whose
+   * scope the caller already holds. The WS backfill cannot read group-scoped
+   * history, so cold-load it separately.
+   */
+  historyScope?: string;
 };
 
 /**
@@ -363,25 +507,24 @@ export async function subscribeX0xLive(
   onFrame: (frame: X0xLiveFrame) => void,
 ): Promise<X0xLiveSubscription> {
   const channel = new Channel<X0xLiveFrame>((frame) => onFrame(frame));
-  const { streamId } = await invokeTauri<{ streamId: string }>(
-    "x0x_subscribe_live",
-    {
-      scope: input.scope,
-      topics: input.topics ?? null,
-      backfill: input.backfill
-        ? {
-            limit: input.backfill.limit ?? null,
-            beforeId: input.backfill.beforeId ?? null,
-            sinceMs: input.backfill.sinceMs ?? null,
-          }
-        : null,
-      onFrame: channel,
-    },
-  );
+  const { streamId, historyScope } = await invokeTauri<{
+    streamId: string;
+    historyScope?: string;
+  }>("x0x_subscribe_live", {
+    scope: input.scope,
+    topics: input.topics ?? null,
+    backfill: input.backfill ? { limit: input.backfill.limit ?? null } : null,
+    onFrame: channel,
+  });
   return {
     close: () =>
       invokeTauri("x0x_close_live", { streamId }).then(() => undefined),
+    historyScope,
   };
+}
+
+export function closeAllX0xLiveStreams(): Promise<void> {
+  return invokeTauri("x0x_close_all_live").then(() => undefined);
 }
 
 // ─── Groups / members (REGISTERED NATIVE TRANSPORT) ─────────────────────────
@@ -389,8 +532,10 @@ export async function subscribeX0xLive(
 // Typed surface for the named-groups roster. Commands proxy the x0xd REST
 // surface (`/groups`, `/groups/:id`, `/groups/:id/members`) through
 // `commands/native_membership.rs`. Per ADR-0001, the UI performs NO authority
-// reconstruction — roster/crypto state is accepted only as the daemon's
-// authenticated frontier; these types carry display data, not trust decisions.
+// reconstruction — roster/crypto state is accepted only as token-authenticated
+// loopback delegation (the daemon's transient bearer token); these types carry
+// display data, not trust decisions. Invite mint/join is gated pending x0x
+// frontier review, so no join/mint wrapper is exposed here.
 
 /** Group role (ADR-0016). `owner`/`moderator`/`guest` parse for legacy rosters. */
 export type X0xGroupRole = "owner" | "admin" | "moderator" | "member" | "guest";
@@ -398,12 +543,12 @@ export type X0xGroupRole = "owner" | "admin" | "moderator" | "member" | "guest";
 /** Membership state for a roster entry. */
 export type X0xGroupMemberState = "active" | "pending" | "removed" | "banned";
 
-/** Policy preset selected at group creation. */
-export type X0xGroupPolicyPreset =
-  | "private_secure"
-  | "public_request_secure"
-  | "public_open"
-  | "public_announce";
+/**
+ * Policy preset selected at group creation. Only `public_open` is creatable:
+ * secure-group (MLS/GSS/TreeKEM) crypto is not approved, so the Tauri
+ * `x0x_create_group` boundary refuses every other preset.
+ */
+export type X0xGroupPolicyPreset = "public_open";
 
 /** One roster entry. */
 export type X0xGroupMember = {
@@ -433,6 +578,13 @@ export type X0xNamedGroup = {
   rosterRevision: number;
   memberCount: number;
   members: X0xGroupMember[];
+  /**
+   * `policy.confidentiality` from the daemon (`"signed_public"` for creatable
+   * groups). The channel projection omits any group that is not
+   * `"signed_public"` so a non-public group is never laundered as an open
+   * channel.
+   */
+  confidentiality?: string | null;
 };
 
 /** Lightweight list entry (`GET /groups`). */
@@ -480,79 +632,18 @@ export async function x0xCreateGroup(input: {
   });
 }
 
-export async function x0xJoinGroup(input: {
-  invite: string;
-  displayName?: string;
-}): Promise<X0xNamedGroup> {
-  return invokeTauri<X0xNamedGroup>("x0x_join_group", {
-    input: {
-      invite: input.invite,
-      displayName: input.displayName ?? null,
-    },
-  });
-}
-
-// ── Membership mutations / joins / invites ──────────────────────────────────
-
-/** Join-request review state. */
-export type X0xJoinRequestStatus =
-  | "Pending"
-  | "Approved"
-  | "Rejected"
-  | "Cancelled";
-
-/** A request-to-join submitted by an agent (preset-gated groups). */
-export type X0xJoinRequest = {
-  requestId: string;
-  groupId: string;
-  requesterAgentId: X0xAgentId;
-  requesterUserId?: X0xUserId | null;
-  requestedRole: X0xGroupRole;
-  message: string | null;
-  treekemKeyPackageB64?: string | null;
-  createdAtMs: number;
-  reviewedAtMs: number | null;
-  reviewedBy: X0xAgentId | null;
-  status: X0xJoinRequestStatus;
-};
-
-/** Result of minting a one-time group invite. */
-export type X0xGroupInvite = {
-  /** `x0x://invite/...` link (or raw base64 token). */
-  inviteLink: string;
-  groupId: string;
-  groupName: string;
-  /** Unix-ms expiry (0 / absent ⇒ never). */
-  expiresAtMs: number;
-};
-
-/**
- * Mutable group-policy axes (PATCH /groups/:id/policy). Any subset may be
- * supplied; omitted fields are unchanged. `preset` is the convenience name.
- */
-export type X0xGroupPolicyUpdate = {
-  preset?: X0xGroupPolicyPreset;
-  discoverability?: string;
-  admission?: string;
-  confidentiality?: string;
-  readAccess?: string;
-  writeAccess?: string;
-};
-
-/** `x0x_add_group_member` — add an agent to a named-group roster. */
+// ── Membership mutations ─────────────────────────────────────────────────────
+/** `x0x_add_group_member` — add an agent to a named-group roster (public). */
 export async function x0xAddGroupMember(input: {
   groupId: string;
   agentId: X0xAgentId;
   displayName?: string;
-  /** Base64 TreeKEM KeyPackage; required when adding to a TreeKEM group. */
-  treekemKeyPackageB64?: string;
 }): Promise<X0xGroupMember> {
   return invokeTauri<X0xGroupMember>("x0x_add_group_member", {
     input: {
       groupId: input.groupId,
       agentId: input.agentId,
       displayName: input.displayName ?? null,
-      treekemKeyPackageB64: input.treekemKeyPackageB64 ?? null,
     },
   });
 }
@@ -570,6 +661,16 @@ export async function x0xSetGroupMemberRole(input: {
       agentId: input.agentId,
       role: input.role,
     },
+  });
+}
+
+/** `x0x_remove_group_member` — remove a member (admin) or self-leave (DELETE /groups/:id/members/:agent_id). */
+export async function x0xRemoveGroupMember(
+  groupId: string,
+  agentId: X0xAgentId,
+): Promise<void> {
+  await invokeTauri("x0x_remove_group_member", {
+    input: { groupId, agentId },
   });
 }
 
@@ -596,75 +697,6 @@ export async function x0xUnbanGroupMember(
 /** `x0x_leave_group` — leave a named group (DELETE /groups/:id). */
 export async function x0xLeaveGroup(groupId: string): Promise<void> {
   await invokeTauri("x0x_leave_group", { groupId });
-}
-
-/** `x0x_mint_group_invite` — mint a one-time invite (Admin-or-higher). */
-export async function x0xMintGroupInvite(input: {
-  groupId: string;
-  /** Seconds until expiry (default 7 days; 0 ⇒ never). */
-  expirySecs?: number;
-}): Promise<X0xGroupInvite> {
-  const raw = await invokeTauri<{
-    invite_link: string;
-    group_id: string;
-    group_name: string;
-    expires_at: number;
-  }>("x0x_mint_group_invite", {
-    input: {
-      groupId: input.groupId,
-      expirySecs: input.expirySecs ?? null,
-    },
-  });
-  return {
-    inviteLink: raw.invite_link,
-    groupId: raw.group_id,
-    groupName: raw.group_name,
-    expiresAtMs: raw.expires_at,
-  };
-}
-
-/** `x0x_list_group_join_requests` — pending/approved/rejected requests. */
-export async function x0xListGroupJoinRequests(
-  groupId: string,
-): Promise<X0xJoinRequest[]> {
-  const raw = await invokeTauri<{ requests: X0xJoinRequest[] }>(
-    "x0x_list_group_join_requests",
-    { groupId },
-  );
-  return raw.requests;
-}
-
-/** `x0x_request_group_join` — submit a request-to-join (preset-gated groups). */
-export async function x0xRequestGroupJoin(input: {
-  groupId: string;
-  message?: string;
-  treekemKeyPackageB64?: string;
-}): Promise<X0xJoinRequest> {
-  return invokeTauri<X0xJoinRequest>("x0x_request_group_join", {
-    input: {
-      groupId: input.groupId,
-      message: input.message ?? null,
-      treekemKeyPackageB64: input.treekemKeyPackageB64 ?? null,
-    },
-  });
-}
-
-/** `x0x_update_group_policy` — mutate one or more policy axes. */
-export async function x0xUpdateGroupPolicy(
-  groupId: string,
-  update: X0xGroupPolicyUpdate,
-): Promise<X0xNamedGroup> {
-  return invokeTauri<X0xNamedGroup>("x0x_update_group_policy", {
-    input: {
-      groupId,
-      preset: update.preset ?? null,
-      discoverability: update.discoverability ?? null,
-      admission: update.admission ?? null,
-      confidentiality: update.confidentiality ?? null,
-      readAccess: update.readAccess ?? null,
-      writeAccess: update.writeAccess ?? null,
-    },
-  });
 }
 
 /** `x0x_update_group` — rename / redescribe a named group. */
@@ -767,109 +799,6 @@ export async function x0xUpdateTask(input: {
     action: input.action,
     fence_token: input.fenceToken ?? null,
   });
-}
-
-// ─── Stores / KV (CONTRACT — transport wiring pending) ───────────────────────
-
-export type X0xStorePolicy = "signed" | "append_only";
-export type X0xOwnershipStatus = "anchored" | "unknown" | "conflict";
-
-/** Store list entry (`GET /stores`). */
-export type X0xStoreSummary = {
-  id: string;
-  topic: string;
-  /** Anchored owner (hex), or null for a read-only no-anchor store. */
-  owner: X0xAgentId | null;
-  policy: X0xStorePolicy;
-  version: number;
-  policyVersion: number;
-  ownershipStatus: X0xOwnershipStatus;
-  /** True while snapshot persistence is failing (local writes refused). */
-  durabilityDegraded: boolean;
-};
-
-/** A single LWW key-value entry. */
-export type X0xKvEntry = {
-  key: string;
-  /** Inline value bytes (empty if stored externally). */
-  value: string;
-  /** BLAKE3 hash of the value (32-byte hex). */
-  contentHash: string;
-  contentType: string;
-  metadata: Record<string, string>;
-  createdAtMs: number;
-  updatedAtMs: number;
-};
-
-export async function x0xListStores(): Promise<X0xStoreSummary[]> {
-  const raw = await invokeTauri<{ stores: X0xStoreSummary[] }>(
-    "x0x_list_stores",
-  );
-  return raw.stores;
-}
-
-export async function x0xCreateStore(input: {
-  name: string;
-  topic: string;
-  policy?: X0xStorePolicy;
-}): Promise<X0xStoreSummary> {
-  return invokeTauri<X0xStoreSummary>("x0x_create_store", {
-    name: input.name,
-    topic: input.topic,
-    policy: input.policy ?? null,
-  });
-}
-
-export async function x0xJoinStore(input: {
-  storeId: string;
-  /**
-   * Out-of-band owner anchor (hex AgentId). Required to accept
-   * policy-restricted data; omitting yields a permanently read-only replica.
-   */
-  expectedOwner?: X0xAgentId;
-}): Promise<void> {
-  await invokeTauri("x0x_join_store", {
-    storeId: input.storeId,
-    expected_owner: input.expectedOwner ?? null,
-  });
-}
-
-export async function x0xListStoreKeys(storeId: string): Promise<string[]> {
-  const raw = await invokeTauri<{ keys: string[] }>("x0x_list_store_keys", {
-    storeId,
-  });
-  return raw.keys;
-}
-
-export async function x0xGetStoreValue(
-  storeId: string,
-  key: string,
-): Promise<X0xKvEntry | null> {
-  return invokeTauri<X0xKvEntry | null>("x0x_get_store_value", {
-    storeId,
-    key,
-  });
-}
-
-export async function x0xPutStoreValue(input: {
-  storeId: string;
-  key: string;
-  value: string;
-  contentType?: string;
-}): Promise<void> {
-  await invokeTauri("x0x_put_store_value", {
-    storeId: input.storeId,
-    key: input.key,
-    value: input.value,
-    content_type: input.contentType ?? null,
-  });
-}
-
-export async function x0xDeleteStoreValue(
-  storeId: string,
-  key: string,
-): Promise<void> {
-  await invokeTauri("x0x_delete_store_value", { storeId, key });
 }
 
 // ─── Agent cards (CONTRACT — transport wiring pending) ───────────────────────

@@ -183,6 +183,10 @@ pub(crate) struct StackConfig {
 impl StackConfig {
     pub(crate) fn resolve() -> Result<Self, LocalDaemonError> {
         let data_dir = named_data_dir().ok_or(LocalDaemonError::NoDataDir)?;
+        // Ensure the data directory exists before the log-file open in
+        // spawn_daemon tries to write x0xd.log inside it. x0xd also creates
+        // this directory, but the app opens the log file first.
+        let _ = std::fs::create_dir_all(&data_dir);
         let x0xd_binary =
             resolve_sidecar("x0xd", X0XD_BINARY_ENV).map_err(LocalDaemonError::Spawn)?;
         Ok(Self {
@@ -599,13 +603,5 @@ fn record_error(state: &crate::app_state::AppState, message: String) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{is_loopback_host, loopback_api_base};
-
-    #[test]
-    fn daemon_endpoint_is_loopback_only() {
-        assert_eq!(loopback_api_base(12_345), "http://127.0.0.1:12345");
-        assert!(is_loopback_host("127.0.0.1"));
-        assert!(!is_loopback_host("example.com"));
-    }
-}
+#[path = "local_stack_tests.rs"]
+mod tests;

@@ -18,9 +18,12 @@ export default defineConfig({
   projects: [
     {
       name: "smoke",
-      // M3+ smoke is intentionally transport-focused. The imported Buzz specs
-      // below remain available for migration work, but most still exercise the
-      // retired relay mock dialect and therefore are not release smoke gates.
+      // M3+ smoke is a MOCK-IPC boundary regression gate. It installs the
+      // in-page mock bridge (no x0xd daemon is booted) and asserts the booted
+      // production paths never invoke a relay/Nostr command. The imported Buzz
+      // specs below remain for feature-by-feature migration, but most still
+      // exercise the retired relay mock dialect and are NOT release gates;
+      // mock smoke must not be cited as live-daemon native acceptance.
       grep: /native workspace|built-in Company/,
       testMatch: [
         "**/native-smoke.spec.ts",
@@ -49,7 +52,6 @@ export default defineConfig({
         "**/core-memory-screenshots.spec.ts",
         "**/activity-scope-label-screenshots.spec.ts",
         "**/welcome-agent-modal-screenshots.spec.ts",
-        "**/local-archive-screenshots.spec.ts",
         "**/agent-readiness-screenshots.spec.ts",
         "**/agent-error-state-screenshots.spec.ts",
         "**/edit-agent.spec.ts",

@@ -369,13 +369,13 @@ pub async fn get_agent_config_surface(
     let personas = load_personas(&app).unwrap_or_default();
     let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
-    let runtime_key = ManagedAgentRuntimeKey::new(
-        pubkey.clone(),
-        &crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &crate::relay::relay_ws_url_with_override(&state),
-        ),
-    )?;
+    let group_id = state
+        .active_group_id
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .unwrap_or_default();
+    let runtime_key = ManagedAgentRuntimeKey::new(pubkey.clone(), &group_id)?;
     let session_cache = state.get_session_cache(&runtime_key);
     let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
 
@@ -396,38 +396,15 @@ pub async fn get_agent_config_surface(
 pub fn put_agent_session_config(
     pubkey: String,
     payload: serde_json::Value,
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, AppState>,
 ) {
-    let record_relay_url = {
-        let _guard = match state.managed_agents_store_lock.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        match load_managed_agents(&app) {
-            Ok(records) => match records.into_iter().find(|r| r.pubkey == pubkey) {
-                Some(record) => record.relay_url,
-                None => return,
-            },
-            _ => return,
-        }
+    // Pair identity: the active workspace group. The observer no longer
+    // attaches a relay URL (vestigial); the group is the sole scope.
+    let group_id = match state.active_group_id.lock() {
+        Ok(guard) => guard.clone().unwrap_or_default(),
+        Err(_) => return,
     };
-
-    // Pair identity: prefer the relay URL the harness attached to the payload
-    // (same pattern as lifecycle frames). Older harnesses don't attach one;
-    // fall back to the record's effective relay — with no attached URL the
-    // frame can only have arrived over the active workspace relay, which is
-    // exactly what effective_agent_relay_url resolves to absent a pin.
-    let relay_url = payload
-        .get("relayUrl")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            crate::relay::effective_agent_relay_url(
-                &record_relay_url,
-                &crate::relay::relay_ws_url_with_override(&state),
-            )
-        });
 
     let config_options = parse_config_options(payload.get("configOptions"));
     let available_modes = parse_modes(&config_options, payload.get("modes"));
@@ -447,7 +424,7 @@ pub fn put_agent_session_config(
         captured_at: crate::util::now_iso(),
     };
 
-    let Ok(runtime_key) = ManagedAgentRuntimeKey::new(pubkey, &relay_url) else {
+    let Ok(runtime_key) = ManagedAgentRuntimeKey::new(pubkey, &group_id) else {
         return;
     };
     state.put_session_cache(runtime_key, cache);
@@ -640,9 +617,6 @@ mod tests {
             pubkey: "agent".to_string(),
             name: "Agent".to_string(),
             persona_id: Some("persona-1".to_string()),
-            private_key_nsec: "".to_string(),
-            auth_tag: None,
-            relay_url: "ws://localhost:3000".to_string(),
             avatar_url: None,
             acp_command: "buzz-acp".to_string(),
             agent_command: "goose".to_string(),
@@ -684,7 +658,6 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
-            relay_mesh: None,
             agent_command_override: None,
             persona_source_version: None,
             provider: None,

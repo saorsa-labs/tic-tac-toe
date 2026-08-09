@@ -1,5 +1,3 @@
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-
 /** Minimal shape of an imeta entry as consumed by the markdown renderer. */
 export type FileCardImetaEntry = {
   m?: string;
@@ -113,7 +111,7 @@ export function resolveSnapshotCard(
     snapshotKind,
     // Agent PNG snapshots carry the avatar card image. Team PNG snapshots use
     // a transport placeholder, so render the team icon instead of that image.
-    thumb: isPng ? rewriteRelayUrl(href) : undefined,
+    thumb: isPng ? href : undefined,
   };
 }
 
@@ -142,5 +140,5 @@ export function resolveFileCard(
   }
   const filename =
     entry.filename || childText.trim() || href.split("/").pop() || "file";
-  return { href: rewriteRelayUrl(href), filename, size: entry.size };
+  return { href: href, filename, size: entry.size };
 }

@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { closeAllWebSockets } from "@/shared/api/relayWebSocketClose";
+import { closeAllX0xLiveStreams } from "@/shared/api/tauriNativeX0x";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
 const RELOAD_TEARDOWN_TIMEOUT_MS = 500;
@@ -20,7 +20,7 @@ export function useReloadShortcut() {
 
       event.preventDefault();
       await Promise.race([
-        closeAllWebSockets(),
+        closeAllX0xLiveStreams(),
         new Promise<void>((resolve) =>
           window.setTimeout(resolve, RELOAD_TEARDOWN_TIMEOUT_MS),
         ),

@@ -56,13 +56,18 @@ fn env_u64(k: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn write_response(id: Value, result: Value) {
-    let msg = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-    let mut s = serde_json::to_string(&msg).expect("serialize");
-    s.push('\n');
+fn write_message(message: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    let mut serialized = serde_json::to_string(message)?;
+    serialized.push('\n');
     let mut out = std::io::stdout().lock();
-    out.write_all(s.as_bytes()).expect("write");
-    out.flush().expect("flush");
+    out.write_all(serialized.as_bytes())?;
+    out.flush()?;
+    Ok(())
+}
+
+fn write_response(id: Value, result: Value) -> Result<(), Box<dyn std::error::Error>> {
+    let message = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    write_message(&message)
 }
 
 fn hang_forever() -> ! {
@@ -103,7 +108,7 @@ fn make_tools(
     tools
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optional: write our own PID so a test can later check the process is gone.
     if let Ok(path) = std::env::var("FAKE_MCP_PID_FILE") {
         let pid = std::process::id().to_string();
@@ -197,7 +202,7 @@ fn main() {
                         "capabilities": { "tools": {} },
                         "serverInfo": { "name": "fake-mcp", "version": "0.0.0" },
                     }),
-                );
+                )?;
             }
             "tools/list" => {
                 if hang_tools {
@@ -208,7 +213,7 @@ fn main() {
                     json!({
                         "tools": make_tools(tool_count, &desc, stop_hook, post_compact_hook)
                     }),
-                );
+                )?;
             }
             "tools/call" => {
                 // Signal that the request was received (for tests that
@@ -226,10 +231,7 @@ fn main() {
                 // Optionally spawn a long-sleeping grandchild so the test
                 // can verify process-group killing reaches the whole tree.
                 if env_flag("FAKE_MCP_SPAWN_GRANDCHILD") {
-                    let child = std::process::Command::new("sleep")
-                        .arg("999")
-                        .spawn()
-                        .expect("spawn grandchild");
+                    let child = std::process::Command::new("sleep").arg("999").spawn()?;
                     if let Ok(path) = std::env::var("FAKE_MCP_GRANDCHILD_PID_FILE") {
                         let _ = std::fs::write(&path, child.id().to_string());
                     }
@@ -255,7 +257,7 @@ fn main() {
                             "content": [{ "type": "text", "text": payload }],
                             "isError": false,
                         }),
-                    );
+                    )?;
                     continue;
                 }
                 if called_name == "_PostCompact" {
@@ -265,7 +267,7 @@ fn main() {
                             "content": [{ "type": "text", "text": post_compact_text }],
                             "isError": false,
                         }),
-                    );
+                    )?;
                     continue;
                 }
                 if tool_delay_secs > 0 {
@@ -282,7 +284,7 @@ fn main() {
                         "content": [{ "type": "text", "text": result_text }],
                         "isError": false,
                     }),
-                );
+                )?;
             }
             _ => {
                 // Unknown method: respond with an error so rmcp doesn't hang.
@@ -290,12 +292,9 @@ fn main() {
                     "jsonrpc": "2.0", "id": id,
                     "error": { "code": -32601, "message": format!("method not found: {method}") },
                 });
-                let mut s = serde_json::to_string(&err).unwrap();
-                s.push('\n');
-                let mut out = std::io::stdout().lock();
-                let _ = out.write_all(s.as_bytes());
-                let _ = out.flush();
+                write_message(&err)?;
             }
         }
     }
+    Ok(())
 }

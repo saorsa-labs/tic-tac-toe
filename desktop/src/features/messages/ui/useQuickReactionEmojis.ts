@@ -1,9 +1,6 @@
 import * as React from "react";
 
-import {
-  loadActiveCommunityId,
-  loadCommunities,
-} from "@/features/communities/communityStorage";
+import { loadActiveCommunityId } from "@/features/communities/communityStorage";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 const QUICK_REACTION_STORAGE_KEY = "buzz.quick-reaction-emojis.v1";
@@ -31,7 +28,7 @@ function getActiveCommunityScope() {
   if (!canUseLocalStorage()) return null;
 
   try {
-    return loadActiveCommunityId() ?? loadCommunities()[0]?.id ?? null;
+    return loadActiveCommunityId();
   } catch {
     return null;
   }

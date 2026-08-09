@@ -13,7 +13,7 @@ use crate::{app_state::AppState, x0x_client::X0xClientError};
 /// Percent-encode one dynamic URL path segment. Identifiers and KV keys are
 /// opaque application data; allowing `/`, `?`, or `#` through would change the
 /// daemon route rather than address the requested object.
-fn path_segment(value: &str) -> Result<String, String> {
+pub(crate) fn path_segment(value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err("x0xd path identifier must not be empty".to_string());
     }

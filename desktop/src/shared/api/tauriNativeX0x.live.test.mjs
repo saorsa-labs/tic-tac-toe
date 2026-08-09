@@ -61,7 +61,8 @@ function deliver(subscribeCall, frames) {
   });
 }
 
-const { subscribeX0xLive } = await import("@/shared/api/tauriNativeX0x");
+const { closeAllX0xLiveStreams, subscribeX0xLive, x0xSendGroupMessage } =
+  await import("@/shared/api/tauriNativeX0x");
 
 // ── Wire contract ────────────────────────────────────────────────────────────
 
@@ -75,7 +76,7 @@ test("subscribeX0xLive invokes x0x_subscribe_live with scope + native backfill c
   assert.deepEqual(calls[0].args, {
     scope: "topic:dev",
     topics: null,
-    backfill: { limit: 50, beforeId: null, sinceMs: null },
+    backfill: { limit: 50 },
     onFrame: calls[0].args.onFrame, // opaque __CHANNEL__:<id>
   });
   assert.match(calls[0].args.onFrame.toJSON(), /^__CHANNEL__:\d+$/);
@@ -94,6 +95,12 @@ test("close() tears the stream down via x0x_close_live with the returned streamI
   const close = calls.find((c) => c.cmd === "x0x_close_live");
   assert.ok(close, "x0x_close_live was invoked");
   assert.equal(close.args.streamId, "stream-xyz");
+});
+
+test("process-wide teardown closes every native live stream", async () => {
+  setResponse(() => null);
+  await closeAllX0xLiveStreams();
+  assert.deepEqual(calls, [{ cmd: "x0x_close_all_live", args: {} }]);
 });
 
 // ── Backfill → live ordering: NO GAP (AT#2) ───────────────────────────────────
@@ -249,4 +256,111 @@ test("live frames carry optional thread ancestry when the daemon sets it", async
   const live = received.find((f) => f.type === "message");
   assert.equal(live.threadRoot, root);
   assert.equal(live.threadParent, root);
+});
+
+// ── Direct-message frame (DM live over /ws/direct) ───────────────────────────
+
+test("direct_message frames map to the directMessage variant with camelCase fields", async () => {
+  // The daemon's WsOutbound::DirectMessage arrives snake_case; the Channel
+  // re-serializes camelCase. The consumer must see sender/machineId/etc.
+  const sent = [
+    { type: "connected", sessionId: "sess", agentId: "aa".repeat(32) },
+    {
+      type: "direct_message",
+      // Post-Rust Channel shape (camelCase); the snake→camel mapping is the
+      // Rust X0xFrame serde job (unit-tested in x0x_client::tests).
+      msgId: "cafe",
+      sender: "00".repeat(32),
+      machineId: "11".repeat(32),
+      payload: "aGk=",
+      receivedAt: 42,
+      verified: true,
+      threadRoot: "rr".repeat(32),
+      threadParent: "pp".repeat(32),
+    },
+  ];
+  setResponse(() => ({ streamId: "s1" }));
+  const received = [];
+  await subscribeX0xLive({ scope: `dm:${"00".repeat(32)}` }, (f) =>
+    received.push(f),
+  );
+  deliver(calls[0], sent);
+  const dm = received.find((f) => f.type === "direct_message");
+  assert.ok(dm, "direct_message frame delivered");
+  assert.equal(dm.msgId, "cafe");
+  assert.equal(dm.sender, "00".repeat(32));
+  assert.equal(dm.machineId, "11".repeat(32));
+  assert.equal(dm.payload, "aGk=");
+  assert.equal(dm.receivedAt, 42);
+  assert.equal(dm.verified, true);
+  assert.equal(dm.threadRoot, "rr".repeat(32));
+  assert.equal(dm.threadParent, "pp".repeat(32));
+});
+
+test("direct_message frames parse when msg_id is absent (older daemon)", async () => {
+  // Older daemon omits msg_id; Rust deserializes None and re-serializes
+  // `msgId: null` to the Channel (no skip_serializing_if). The consumer must
+  // treat null and a present id uniformly.
+  const sent = [
+    {
+      type: "direct_message",
+      msgId: null,
+      sender: "00".repeat(32),
+      machineId: "11".repeat(32),
+      payload: "",
+      receivedAt: 1,
+      verified: false,
+    },
+  ];
+  setResponse(() => ({ streamId: "s1" }));
+  const received = [];
+  await subscribeX0xLive({ scope: `dm:${"00".repeat(32)}` }, (f) =>
+    received.push(f),
+  );
+  deliver(calls[0], sent);
+  const dm = received.find((f) => f.type === "direct_message");
+  assert.ok(dm);
+  assert.equal(dm.msgId, null);
+});
+
+// ── historyScope: the durable cold-load scope for groups ────────────────────
+
+test("group subscriptions surface the stable-id historyScope for cold-load", async () => {
+  // For groups the live WS backfill cannot read Scope::Group, so the transport
+  // returns the correct REST history scope (the stable id, which may differ
+  // from the mls id) for the caller to cold-load via x0xHistoryList.
+  setResponse(() => ({ streamId: "g1", historyScope: "group:stable-abc" }));
+  const sub = await subscribeX0xLive({ scope: "group:mls-xyz" }, () => {});
+  assert.equal(sub.historyScope, "group:stable-abc");
+});
+
+test("topic subscriptions omit historyScope (the caller already holds the scope)", async () => {
+  setResponse(() => ({ streamId: "t1" }));
+  const sub = await subscribeX0xLive({ scope: "topic:dev" }, () => {});
+  assert.equal(sub.historyScope, undefined);
+});
+
+// ── Durable group send (POST /groups/:id/send) ──────────────────────────────
+
+test("x0xSendGroupMessage invokes x0x_send_group_message with body + kind", async () => {
+  setResponse(() => null);
+  await x0xSendGroupMessage({ groupId: "g1", body: "hello", kind: "chat" });
+  assert.equal(calls[0].cmd, "x0x_send_group_message");
+  assert.deepEqual(calls[0].args, {
+    input: {
+      groupId: "g1",
+      body: "hello",
+      kind: "chat",
+      threadRoot: null,
+      threadParent: null,
+    },
+  });
+});
+
+test("x0xSendGroupMessage defaults kind to 'chat'", async () => {
+  setResponse(() => null);
+  await x0xSendGroupMessage({ groupId: "g1", body: "hi" });
+  assert.equal(calls[0].args.input.kind, "chat");
+  assert.equal(calls[0].args.input.threadRoot, null);
+  assert.equal(calls[0].args.input.threadParent, null);
 });

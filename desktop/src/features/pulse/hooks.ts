@@ -115,7 +115,7 @@ export type PulseReactionState = {
 
 export function usePulseReactionsQuery(
   noteIds: string[],
-  currentPubkey?: string,
+  currentAgentId?: string,
 ) {
   const refetchInterval = useVisibleRefetchInterval(60_000);
 
@@ -130,8 +130,8 @@ export function usePulseReactionsQuery(
         }
         result.set(summary.noteId, {
           count: summary.count,
-          reactedByCurrentUser: currentPubkey
-            ? summary.pubkeys.includes(currentPubkey)
+          reactedByCurrentUser: currentAgentId
+            ? summary.pubkeys.includes(currentAgentId)
             : false,
         });
       }
@@ -170,7 +170,7 @@ export function useGlobalNotesQuery(enabled: boolean) {
 
 // ── Publish note mutation ───────────────────────────────────────────────────
 
-export function usePublishNoteMutation(currentPubkey?: string) {
+export function usePublishNoteMutation(currentAgentId?: string) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -186,9 +186,9 @@ export function usePublishNoteMutation(currentPubkey?: string) {
       mediaTags?: string[][];
     }) => publishNote(content, replyTo, mentionPubkeys, mediaTags),
     onSuccess: () => {
-      if (currentPubkey) {
+      if (currentAgentId) {
         void queryClient.invalidateQueries({
-          queryKey: pulseQueryKeys.myNotes(currentPubkey),
+          queryKey: pulseQueryKeys.myNotes(currentAgentId),
         });
       }
       // Also invalidate timeline queries so the new note appears immediately.

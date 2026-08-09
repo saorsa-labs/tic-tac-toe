@@ -24,7 +24,7 @@ import type { TimelineMessage } from "@/features/messages/types";
  * @param repliesByRootId Replies grouped by their resolved thread root id.
  * @param getReadAt Per-message read resolver; `null` means never read.
  * @param isNotified Whether a thread root is one the user is notified for.
- * @param currentPubkey Replies authored by this pubkey never count as unread.
+ * @param currentAgentId Replies authored by this pubkey never count as unread.
  * @param isForcedUnread Session-local OR-overlay: a reply forced unread this
  *   session counts regardless of its marker (per-message mark-unread).
  */
@@ -33,7 +33,7 @@ export function computeThreadBadgeCounts(
   repliesByRootId: ReadonlyMap<string, TimelineMessage[]>,
   getReadAt: (messageId: string) => number | null,
   isNotified: (rootId: string) => boolean,
-  currentPubkey?: string,
+  currentAgentId?: string,
   isForcedUnread: (messageId: string) => boolean = () => false,
 ): Map<string, number> {
   const counts = new Map<string, number>();
@@ -45,7 +45,7 @@ export function computeThreadBadgeCounts(
     const { unreadCount } = computeThreadUnreadMarker(
       subtreeReplies,
       getReadAt,
-      currentPubkey,
+      currentAgentId,
       isForcedUnread,
     );
     if (unreadCount > 0) {

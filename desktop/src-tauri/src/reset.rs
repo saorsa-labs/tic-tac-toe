@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 /// Sentinel path: `<app_data_dir.parent>/.<bundle_id>.reset-pending`
 /// where `bundle_id` is the file-name component of `app_data_dir`
-/// (e.g. `xyz.block.buzz.app` or `xyz.block.buzz.app.dev`).
+/// (e.g. `com.saorsalabs.tictactoe` or `com.saorsalabs.tictactoe.dev`).
 pub(crate) fn sentinel_path(app_data_dir: &Path) -> PathBuf {
     let bundle_id = app_data_dir
         .file_name()
@@ -181,7 +181,7 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
         }
     }
 
-    // ── Step 1b: rename legacy App Support dir (sprout import source) ────────
+    // ── Step 1b: rename legacy App Support dir (buzz import source) ──────────
     let trash_legacy: Option<PathBuf> = ctx.legacy_app_data_dir.as_ref().map(|l| trash_path(l));
     if let Some(ref legacy) = ctx.legacy_app_data_dir {
         if legacy.exists() {

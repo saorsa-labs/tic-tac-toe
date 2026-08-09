@@ -35,13 +35,13 @@ function openMarksRevealed(messages, revealedIds) {
   return (id) => (revealed.has(id) ? (createdAtById.get(id) ?? null) : null);
 }
 
-const rootBadge = (messages, getReadAt, currentPubkey) =>
+const rootBadge = (messages, getReadAt, currentAgentId) =>
   computeThreadBadgeCounts(
     messages,
     buildRepliesByRootId(messages),
     getReadAt,
     countAll,
-    currentPubkey,
+    currentAgentId,
   ).get("root");
 
 test("openRevealingOnlyDirectChild_keepsCollapsedGrandchildBadge", () => {

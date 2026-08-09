@@ -1,8 +1,8 @@
 import { toast } from "sonner";
 
 import { truncatePubkey } from "@/shared/lib/pubkey";
-import { useRemoveRelayMemberMutation } from "@/features/community-members/hooks";
-import type { RelayMember } from "@/shared/api/types";
+import { useRemoveNativeMemberMutation } from "@/features/community-members/hooks";
+import type { CommunityMember } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -18,12 +18,12 @@ export function ConfirmRemoveDialog({
   open,
   onOpenChange,
 }: {
-  member: RelayMember | null;
+  member: CommunityMember | null;
   displayName: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const removeMutation = useRemoveRelayMemberMutation();
+  const removeMutation = useRemoveNativeMemberMutation();
   const label = displayName || (member ? truncatePubkey(member.pubkey) : "");
 
   function handleOpenChange(next: boolean) {
@@ -42,7 +42,8 @@ export function ConfirmRemoveDialog({
         <DialogHeader>
           <DialogTitle>Remove {label}?</DialogTitle>
           <DialogDescription>
-            This will ban the Agent ID and rotate the private group epoch.
+            This removes the Agent ID from the community. It does not ban or
+            rotate the group epoch.
           </DialogDescription>
         </DialogHeader>
         <div className="flex justify-end gap-2">

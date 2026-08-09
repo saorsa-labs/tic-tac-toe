@@ -1,9 +1,7 @@
 import * as React from "react";
 
-import { relayClient } from "@/shared/api/relayClient";
 import {
   DEFAULT_STORE,
-  mergeStores,
   mutedChannelIdsFromStore,
   readChannelMutesStore,
   storageKey,
@@ -11,9 +9,12 @@ import {
   type ChannelMuteEntry,
   type ChannelMuteStore,
 } from "./channelMutesStorage";
-import { ChannelMuteSyncManager } from "./channelMutesSync";
-import type { RemoteMutes } from "./channelMutesSync";
 
+/**
+ * Per-identity channel mute state, persisted to localStorage and mirrored
+ * across tabs/windows via the storage event. The packaged app has no relay
+ * transport, so mute state is local-only — there is no cross-device sync.
+ */
 export function useChannelMutes(pubkey: string | undefined): {
   mutedChannelIds: Set<string>;
   muteChannel: (channelId: string) => void;
@@ -26,27 +27,16 @@ export function useChannelMutes(pubkey: string | undefined): {
     return readChannelMutesStore(pubkey);
   });
 
-  const managerRef = React.useRef<ChannelMuteSyncManager | null>(null);
-  const lastAppliedRemoteTs = React.useRef(0);
-  const lastAppliedEventId = React.useRef("");
-
+  // Reload from storage when the active identity changes.
   React.useEffect(() => {
     if (!pubkey) {
       setStore(DEFAULT_STORE);
-      lastAppliedRemoteTs.current = 0;
-      lastAppliedEventId.current = "";
       return;
     }
     setStore(readChannelMutesStore(pubkey));
-    lastAppliedRemoteTs.current = 0;
-    lastAppliedEventId.current = "";
-    managerRef.current = new ChannelMuteSyncManager(pubkey);
-    return () => {
-      managerRef.current?.destroy();
-      managerRef.current = null;
-    };
   }, [pubkey]);
 
+  // Mirror changes made in other tabs/windows via the storage event.
   React.useEffect(() => {
     if (!pubkey) {
       return;
@@ -64,90 +54,7 @@ export function useChannelMutes(pubkey: string | undefined): {
     };
   }, [pubkey]);
 
-  const applyRemote = React.useCallback(
-    (remote: RemoteMutes): ((prev: ChannelMuteStore) => ChannelMuteStore) => {
-      return (prev) => {
-        if (!pubkey) return prev;
-        if (remote.createdAt < lastAppliedRemoteTs.current) return prev;
-        if (
-          remote.createdAt === lastAppliedRemoteTs.current &&
-          remote.eventId <= lastAppliedEventId.current
-        )
-          return prev;
-        lastAppliedRemoteTs.current = remote.createdAt;
-        lastAppliedEventId.current = remote.eventId;
-        managerRef.current?.cancelPendingMutePublish();
-        const merged = mergeStores(prev, remote.store);
-        if (!writeChannelMutesStore(pubkey, merged)) return prev;
-        return merged;
-      };
-    },
-    [pubkey],
-  );
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let cancelled = false;
-    void managerRef.current?.fetchRemoteMutes().then((remote) => {
-      if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelMutesStore(pubkey);
-        if (Object.keys(local.channels).length > 0) {
-          managerRef.current?.publishMutes(local);
-        }
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [pubkey, applyRemote]);
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let unsub: (() => Promise<void>) | null = null;
-    let cancelled = false;
-    void managerRef.current
-      ?.subscribeToMutes((remote) => {
-        if (cancelled) return;
-        setStore(applyRemote(remote));
-      })
-      .then((dispose) => {
-        if (cancelled) {
-          void dispose();
-        } else {
-          unsub = dispose;
-        }
-      });
-    return () => {
-      cancelled = true;
-      if (unsub) void unsub();
-    };
-  }, [pubkey, applyRemote]);
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let cancelled = false;
-    const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteMutes().then((remote) => {
-        if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
-        }
-        const pending = managerRef.current?.getPendingMuteStore();
-        if (pending) {
-          managerRef.current?.publishMutes(pending);
-        }
-      });
-    });
-    return () => {
-      cancelled = true;
-      unsub();
-    };
-  }, [pubkey, applyRemote]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: store.channels is the relevant dep — the outer store identity can change without channels changing (e.g., on reconnect writes)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: store.channels is the relevant dep
   const mutedChannelIds = React.useMemo(
     () => mutedChannelIdsFromStore(store),
     [store.channels],
@@ -166,7 +73,6 @@ export function useChannelMutes(pubkey: string | undefined): {
           channels: { ...prev.channels, [channelId]: entry },
         };
         if (!writeChannelMutesStore(pubkey, next)) return prev;
-        managerRef.current?.publishMutes(next);
         return next;
       });
     },

@@ -78,7 +78,7 @@ export function useChannelIntro({
       return {
         actions,
         channelKindLabel: isWelcomeChannel(activeChannel)
-          ? "private welcome channel"
+          ? "welcome channel"
           : getChannelIntroKind(activeChannel),
         channelName: activeChannel.name,
         description: isWelcomeChannel(activeChannel)

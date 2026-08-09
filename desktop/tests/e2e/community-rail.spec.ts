@@ -584,41 +584,28 @@ test.describe("community rail", () => {
     await expect(buttonA).toBeVisible();
     await expect(buttonB).toBeVisible();
 
-    // Focus B (the second/lower item) and use keyboard to move it above A.
-    // Note: page.keyboard.press("Space") fires the button's native click on this
-    // Chromium build even when React's onKeyDown calls preventDefault — a CDP
-    // input-injection quirk. The synthetic dispatch below goes directly through
-    // React's event system where preventDefault correctly suppresses the click,
-    // while still exercising the real KeyboardSensor path (Thufir verified the
-    // test fails when KeyboardSensor is removed).
+    // Focus B (the second/lower item) and drive the real accessible
+    // interaction: Space picks it up, ArrowUp moves it above A, Space drops it.
     await buttonB.focus();
-    await page.evaluate((testId) => {
-      const el = document.querySelector(`[data-testid="${testId}"]`);
-      if (!el) throw new Error(`button not found: ${testId}`);
-      el.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: " ",
-          code: "Space",
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    }, `community-rail-button-${COMMUNITY_B.id}`);
-    // ArrowUp moves the active item one slot up.
+    // Space activates dnd-kit's KeyboardSensor via its React onKeyDown
+    // activator, which calls preventDefault — that also suppresses the native
+    // <button> click, so the active community does not switch.
+    await page.keyboard.press("Space");
+    // The picked-up button fades to opacity-30 while the drag is live,
+    // confirming activation before we drive movement.
+    await expect(buttonB).toHaveCSS("opacity", "0.3");
+    // KeyboardSensor.attach() defers attaching its document-level movement
+    // listener to the next macrotask (setTimeout). Flush that task before
+    // ArrowUp, or the move key is delivered before the listener exists and the
+    // reorder silently no-ops — without this the move is lost every run locally.
+    await page.evaluate(() => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 0);
+      return promise;
+    });
+    // ArrowUp moves the active item one slot up; Space drops it.
     await page.keyboard.press("ArrowUp");
-    // Space drops the item — same synthetic dispatch for consistency.
-    await page.evaluate((testId) => {
-      const el = document.querySelector(`[data-testid="${testId}"]`);
-      if (!el) throw new Error(`button not found: ${testId}`);
-      el.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: " ",
-          code: "Space",
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    }, `community-rail-button-${COMMUNITY_B.id}`);
+    await page.keyboard.press("Space");
 
     // The community list in localStorage must now be [B, A].
     await expect

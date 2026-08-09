@@ -16,17 +16,17 @@ const ICON_STALE_MS = 5 * 60_000;
 async function fetchIconForCommunity(
   community: Community,
 ): Promise<string | null> {
-  const icon = await fetchCommunityIcon(community.relayUrl);
-  saveCachedCommunityIcon(community.relayUrl, icon);
+  const icon = await fetchCommunityIcon(community.groupId);
+  saveCachedCommunityIcon(community.groupId, icon);
   return icon;
 }
 
 function iconQueryOptions(community: Community) {
   return {
-    queryKey: communityIconQueryKey(community.relayUrl),
+    queryKey: communityIconQueryKey(community.groupId),
     queryFn: () => fetchIconForCommunity(community),
     // Cached icon renders immediately; the fetch still runs and replaces it.
-    placeholderData: loadCachedCommunityIcon(community.relayUrl),
+    placeholderData: loadCachedCommunityIcon(community.groupId),
     staleTime: ICON_STALE_MS,
     retry: 1,
   };
@@ -48,7 +48,7 @@ export function useCommunityIcons(
   const icons: Record<string, string | null> = {};
   communities.forEach((community, index) => {
     icons[community.id] =
-      results[index]?.data ?? loadCachedCommunityIcon(community.relayUrl);
+      results[index]?.data ?? loadCachedCommunityIcon(community.groupId);
   });
   return icons;
 }

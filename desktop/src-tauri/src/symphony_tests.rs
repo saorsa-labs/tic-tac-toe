@@ -192,18 +192,74 @@ fn read_symphony_port_none_when_missing() {
 // ── Supervisor decision logic ───────────────────────────────────────────────
 
 #[test]
-fn attaches_when_healthy_and_artifacts_present() {
-    // Daemon already up: artifacts present + health Ok → attach, no owned child.
+fn attaches_when_healthy_with_a_proven_matching_config() {
+    // Daemon already up: port+token artifacts present, health Ok, AND the
+    // durable config.path artifact PROVES the running daemon was started against
+    // the requested config → attach without taking ownership. Without the proven
+    // config, attach would fail closed (see attach_fails_closed_when_* below).
     let h = Harness::new(true);
     h.write_artifacts("4321");
+    let requested = std::path::Path::new("/cfg/WORKFLOW.md");
+    write_config_path_artifact(&h.data_dir, requested);
     let supervisor = h.supervisor();
-    let handle = supervisor
-        .bring_up(std::path::Path::new("/cfg/WORKFLOW.md"))
-        .expect("attach bring_up");
+    let handle = supervisor.bring_up(requested).expect("attach bring_up");
     assert!(handle.child.is_none(), "attached daemon must not be owned");
     assert_eq!(handle.base_url, "http://127.0.0.1:4321");
     // No spawn happened.
     assert!(lock(&h.spawn_args).is_empty());
+}
+
+#[test]
+fn config_path_proven_gates_attach_on_a_matching_recorded_artifact() {
+    // The attach gate: a healthy daemon is re-claimed ONLY when its durable
+    // config.path artifact PROVES it was started against the requested config.
+    // Missing, empty, or mismatched → unproven → the caller must fail closed or
+    // spawn, never silently re-claim a daemon it does not own.
+    let dir = tempfile::TempDir::new().unwrap();
+    let requested = std::path::Path::new("/company-a/WORKFLOW.md");
+
+    // No artifact → unproven.
+    assert!(!config_path_proven(dir.path(), requested));
+
+    // Matching artifact → proven.
+    write_config_path_artifact(dir.path(), requested);
+    assert!(config_path_proven(dir.path(), requested));
+
+    // Mismatched artifact (a different config owns the daemon) → not proven.
+    write_config_path_artifact(dir.path(), std::path::Path::new("/company-b/WORKFLOW.md"));
+    assert!(!config_path_proven(dir.path(), requested));
+
+    // Empty/whitespace artifact → reads as None → unproven.
+    std::fs::write(dir.path().join(CONFIG_PATH_FILE), "   \n").unwrap();
+    assert!(!config_path_proven(dir.path(), requested));
+}
+
+#[test]
+fn attach_fails_closed_when_the_running_daemons_config_is_unproven() {
+    // A healthy daemon with port+token is running, but its config is NOT proven
+    // to match the request (no config.path artifact). We do not own it, so
+    // bring_up must FAIL CLOSED (IncompatibleAttachedConfig) rather than silently
+    // re-claim it — and must neither spawn over it nor kill the unowned daemon.
+    let h = Harness::new(true);
+    h.write_artifacts("4321");
+    // No config.path artifact → attach is unproven.
+    let supervisor = h.supervisor();
+    let err = supervisor
+        .bring_up(std::path::Path::new("/company-a/WORKFLOW.md"))
+        .expect_err("unproven attach must fail closed");
+    assert!(
+        matches!(err, SymphonyError::IncompatibleAttachedConfig { .. }),
+        "expected IncompatibleAttachedConfig, got {err:?}"
+    );
+    // Fail-closed: nothing spawned, nothing killed (we don't own the daemon).
+    assert!(
+        lock(&h.spawn_args).is_empty(),
+        "must not spawn over an unowned daemon"
+    );
+    assert!(
+        lock(&h.kill_log).is_empty(),
+        "must not kill an unowned daemon"
+    );
 }
 
 #[test]
@@ -313,6 +369,24 @@ fn handle_debug_never_contains_token() {
         "token leaked into handle Debug: {debug}"
     );
     handle.shutdown();
+}
+
+#[test]
+fn handle_records_its_config_path_for_rebind_detection() {
+    let h = Harness::new(false);
+    let supervisor = h.supervisor();
+    let handle = supervisor
+        .bring_up(std::path::Path::new("/company-a/WORKFLOW.md"))
+        .unwrap();
+    // The handle carries the config path it was brought up against, so a
+    // second Company instance with a different config can be detected.
+    assert_eq!(
+        handle.config_path,
+        std::path::PathBuf::from("/company-a/WORKFLOW.md")
+    );
+    // Debug output surfaces it for diagnostics (no token, just the path).
+    let debug = format!("{handle:?}");
+    assert!(debug.contains("/company-a/WORKFLOW.md"));
 }
 
 #[test]

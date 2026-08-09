@@ -42,8 +42,13 @@ function setResponse(fn) {
   calls.length = 0;
 }
 
-const { x0xHistoryList, x0xHistorySearch, parseX0xScope, x0xScope } =
-  await import("@/shared/api/tauriNativeX0x");
+const {
+  x0xHistoryGet,
+  x0xHistoryList,
+  x0xHistorySearch,
+  parseX0xScope,
+  x0xScope,
+} = await import("@/shared/api/tauriNativeX0x");
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 // Raw snake_case row as x0xd emits it (history.rs row_json). `msg_id` is the
@@ -235,4 +240,47 @@ test("x0x_history_search sends the FTS needle + scope and maps the same row shap
   // the durable timeline (the AT#2 "find message #17 after restart" path).
   assert.equal(page.rows[0].id, 17);
   assert.equal(page.rows[0].scope, "topic:dev");
+});
+
+// ── Single-row canonical lookup (x0x_history_get) ───────────────────────────
+
+test("x0x_history_get sends the canonical msgId and maps the daemon row", async () => {
+  const msgId = "aa".repeat(32);
+  setResponse((cmd, args) => {
+    assert.equal(cmd, "x0x_history_get");
+    assert.deepEqual(args, { msgId });
+    return rawRow({ id: 42, msg_id: msgId, scope: "group:team-1" });
+  });
+  const row = await x0xHistoryGet(msgId);
+  assert.equal(row.id, 42);
+  assert.equal(row.msgId, msgId);
+  assert.equal(row.scope, "group:team-1");
+});
+
+test("x0x_history_get returns null when the daemon reports not-found (404)", async () => {
+  // The client maps a 404 to null BEFORE it reaches TS; the wire therefore
+  // delivers null, which the adapter surfaces as null — distinct from an
+  // error (reject).
+  setResponse(() => null);
+  const row = await x0xHistoryGet("00".repeat(32));
+  assert.equal(row, null);
+});
+
+test("x0x_history_get maps every daemon column to the camelCase seam", async () => {
+  const root = "11".repeat(32);
+  setResponse(() =>
+    rawRow({
+      msg_id: root,
+      thread_root: root,
+      thread_parent: null,
+      content_type: "text/markdown",
+      direction: "Outbound",
+    }),
+  );
+  const row = await x0xHistoryGet(root);
+  assert.equal(row.msgId, root);
+  assert.equal(row.threadRoot, root, "self-referential root preserved");
+  assert.equal(row.threadParent, null);
+  assert.equal(row.contentType, "text/markdown");
+  assert.equal(row.direction, "Outbound");
 });

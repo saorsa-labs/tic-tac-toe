@@ -16,7 +16,7 @@ export function useIndependentThreadPanel(args: {
   rootId: string | null;
   replyTargetId: string | null;
   expandedReplyIds: ReadonlySet<string>;
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   currentAvatarUrl: string | null;
   profiles: UserProfileLookup | undefined;
   ownerProfiles: UserProfileLookup | undefined;
@@ -42,7 +42,7 @@ export function useIndependentThreadPanel(args: {
         args.replyTargetId,
         args.expandedReplyIds,
         args.activeChannel,
-        args.currentPubkey,
+        args.currentAgentId,
         args.currentAvatarUrl,
         args.profiles,
         args.members,
@@ -58,7 +58,7 @@ export function useIndependentThreadPanel(args: {
       args.replyTargetId,
       args.expandedReplyIds,
       args.activeChannel,
-      args.currentPubkey,
+      args.currentAgentId,
       args.currentAvatarUrl,
       args.profiles,
       args.ownerProfiles,

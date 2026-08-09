@@ -16,10 +16,6 @@ export type ChannelScreenProps = {
   autoSendDraftKey: string | null;
   currentIdentity?: Identity;
   currentProfile?: Profile;
-  onCloseForumPost: () => void;
-  onSelectForumPost: (postId: string) => void;
-  selectedForumPostId: string | null;
-  targetForumReplyId: string | null;
   targetMessageEvents: RelayEvent[];
   targetMessageId: string | null;
 };

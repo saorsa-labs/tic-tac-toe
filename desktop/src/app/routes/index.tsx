@@ -93,7 +93,7 @@ function HomeRouteComponent() {
   return (
     <HomeScreen
       availableChannelIds={availableChannelIds}
-      currentPubkey={identityQuery.data?.pubkey}
+      currentAgentId={identityQuery.data?.agentId}
       onOpenContext={(channelId, messageId, threadRootId) => {
         void goChannel(channelId, { messageId, threadRootId });
       }}

@@ -13,7 +13,6 @@ export type Workflow = {
 
 export type WorkflowSaveResult = {
   workflow: Workflow;
-  webhookSecret: string | null;
 };
 
 export type WorkflowRunStatus =

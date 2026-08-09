@@ -1,15 +1,14 @@
 /**
- * M2 identity-surface contract: the onboarding/profile/member UI surfaces that
- * render the viewer's identity contain NO bech32 (npub/nsec) form. Remaining
- * compatibility-only relay operations are keyed off `relayPubkey` (the
- * internal signer) — never the displayed AgentId and never an npub. Native
- * x0xd data paths are intentionally absent from the relay-wiring list.
+ * M3 identity-surface contract: the onboarding/profile/member UI surfaces that
+ * render the viewer's identity contain NO bech32 (npub/nsec) form, and the
+ * frontend identity seam carries NO Nostr relay signer — the x0x AgentId is
+ * the sole identity on both sides of the IPC boundary.
  *
  * This is a focused static contract test (the production-wide npub/nsec gate
  * lives in `scripts/check-nostr-identity-ui.mjs`); here we pin the specific
- * identity-rendering surfaces and the remaining relayPubkey callsites the gate
- * does not cover. It fails closed if a surface regresses to a bech32 identity
- * or if a compatibility callsite is rewired away from `relayPubkey`.
+ * identity-rendering surfaces and assert the identity seam is agentId-only. It
+ * fails closed if a surface regresses to a bech32 identity or if the identity
+ * seam reintroduces a relay signer (`relayPubkey` / `relay_pubkey`).
  */
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -38,16 +37,9 @@ const IDENTITY_SURFACES = [
   "shared/ui/AgentIdentity.tsx",
 ];
 
-// Remaining compatibility relay callsites: every one must use `relayPubkey`
-// (the internal signer), not the displayed AgentId or an npub. Migrated native
-// data paths such as message history/send do not belong in this list.
-const RELAY_WIRING = [
-  "app/AppShell.tsx",
-  "features/agents/observerRelayStore.ts",
-  "features/agents/ui/useObserverEvents.ts",
-  "features/identity-archive/hooks.ts",
-  "features/onboarding/ui/CommunityOnboardingFlow.tsx",
-];
+// The identity seam: the TS Identity type and its IPC mapper expose the x0x
+// AgentId ONLY — no Nostr relay signer field survives the M3 cutover.
+const IDENTITY_SEAM = ["shared/api/types.ts", "shared/api/tauriIdentity.ts"];
 
 describe("identity surfaces: no bech32 (npub/nsec) user identity", () => {
   for (const rel of IDENTITY_SURFACES) {
@@ -65,43 +57,36 @@ describe("identity surfaces: no bech32 (npub/nsec) user identity", () => {
   }
 });
 
-describe("relay operations: keyed off relayPubkey (the compatibility signer)", () => {
-  for (const rel of RELAY_WIRING) {
-    it(`${rel} wires the viewer identity through relayPubkey`, async () => {
+describe("identity seam: agentId-only, no Nostr relay signer", () => {
+  for (const rel of IDENTITY_SEAM) {
+    it(`${rel} carries no relayPubkey/relay_pubkey signer field`, async () => {
       const src = await readSrc(rel);
       assert.ok(
-        src.includes("relayPubkey"),
-        `${rel} must key relay operations off relayPubkey, not the AgentId/npub`,
+        !src.includes("relayPubkey"),
+        `${rel} must not carry a camelCase relayPubkey signer field`,
+      );
+      assert.ok(
+        !src.includes("relay_pubkey"),
+        `${rel} must not carry a snake_case relay_pubkey signer field`,
       );
     });
   }
 });
 
-describe("e2e mock identity: hex AgentId + separate relay signer, no bech32", () => {
-  // The default mock identity the E2E fabric returns must satisfy the same M2
-  // shape: a 64-hex AgentId, a SEPARATE 64-hex relay signer, four words, and no
-  // bech32 anywhere in the identity payload.
-  it("DEFAULT_MOCK_IDENTITY carries distinct 64-hex agent_id and relay_pubkey", async () => {
+describe("e2e mock identity: hex AgentId only, no relay signer, no bech32", () => {
+  it("DEFAULT_MOCK_IDENTITY carries a 64-hex agent_id and no relay_pubkey", async () => {
     const src = await readSrc("testing/e2eBridge.ts");
     const blockStart = src.indexOf("DEFAULT_MOCK_IDENTITY");
     const identityBlock = src.slice(blockStart, blockStart + 400);
 
-    // agent_id is an exact 64-hex literal (the displayed identity).
+    // agent_id is an exact 64-hex literal (the sole displayed identity).
     const agentId = identityBlock.match(/agent_id:\s*["']([0-9a-f]{64})["']/);
     assert.ok(agentId, "mock identity must define a 64-hex agent_id");
 
-    // relay_pubkey is a separate, hex-derived compatibility signer
-    // (the mock uses "deadbeef".repeat(8) — hex-derived, not bech32).
+    // The legacy Nostr relay signer must NOT survive the cutover.
     assert.ok(
-      /relay_pubkey:\s*["']?[0-9a-f]/.test(identityBlock),
-      "mock identity must define a hex relay_pubkey (compat signer)",
-    );
-
-    // The two namespaces must be distinct (compat signer ≠ displayed AgentId).
-    assert.notStrictEqual(
-      agentId[1],
-      "deadbeef".repeat(8),
-      "agent_id must not equal the relay signer",
+      !/relay_pubkey:/.test(identityBlock),
+      "mock identity must not carry a relay_pubkey signer field",
     );
 
     // No bech32 identity leaks into the identity payload constants.

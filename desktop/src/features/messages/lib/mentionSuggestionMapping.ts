@@ -22,20 +22,20 @@ export function mapMentionCandidateToSuggestion(opts: {
   candidate: MentionSuggestionCandidate;
   label: string;
   channelType?: ChannelType | null;
-  currentPubkey?: string | null;
+  currentAgentId?: string | null;
   ownerProfiles?: UserProfileLookup;
   profiles?: UserProfileLookup;
 }): MentionSuggestion {
   const {
     candidate,
     channelType,
-    currentPubkey,
+    currentAgentId,
     label,
     ownerProfiles,
     profiles,
   } = opts;
   const ownerLabel = candidate.isAgent
-    ? formatOwnerLabel(candidate.ownerPubkey, currentPubkey, ownerProfiles)
+    ? formatOwnerLabel(candidate.ownerPubkey, currentAgentId, ownerProfiles)
     : null;
 
   return {

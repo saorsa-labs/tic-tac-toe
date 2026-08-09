@@ -1,6 +1,5 @@
 // biome-ignore format: keep compact to stay within file size limit
 import * as React from "react";
-import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
 import type { Community } from "@/features/communities/types";
@@ -68,25 +67,20 @@ import {
   SidebarRail,
 } from "@/shared/ui/sidebar";
 
-type CollapsibleSidebarGroup =
-  | "starred"
-  | "channels"
-  | "forums"
-  | "directMessages";
+type CollapsibleSidebarGroup = "starred" | "channels" | "directMessages";
 
-type CreateChannelKind = "stream" | "forum";
+type CreateChannelKind = "stream";
 
 type AppSidebarProps = {
   addCommunityPrefill?: AddCommunityPrefillRequest | null;
   activeCommunity: Community | null;
   channels: Channel[];
-  currentPubkey?: string;
+  currentAgentId?: string;
   fallbackDisplayName?: string;
   homeBadgeCount: number;
   isAddCommunityOpen?: boolean;
   isLoading: boolean;
   isCreatingChannel: boolean;
-  isCreatingForum: boolean;
   profile?: Profile;
   selfPresenceStatus: PresenceStatus;
   errorMessage?: string;
@@ -103,7 +97,6 @@ type AppSidebarProps = {
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   communities: Community[];
-  onAddCommunity: (community: Community) => void;
   onAddCommunityOpenChange?: (open: boolean) => void;
   onCreateChannel: (input: {
     name: string;
@@ -112,15 +105,7 @@ type AppSidebarProps = {
     ttlSeconds?: number;
     templateId?: string;
   }) => Promise<void>;
-  onCreateForum: (input: {
-    name: string;
-    description?: string;
-    visibility: ChannelVisibility;
-    ttlSeconds?: number;
-    templateId?: string;
-  }) => Promise<void>;
   onOpenAddCommunity: () => void;
-  onSendFeedback?: () => void;
   onHideDm: (channelId: string) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onMarkChannelRead: (
@@ -132,7 +117,7 @@ type AppSidebarProps = {
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateCommunity: (
     id: string,
-    updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
+    updates: Partial<Pick<Community, "name" | "reposDir">>,
   ) => void;
   onRemoveCommunity: (id: string) => void;
   onCreateAgent: () => void;
@@ -173,13 +158,12 @@ export function AppSidebar({
   addCommunityPrefill,
   activeCommunity,
   channels,
-  currentPubkey,
+  currentAgentId,
   fallbackDisplayName,
   homeBadgeCount,
   isAddCommunityOpen,
   isLoading,
   isCreatingChannel,
-  isCreatingForum,
   profile,
   selfPresenceStatus,
   errorMessage,
@@ -188,12 +172,9 @@ export function AppSidebar({
   unreadChannelCounts,
   unreadChannelIds,
   communities,
-  onAddCommunity,
   onAddCommunityOpenChange,
   onCreateChannel,
-  onCreateForum,
   onOpenAddCommunity,
-  onSendFeedback,
   onHideDm,
   onMarkChannelUnread,
   onMarkChannelRead,
@@ -311,7 +292,6 @@ export function AppSidebar({
   >({
     starred: false,
     channels: false,
-    forums: false,
     directMessages: false,
   });
 
@@ -346,7 +326,7 @@ export function AppSidebar({
     reorderSections,
     assignChannel,
     unassignChannel,
-  } = useChannelSections(currentPubkey, activeCommunity?.relayUrl);
+  } = useChannelSections(currentAgentId, activeCommunity?.groupId);
 
   const sectionIds = React.useMemo(
     () => channelSections.map((s) => s.id),
@@ -354,8 +334,8 @@ export function AppSidebar({
   );
 
   const { sortModeFor, setSortModeFor } = useChannelSortPreference(
-    currentPubkey,
-    activeCommunity?.relayUrl,
+    currentAgentId,
+    activeCommunity?.groupId,
     sectionIds,
   );
 
@@ -445,14 +425,6 @@ export function AppSidebar({
     [createSection, assignChannel, createSectionState.pendingChannelId],
   );
 
-  const forumChannels = React.useMemo(
-    () =>
-      sortChannelsForSidebar(
-        channels.filter((channel) => channel.channelType === "forum"),
-        sortModeFor("forums"),
-      ),
-    [channels, sortModeFor],
-  );
   const directMessages = React.useMemo(
     () => channels.filter((channel) => channel.channelType === "dm"),
     [channels],
@@ -466,7 +438,7 @@ export function AppSidebar({
   });
   const { dmChannelLabels, dmParticipantsByChannelId, dmPresenceByChannelId } =
     useDmSidebarMetadata({
-      currentPubkey,
+      currentAgentId,
       directMessages,
       enabled: shouldLoadDmMetadata,
       fallbackDisplayName,
@@ -483,7 +455,7 @@ export function AppSidebar({
   );
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeCommunityId: activeCommunity?.id,
-    currentPubkey,
+    currentAgentId,
     directMessages,
     dmChannelLabels,
     isLoading,
@@ -500,12 +472,7 @@ export function AppSidebar({
     unreadBelowCount,
   } = useUnreadOverflow({ scrollRef, unreadChannelIds });
 
-  const isCreatingAny =
-    createDialogKind === "stream"
-      ? isCreatingChannel
-      : createDialogKind === "forum"
-        ? isCreatingForum
-        : false;
+  const isCreatingAny = createDialogKind === "stream" && isCreatingChannel;
 
   const handleCreateFromDialog = React.useCallback(
     async (input: {
@@ -517,11 +484,9 @@ export function AppSidebar({
     }) => {
       if (createDialogKind === "stream") {
         await onCreateChannel(input);
-      } else if (createDialogKind === "forum") {
-        await onCreateForum(input);
       }
     },
-    [createDialogKind, onCreateChannel, onCreateForum],
+    [createDialogKind, onCreateChannel],
   );
 
   const handleOpenCreateChannel = React.useCallback(() => {
@@ -553,7 +518,7 @@ export function AppSidebar({
       >
         <AppSidebarPinnedHeader
           channelLabels={dmChannelLabels}
-          currentPubkey={currentPubkey}
+          currentAgentId={currentAgentId}
           onBrowseChannels={onBrowseChannels}
           onCreateAgent={onCreateAgent}
           onCreateChannel={handleOpenCreateChannel}
@@ -751,36 +716,6 @@ export function AppSidebar({
                       onLeaveChannel={requestLeaveChannel}
                     />
                   </SidebarDndContext>
-                  <FeatureGate feature="forum">
-                    <ChannelGroupSection
-                      createLabel="New forum"
-                      hasUnread={unreadChannelIds.size > 0}
-                      isCollapsed={collapsedGroups.forums}
-                      isActiveChannel={selectedView === "channel"}
-                      activeWorkingByChannelId={activeWorkingByChannelId}
-                      items={forumChannels}
-                      sortMode={sortModeFor("forums")}
-                      onSortModeChange={(mode) =>
-                        setSortModeFor("forums", mode)
-                      }
-                      actionsTestId="section-actions-forums"
-                      listTestId="forum-list"
-                      onCreateClick={() => openCreateDialog("forum")}
-                      onMarkAllRead={onMarkAllChannelsRead}
-                      onMarkChannelRead={onMarkChannelRead}
-                      onMarkChannelUnread={onMarkChannelUnread}
-                      onSelectChannel={onSelectChannel}
-                      onToggleCollapsed={() => toggleCollapsedGroup("forums")}
-                      selectedChannelId={selectedChannelId}
-                      title="Forums"
-                      unreadChannelCounts={unreadChannelCounts}
-                      unreadChannelIds={unreadChannelIds}
-                      mutedChannelIds={mutedChannelIds}
-                      onMuteChannel={onMuteChannel}
-                      onUnmuteChannel={onUnmuteChannel}
-                      onDeleteChannel={requestDeleteChannel}
-                    />
-                  </FeatureGate>
                   <SidebarSection
                     action={
                       <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
@@ -863,7 +798,6 @@ export function AppSidebar({
                   isPresencePending={isPresencePending}
                   onOpenAddCommunity={onOpenAddCommunity}
                   onOpenSettings={onSelectSettings}
-                  onSendFeedback={onSendFeedback}
                   onRemoveCommunity={onRemoveCommunity}
                   onSetPresenceStatus={onSetPresenceStatus}
                   onSetUserStatus={onSetUserStatus}
@@ -901,7 +835,6 @@ export function AppSidebar({
       <AddCommunityDialog
         prefill={addCommunityPrefill}
         onOpenChange={onAddCommunityOpenChange ?? (() => {})}
-        onSubmit={onAddCommunity}
         open={isAddCommunityOpen ?? false}
       />
 

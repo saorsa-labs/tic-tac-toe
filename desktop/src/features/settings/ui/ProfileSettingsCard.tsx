@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, Eye, EyeOff, Pencil } from "lucide-react";
+import { Check, ChevronDown, Copy, Pencil } from "lucide-react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -12,8 +12,6 @@ import {
   useProfileQuery,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
-import { NsecMaskedDisplay } from "@/features/onboarding/ui/NsecMaskedDisplay";
-import { getNsec } from "@/shared/api/tauriIdentity";
 import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
@@ -29,15 +27,11 @@ import { SignOutSection } from "./SignOutSection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type ProfileSettingsCardProps = {
-  currentPubkey?: string;
+  currentAgentId?: string;
   fallbackDisplayName?: string;
 };
 
 const AVATAR_EDITOR_TRANSITION_MS = 240;
-const AVATAR_PREVIEW_CAPTION_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
 const AVATAR_MODE_TABS_TRANSITION = {
   duration: 0.2,
   ease: [0.23, 1, 0.32, 1],
@@ -90,92 +84,6 @@ function IdentityRow({
   );
 }
 
-/**
- * Collapsible row that reveals the user's nsec on demand.
- * The nsec is fetched only when first expanded and cleared on collapse.
- */
-function NsecRevealRow() {
-  const [isOpen, setIsOpen] = React.useState(false);
-  const [nsec, setNsec] = React.useState<string | null>(null);
-  const [isLoading, setIsLoading] = React.useState(false);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-  // Guards against a late-resolving getNsec() repopulating state after Hide
-  // or after the settings panel unmounts.
-  const fetchCancelledRef = React.useRef(false);
-
-  React.useEffect(() => {
-    return () => {
-      fetchCancelledRef.current = true;
-      setNsec(null);
-    };
-  }, []);
-
-  async function handleReveal() {
-    if (!isOpen) {
-      fetchCancelledRef.current = false;
-      setIsOpen(true);
-      setIsLoading(true);
-      setLoadError(null);
-      try {
-        const value = await getNsec();
-        if (!fetchCancelledRef.current) setNsec(value);
-      } catch (err) {
-        if (!fetchCancelledRef.current)
-          setLoadError(
-            err instanceof Error
-              ? err.message
-              : "Failed to retrieve private key.",
-          );
-      } finally {
-        if (!fetchCancelledRef.current) setIsLoading(false);
-      }
-    } else {
-      // Cancel any in-flight fetch before clearing state.
-      fetchCancelledRef.current = true;
-      setNsec(null);
-      setIsOpen(false);
-    }
-  }
-
-  return (
-    <div className="px-4 py-3" data-testid="profile-private-key-row">
-      <div className="flex items-center justify-between gap-4">
-        <p className="text-sm font-medium">Private key</p>
-        <button
-          aria-label={isOpen ? "Hide private key" : "Reveal private key"}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          data-testid="profile-private-key-toggle"
-          onClick={() => void handleReveal()}
-          type="button"
-        >
-          {isOpen ? (
-            <>
-              <EyeOff className="h-4 w-4 shrink-0" />
-              Hide
-            </>
-          ) : (
-            <>
-              <Eye className="h-4 w-4 shrink-0" />
-              Reveal
-            </>
-          )}
-        </button>
-      </div>
-      {isOpen ? (
-        <div className="mt-2">
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : loadError ? (
-            <p className="text-sm text-destructive">{loadError}</p>
-          ) : nsec ? (
-            <NsecMaskedDisplay nsec={nsec} />
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function EditProfileMetadataButton({
   label,
   testId,
@@ -215,7 +123,7 @@ function EditProfileMetadataButton({
 }
 
 export function ProfileSettingsCard({
-  currentPubkey,
+  currentAgentId,
   fallbackDisplayName,
 }: ProfileSettingsCardProps) {
   const shouldReduceMotion = useReducedMotion();
@@ -229,24 +137,11 @@ export function ProfileSettingsCard({
   const [displayNameDraft, setDisplayNameDraft] = React.useState("");
   const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
   const [aboutDraft, setAboutDraft] = React.useState("");
-  const [uploadedAvatarUrlDraft, setUploadedAvatarUrlDraft] = React.useState<
-    string | null
-  >(null);
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
-  const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isAvatarEditorFinishing, setIsAvatarEditorFinishing] =
     React.useState(false);
-  // The animated avatar tab portals its camera feed / composed preview into
-  // the main avatar preview above, replacing the regular preview while live.
-  const [animatedPreviewEl, setAnimatedPreviewEl] =
-    React.useState<HTMLDivElement | null>(null);
   const [avatarModeTabsEl, setAvatarModeTabsEl] =
     React.useState<HTMLDivElement | null>(null);
-  const [isAnimatedPreviewActive, setIsAnimatedPreviewActive] =
-    React.useState(false);
-  const [animatedPreviewCaption, setAnimatedPreviewCaption] = React.useState<
-    string | null
-  >(null);
   const [isEditingProfileMetadata, setIsEditingProfileMetadata] =
     React.useState(false);
   const [shouldRenderAvatarEditor, setShouldRenderAvatarEditor] =
@@ -278,17 +173,6 @@ export function ProfileSettingsCard({
       setAboutDraft(currentAbout);
     }
   }, [currentAbout]);
-
-  React.useEffect(() => {
-    if (
-      uploadedAvatarUrlDraft &&
-      currentAvatarUrl &&
-      uploadedAvatarUrlDraft !== currentAvatarUrl &&
-      avatarUrlDraft !== uploadedAvatarUrlDraft
-    ) {
-      setUploadedAvatarUrlDraft(null);
-    }
-  }, [avatarUrlDraft, currentAvatarUrl, uploadedAvatarUrlDraft]);
 
   React.useEffect(() => {
     if (isEditingProfileMetadata) {
@@ -366,8 +250,7 @@ export function ProfileSettingsCard({
   const hasPendingClearRequest =
     hasPendingDisplayNameClearRequest || hasPendingAvatarClearRequest;
   const hasProfileChanges = Object.keys(updatePayload).length > 0;
-  const canSave =
-    hasProfileChanges && !updateProfileMutation.isPending && !isUploadingAvatar;
+  const canSave = hasProfileChanges && !updateProfileMutation.isPending;
   const isAvatarEditorSaving =
     isAvatarEditorFinishing ||
     (shouldRenderAvatarEditor && updateProfileMutation.isPending);
@@ -385,17 +268,12 @@ export function ProfileSettingsCard({
     profile?.displayName ||
     fallbackDisplayName ||
     "Your profile";
-  const resolvedPubkey = profile?.pubkey ?? currentPubkey ?? "Unavailable";
+  const resolvedPubkey = profile?.pubkey ?? currentAgentId ?? "Unavailable";
   const nip05Handle = profile?.nip05Handle ?? "Not set";
   const emojiAvatarPreview = React.useMemo(
     () => parseEmojiAvatarDataUrl(avatarUrlDraft),
     [avatarUrlDraft],
   );
-  const shouldShowAnimatedPreview =
-    isAvatarEditorOpen && isAnimatedPreviewActive;
-  const visibleAnimatedPreviewCaption = isAvatarEditorOpen
-    ? animatedPreviewCaption
-    : null;
   const avatarEditorLayoutTransition = shouldReduceMotion
     ? { duration: 0 }
     : AVATAR_EDITOR_LAYOUT_TRANSITION;
@@ -681,68 +559,38 @@ export function ProfileSettingsCard({
                         cutout={{ cx: 165, cy: 165, r: 30 }}
                         size={192}
                       >
-                        <div className="relative h-full w-full">
+                        {emojiAvatarPreview ? (
                           <div
-                            className="pointer-events-none absolute inset-0 z-10"
-                            data-testid="profile-avatar-animated-preview-slot"
-                            ref={setAnimatedPreviewEl}
-                          />
-                          {shouldShowAnimatedPreview ? null : emojiAvatarPreview ? (
-                            <div
-                              aria-label={`${resolvedName} avatar`}
-                              className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs"
-                              data-testid="profile-avatar-preview"
-                              role="img"
-                              style={{
-                                backgroundColor: emojiAvatarPreview.color,
-                              }}
+                            aria-label={`${resolvedName} avatar`}
+                            className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs"
+                            data-testid="profile-avatar-preview"
+                            role="img"
+                            style={{
+                              backgroundColor: emojiAvatarPreview.color,
+                            }}
+                          >
+                            <span
+                              className={cn(
+                                "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[6.25rem]",
+                                avatarSquishKey > 0 && "buzz-avatar-squish",
+                              )}
+                              data-testid="profile-avatar-preview-emoji"
+                              key={avatarSquishKey}
                             >
-                              <span
-                                className={cn(
-                                  "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[6.25rem]",
-                                  avatarSquishKey > 0 && "buzz-avatar-squish",
-                                )}
-                                data-testid="profile-avatar-preview-emoji"
-                                key={avatarSquishKey}
-                              >
-                                {emojiAvatarPreview.emoji}
-                              </span>
-                            </div>
-                          ) : (
-                            <ProfileAvatar
-                              avatarUrl={avatarUrlDraft || null}
-                              className="h-full w-full rounded-full text-5xl"
-                              iconClassName="h-14 w-14"
-                              label={resolvedName}
-                              testId="profile-avatar-preview"
-                            />
-                          )}
-                        </div>
+                              {emojiAvatarPreview.emoji}
+                            </span>
+                          </div>
+                        ) : (
+                          <ProfileAvatar
+                            avatarUrl={avatarUrlDraft || null}
+                            className="h-full w-full rounded-full text-5xl"
+                            iconClassName="h-14 w-14"
+                            label={resolvedName}
+                            testId="profile-avatar-preview"
+                          />
+                        )}
                       </MaskedAvatarBadgeFrame>
                     </div>
-
-                    <AnimatePresence initial={false} mode="wait">
-                      {visibleAnimatedPreviewCaption ? (
-                        <motion.p
-                          animate={{ opacity: 1, y: 0 }}
-                          className="w-48 text-center text-sm text-muted-foreground"
-                          exit={
-                            shouldReduceMotion
-                              ? { opacity: 0, y: 0 }
-                              : { opacity: 0, y: -4 }
-                          }
-                          initial={
-                            shouldReduceMotion
-                              ? { opacity: 0, y: 0 }
-                              : { opacity: 0, y: 6 }
-                          }
-                          key={visibleAnimatedPreviewCaption}
-                          transition={AVATAR_PREVIEW_CAPTION_TRANSITION}
-                        >
-                          {visibleAnimatedPreviewCaption}
-                        </motion.p>
-                      ) : null}
-                    </AnimatePresence>
                   </motion.div>
 
                   <motion.div
@@ -871,7 +719,7 @@ export function ProfileSettingsCard({
                             >
                               <IdentityRow
                                 copyValue={
-                                  profile?.pubkey ?? currentPubkey ?? undefined
+                                  profile?.pubkey ?? currentAgentId ?? undefined
                                 }
                                 label="Public key"
                                 testId="profile-pubkey"
@@ -883,7 +731,6 @@ export function ProfileSettingsCard({
                                 testId="profile-nip05"
                                 value={nip05Handle}
                               />
-                              <NsecRevealRow />
                             </div>
                           </details>
                         </div>
@@ -904,23 +751,13 @@ export function ProfileSettingsCard({
                         inert={isAvatarEditorOpen ? undefined : true}
                       >
                         <ProfileAvatarEditor
-                          animatedPreviewContainer={animatedPreviewEl}
                           avatarUrl={avatarUrlDraft}
                           disabled={isAvatarEditorSaving}
                           donePending={isAvatarEditorSaving}
                           modeTabsContainer={avatarModeTabsEl}
-                          onAnimatedPreviewActiveChange={
-                            setIsAnimatedPreviewActive
-                          }
-                          onAnimatedPreviewCaptionChange={
-                            setAnimatedPreviewCaption
-                          }
                           onDone={handleAvatarEditorDone}
                           onEmojiAvatarChange={animateEmojiAvatarChange}
-                          onUploadedAvatarChange={setUploadedAvatarUrlDraft}
-                          onUploadingChange={setIsUploadingAvatar}
                           onUrlChange={(url) => setAvatarUrlDraft(url)}
-                          previewName={resolvedName}
                           testIdPrefix="profile-avatar"
                         />
                       </div>

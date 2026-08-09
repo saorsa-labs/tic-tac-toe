@@ -85,7 +85,6 @@ import {
   useRetainedPersona,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useProfileDmAction } from "@/features/profile/ui/useProfileDmAction";
-import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
@@ -104,7 +103,7 @@ export type { ProfilePanelTab, ProfilePanelView };
 export function UserProfilePanel({
   callerChannelId = null,
   canResetWidth,
-  currentPubkey,
+  currentAgentId,
   isSinglePanelView = false,
   layout = "standalone",
   onClose,
@@ -231,7 +230,7 @@ export function UserProfilePanel({
   const pubkeyLower = effectivePubkey?.toLowerCase() ?? "";
 
   const profileQuery = useUserProfileQuery(effectivePubkey ?? undefined);
-  const currentProfileQuery = useProfileQuery(currentPubkey !== undefined);
+  const currentProfileQuery = useProfileQuery(currentAgentId !== undefined);
 
   React.useEffect(() => {
     if (!effectivePubkey) return;
@@ -258,12 +257,9 @@ export function UserProfilePanel({
   const presenceQuery = usePresenceQuery(
     effectivePubkey ? [effectivePubkey] : [],
   );
-  const userStatusQuery = useUserStatusQuery(
-    effectivePubkey ? [effectivePubkey] : [],
-  );
-  const contactListQuery = useContactListQuery(currentPubkey);
-  const followMutation = useFollowMutation(currentPubkey);
-  const unfollowMutation = useUnfollowMutation(currentPubkey);
+  const contactListQuery = useContactListQuery(currentAgentId);
+  const followMutation = useFollowMutation(currentAgentId);
+  const unfollowMutation = useUnfollowMutation(currentAgentId);
   const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
   const { goChannel } = useAppNavigation();
   const profile = resolvePanelProfile({
@@ -275,9 +271,6 @@ export function UserProfilePanel({
   const ownerProfileQuery = useUserProfileQuery(ownerPubkey ?? undefined);
   const presenceStatus = pubkeyLower
     ? presenceQuery.data?.[pubkeyLower]
-    : undefined;
-  const userStatus = pubkeyLower
-    ? userStatusQuery.data?.[pubkeyLower]
     : undefined;
 
   const relayAgent = relayAgentsQuery.data?.find(
@@ -303,7 +296,7 @@ export function UserProfilePanel({
   // the relay routes and the client decrypts those frames with the owner's OWN
   // key, so the agent's seckey is never needed. Computed here (before the gates
   // that consume it) so visibility keys off declared ownership, not key custody.
-  const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
+  const isCurrentUserOwner = ownsAuthorAgent(profile, currentAgentId);
   // The viewer may see owner-scoped data if they declared-own the agent OR they
   // manage it locally (older agents may not advertise an owner pubkey). Every
   // real boundary is server-side, so this only controls what UI we paint.
@@ -331,9 +324,9 @@ export function UserProfilePanel({
     enabled: viewerIsOwner && Boolean(effectivePubkey),
   });
   const isSelf =
-    currentPubkey !== undefined &&
+    currentAgentId !== undefined &&
     pubkeyLower.length > 0 &&
-    pubkeyLower === currentPubkey.toLowerCase();
+    pubkeyLower === currentAgentId.toLowerCase();
   const canViewActivity =
     viewerIsOwner &&
     Boolean(effectivePubkey) &&
@@ -411,7 +404,6 @@ export function UserProfilePanel({
       deleteManagedAgent: deleteAgentMutation.mutateAsync,
       managedAgent,
       managedAgents: managedAgentsQuery.data,
-      presenceLookup: presenceQuery.data,
       relayAgents: relayAgentsQuery.data,
     });
 
@@ -449,9 +441,7 @@ export function UserProfilePanel({
 
   const { handleAgentPrimaryAction, handleAgentRestart } =
     useAgentLifecycleActions({
-      channels: channelsQuery.data,
       managedAgent,
-      relayAgents: relayAgentsQuery.data,
       startManagedAgent: startAgentMutation.mutateAsync,
       stopManagedAgent: stopAgentMutation.mutateAsync,
     });
@@ -679,7 +669,7 @@ export function UserProfilePanel({
       );
     }
 
-    if (currentPubkey === undefined || isOwner !== true) {
+    if (currentAgentId === undefined || isOwner !== true) {
       return null;
     }
 
@@ -687,11 +677,11 @@ export function UserProfilePanel({
     return (
       currentProfile?.nip05Handle?.trim() ||
       currentProfile?.displayName?.trim() ||
-      truncatePubkey(currentPubkey)
+      truncatePubkey(currentAgentId)
     );
   }, [
     currentProfileQuery.data,
-    currentPubkey,
+    currentAgentId,
     isOwner,
     ownerProfileQuery.data,
     ownerPubkey,
@@ -702,7 +692,7 @@ export function UserProfilePanel({
       : ownerHandle
     : null;
   const ownerProfilePubkey =
-    ownerPubkey ?? (isOwner === true ? (currentPubkey ?? null) : null);
+    ownerPubkey ?? (isOwner === true ? (currentAgentId ?? null) : null);
   const ownerAvatarProfile = ownerPubkey
     ? ownerProfileQuery.data
     : currentProfileQuery.data;
@@ -830,7 +820,6 @@ export function UserProfilePanel({
           relayAgent={relayAgent}
           tab={tab}
           unfollowMutation={unfollowMutation}
-          userStatus={userStatus}
         />
       ) : null}
       {view === "memories" && effectivePubkey ? (

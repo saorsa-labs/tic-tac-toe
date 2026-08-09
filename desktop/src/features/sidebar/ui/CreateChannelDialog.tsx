@@ -12,7 +12,7 @@ import {
   CreateChannelFormFooter,
 } from "@/features/sidebar/ui/CreateChannelFormFields";
 
-type ChannelKind = "stream" | "forum";
+type ChannelKind = "stream";
 
 type CreateChannelDialogProps = {
   /** Which kind of channel to create, or null when closed. */
@@ -44,7 +44,7 @@ export function CreateChannelDialog({
     onCreated: () => onOpenChange(false),
   });
 
-  const kindLabel = channelKind === "forum" ? "forum" : "channel";
+  const kindLabel = "channel";
 
   return (
     <Dialog
@@ -61,11 +61,7 @@ export function CreateChannelDialog({
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
         title={`Create a new ${kindLabel}`}
-        description={
-          channelKind === "forum"
-            ? "Forums organize threaded discussions around a topic."
-            : "Channels are real-time streams for team conversation."
-        }
+        description="Channels are real-time streams for team conversation."
         footer={<CreateChannelFormFooter form={form} />}
       >
         <form

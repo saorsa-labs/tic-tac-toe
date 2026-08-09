@@ -10,6 +10,7 @@ import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePrel
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
+import { nativeMessageCapabilities } from "@/features/messages/lib/nativeMessaging";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -29,6 +30,12 @@ import {
   type DirectMessageIntroParticipant,
 } from "./DirectMessageIntroAvatarStack";
 import { useSettleGatedPrependMessages } from "./useSettleGatedPrependMessages";
+import {
+  initialSemanticBottomState,
+  reduceSemanticBottom,
+  type SemanticBottomEvent,
+  type SemanticBottomState,
+} from "./semanticBottomState";
 
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
@@ -55,7 +62,7 @@ type MessageTimelineProps = {
   onEntranceMessageComplete?: (messageId: string) => void;
   emptyTitle?: string;
   emptyDescription?: string;
-  currentPubkey?: string;
+  currentAgentId?: string;
   fetchOlder?: () => Promise<void>;
   hasOlderMessages?: boolean;
   /**
@@ -157,7 +164,7 @@ const MessageTimelineBase = React.forwardRef<
     onEntranceMessageComplete,
     emptyTitle = "No messages yet",
     emptyDescription = "Send the first message to start the thread.",
-    currentPubkey,
+    currentAgentId,
     fetchOlder,
     hasComposerOverlay = true,
     hasOlderMessages = true,
@@ -279,10 +286,6 @@ const MessageTimelineBase = React.forwardRef<
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
   const [isSemanticallyAtBottom, setIsSemanticallyAtBottom] =
     React.useState(true);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset semantic tail state when the active channel changes
-  React.useEffect(() => {
-    setIsSemanticallyAtBottom(true);
-  }, [channelId]);
   // Zulip-style data semantics: once the reader leaves the bottom, keep the
   // virtualizer's logical tail frozen. Live arrivals accumulate behind the
   // "new messages" affordance instead of changing Virtua's item model under
@@ -342,60 +345,144 @@ const MessageTimelineBase = React.forwardRef<
     virtualizerRenderVersion,
   });
 
-  const hasConfirmedVirtualizerBottomRef = React.useRef(false);
-  const bottomConfirmationChannelRef = React.useRef(channelId);
-  if (bottomConfirmationChannelRef.current !== channelId) {
-    bottomConfirmationChannelRef.current = channelId;
-    hasConfirmedVirtualizerBottomRef.current = false;
-  }
-  const suppressNextSemanticBottomRef = React.useRef(false);
-  const semanticAtBottomRef = React.useRef(isSemanticallyAtBottom);
-  semanticAtBottomRef.current = isSemanticallyAtBottom;
-  const semanticBottomRafRef = React.useRef<number | null>(null);
-  const queueSemanticBottom = React.useCallback((atBottom: boolean) => {
-    semanticAtBottomRef.current = atBottom;
-    if (semanticBottomRafRef.current !== null) {
-      window.cancelAnimationFrame(semanticBottomRafRef.current);
-    }
-    semanticBottomRafRef.current = window.requestAnimationFrame(() => {
-      semanticBottomRafRef.current = null;
-      setIsSemanticallyAtBottom(atBottom);
-    });
+  const stateRef = React.useRef<SemanticBottomState>(
+    initialSemanticBottomState(),
+  );
+  // Monotonic rAF clock. The reducer compares a virtualizer(true)'s frame
+  // against `ignoreUntilFrame` to separate the immediate synthetic post-freeze
+  // emission from a later genuine physical return. This counter advances only
+  // on rAFs the component schedules (the deferred commit + settle ticks), so
+  // the reducer's frame arithmetic stays deterministic — no wall-clock timers.
+  const frameRef = React.useRef(0);
+  const commitRafRef = React.useRef<number | null>(null);
+  const settleRafRef = React.useRef<number | null>(null);
+  // Advance the rAF clock past the ignore window armed by a freeze commit.
+  // Self-terminating: it stops once frameRef reaches ignoreUntilFrame, so a
+  // virtualizer(true) landing during the ticks reads before the boundary
+  // (synthetic) while one afterwards reads at/after it (genuine return).
+  // Bounded to FREEZE_IGNORE_FRAMES ticks — never an open rAF loop.
+  const scheduleSettleTicks = React.useCallback(() => {
+    const tick = () => {
+      settleRafRef.current = null;
+      frameRef.current += 1;
+      if (frameRef.current < stateRef.current.ignoreUntilFrame) {
+        settleRafRef.current = window.requestAnimationFrame(tick);
+      }
+    };
+    settleRafRef.current = window.requestAnimationFrame(tick);
   }, []);
+  // Reduce an event into the authoritative state and mirror the committed
+  // semantic flag into React state (the buffer + unread pill read it). There
+  // is no separate eager ref: the reducer's semanticAtBottom is the single
+  // source of truth, so a render-time mirror can never clobber an eager write.
+  // Callers follow with syncCommitRaf() so rAF scheduling derives purely from
+  // reducer `pending`.
+  const applyEvent = React.useCallback((event: SemanticBottomEvent) => {
+    const prev = stateRef.current;
+    const next = reduceSemanticBottom(prev, event);
+    stateRef.current = next;
+    if (next.semanticAtBottom !== prev.semanticAtBottom) {
+      setIsSemanticallyAtBottom(next.semanticAtBottom);
+    }
+  }, []);
+  // Derive the deferred-commit rAF solely from reducer `pending`: schedule one
+  // frame when a freeze is queued, cancel it when nothing is pending
+  // (authoritative release, channel reset, or a bounce-back true that cleared
+  // pending). The commit applies the deferred value via `flush` and, for a
+  // freeze, advances the clock through the ignore window.
+  const syncCommitRaf = React.useCallback(() => {
+    const wantsRaf = stateRef.current.pending !== null;
+    if (wantsRaf && commitRafRef.current === null) {
+      commitRafRef.current = window.requestAnimationFrame(() => {
+        commitRafRef.current = null;
+        frameRef.current += 1;
+        applyEvent({ type: "flush", frame: frameRef.current });
+        if (stateRef.current.ignoreUntilFrame > 0) {
+          scheduleSettleTicks();
+        }
+      });
+    } else if (!wantsRaf && commitRafRef.current !== null) {
+      window.cancelAnimationFrame(commitRafRef.current);
+      commitRafRef.current = null;
+    }
+  }, [applyEvent, scheduleSettleTicks]);
   React.useEffect(
     () => () => {
-      if (semanticBottomRafRef.current !== null) {
-        window.cancelAnimationFrame(semanticBottomRafRef.current);
+      if (commitRafRef.current !== null) {
+        window.cancelAnimationFrame(commitRafRef.current);
+      }
+      if (settleRafRef.current !== null) {
+        window.cancelAnimationFrame(settleRafRef.current);
       }
     },
     [],
   );
+  // Authoritative synchronous release (Jump-to-latest / own message): routes
+  // through the reducer's `release`, which clears any queued freeze so a stale
+  // rAF cannot re-freeze. queueSemanticBottom is gone — virtualizer-driven
+  // transitions go through applyEvent + the deferred flush above.
+  const commitSemanticBottom = React.useCallback(
+    (atBottom: boolean) => {
+      applyEvent(
+        atBottom
+          ? { type: "release" }
+          : { type: "virtualizer", atBottom: false, frame: frameRef.current },
+      );
+      syncCommitRaf();
+    },
+    [applyEvent, syncCommitRaf],
+  );
+  const channelResetRef = React.useRef(channelId);
+  if (channelResetRef.current !== channelId) {
+    channelResetRef.current = channelId;
+    // MessageTimeline is reused across channels (only the scroll container
+    // remounts), so the unmount cleanup above never runs between switches.
+    // Reset synchronously during render — before paint, before any queued rAF
+    // fires — by running the reducer's channelReset and cancelling the previous
+    // channel's pending commit + settle ticks. confirmedBottom resets to false
+    // so Virtua's mount-convergence transient on the new channel is ignored.
+    if (commitRafRef.current !== null) {
+      window.cancelAnimationFrame(commitRafRef.current);
+      commitRafRef.current = null;
+    }
+    if (settleRafRef.current !== null) {
+      window.cancelAnimationFrame(settleRafRef.current);
+      settleRafRef.current = null;
+    }
+    const prevChannel = stateRef.current;
+    stateRef.current = reduceSemanticBottom(prevChannel, {
+      type: "channelReset",
+    });
+    if (stateRef.current.semanticAtBottom !== prevChannel.semanticAtBottom) {
+      setIsSemanticallyAtBottom(stateRef.current.semanticAtBottom);
+    }
+  }
   const handleVirtualizerAtBottomStateChange = React.useCallback(
     (atBottom: boolean) => {
-      // Virtua can emit an intermediate non-bottom offset while its initial
-      // scroll-to-end is still converging. Do not turn that mount transient
-      // into a semantic dataset freeze: wait until this channel has reached a
-      // confirmed bottom once, then track genuine bottom -> history movement.
+      // The reducer ignores a leave until this channel has confirmed bottom
+      // once (confirmedBottom), so Virtua's initial scroll-to-end convergence
+      // transient never freezes the tail. A virtualizer(true) carries the
+      // current frame so the reducer can classify it as synthetic (inside the
+      // ignore window) or a genuine physical return (at/after the boundary).
       if (atBottom) {
-        hasConfirmedVirtualizerBottomRef.current = true;
+        applyEvent({
+          type: "virtualizer",
+          atBottom: true,
+          frame: frameRef.current,
+        });
         onVirtualizerAtBottomStateChange(true);
-        if (suppressNextSemanticBottomRef.current) {
-          // Freezing the tail shortens Virtua's model and can itself make the
-          // current offset report "at bottom". That synthetic transition must
-          // not immediately release the snapshot and oscillate forever.
-          suppressNextSemanticBottomRef.current = false;
-        } else if (!semanticAtBottomRef.current) {
-          queueSemanticBottom(true);
-        }
-      } else if (hasConfirmedVirtualizerBottomRef.current) {
+        syncCommitRaf();
+      } else if (stateRef.current.confirmedBottom) {
         onVirtualizerAtBottomStateChange(false);
-        if (semanticAtBottomRef.current) {
-          suppressNextSemanticBottomRef.current = true;
-          queueSemanticBottom(false);
-        }
+        applyEvent({
+          type: "virtualizer",
+          atBottom: false,
+          frame: frameRef.current,
+        });
+        syncCommitRaf();
       }
     },
-    [onVirtualizerAtBottomStateChange, queueSemanticBottom],
+    [applyEvent, onVirtualizerAtBottomStateChange, syncCommitRaf],
   );
 
   const timelineIntroSurface = selectTimelineIntroSurface({
@@ -424,9 +511,9 @@ const MessageTimelineBase = React.forwardRef<
     // The user's own send is the deliberate Zulip exception: release buffered
     // output before arming the next-append bottom pin so the sent row can enter
     // Virtua's model and become the new physical floor.
-    setIsSemanticallyAtBottom(true);
+    commitSemanticBottom(true);
     scrollToBottomOnNextUpdate();
-  }, [scrollToBottomOnNextUpdate]);
+  }, [commitSemanticBottom, scrollToBottomOnNextUpdate]);
 
   React.useImperativeHandle(
     ref,
@@ -607,7 +694,7 @@ const MessageTimelineBase = React.forwardRef<
       channelId={channelId}
       channelName={channelName}
       channelType={channelType}
-      currentPubkey={currentPubkey}
+      currentAgentId={currentAgentId}
       firstUnreadMessageId={firstUnreadMessageId}
       followThreadById={followThreadById}
       highlightedMessageId={highlightedMessageId}
@@ -623,15 +710,21 @@ const MessageTimelineBase = React.forwardRef<
       historyExhausted={renderedHistoryExhausted}
       threadSummaries={threadSummaries}
       messages={renderedMessages}
-      onDelete={onDelete}
-      onEdit={onEdit}
+      onDelete={
+        nativeMessageCapabilities.canDeleteMessage ? onDelete : undefined
+      }
+      onEdit={nativeMessageCapabilities.canEditMessage ? onEdit : undefined}
       onMarkUnread={onMarkUnread}
       onMarkRead={onMarkRead}
-      onReply={onReply}
+      onReply={nativeMessageCapabilities.canReplyInThread ? onReply : undefined}
       isSendingVideoReviewComment={isSendingVideoReviewComment}
       onSendVideoReviewComment={onSendVideoReviewComment}
       onStartReached={loadOlderViaVirtualizer}
-      onToggleReaction={onToggleReaction}
+      onToggleReaction={
+        nativeMessageCapabilities.canToggleReaction
+          ? onToggleReaction
+          : undefined
+      }
       onVirtualizerApiChange={setTimelineVirtualizerApi}
       onVirtualizerRangeChanged={handleVirtualizerRangeChanged}
       onVirtualizerScrollerChange={setVirtualizerScrollParent}
@@ -831,7 +924,7 @@ const MessageTimelineBase = React.forwardRef<
                     : "Jump to latest"
               }
               onClick={() => {
-                setIsSemanticallyAtBottom(true);
+                commitSemanticBottom(true);
                 window.requestAnimationFrame(() => scrollToBottom("auto"));
               }}
               testId="message-scroll-to-latest"

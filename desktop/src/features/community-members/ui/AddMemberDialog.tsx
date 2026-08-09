@@ -2,10 +2,10 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  useAddRelayMemberMutation,
-  useRelayMembersQuery,
+  useAddNativeMemberMutation,
+  useNativeMembersQuery,
 } from "@/features/community-members/hooks";
-import type { RelayMemberRole } from "@/shared/api/types";
+import type { CommunityMemberRole } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -19,7 +19,7 @@ import { Input } from "@/shared/ui/input";
 
 const PUBKEY_REGEX = /^[0-9a-f]{64}$/;
 
-const ROLE_OPTIONS: Array<{ value: RelayMemberRole; label: string }> = [
+const ROLE_OPTIONS: Array<{ value: CommunityMemberRole; label: string }> = [
   { value: "member", label: "Member" },
   { value: "admin", label: "Admin" },
 ];
@@ -33,10 +33,10 @@ export function AddMemberDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const addMutation = useAddRelayMemberMutation();
-  const membersQuery = useRelayMembersQuery();
+  const addMutation = useAddNativeMemberMutation();
+  const membersQuery = useNativeMembersQuery();
   const [pubkey, setPubkey] = React.useState("");
-  const [role, setRole] = React.useState<RelayMemberRole>("member");
+  const [role, setRole] = React.useState<CommunityMemberRole>("member");
 
   const normalizedPubkey = pubkey.trim().toLowerCase();
   const isValidPubkey = PUBKEY_REGEX.test(normalizedPubkey);

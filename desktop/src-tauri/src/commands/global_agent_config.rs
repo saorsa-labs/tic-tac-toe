@@ -97,9 +97,7 @@ pub async fn set_global_agent_config(
     //
     // For each candidate: stop under the lock (re-verifying eligibility after
     // sync_managed_agent_processes), then start via start_local_agent_with_preflight
-    // — the same path as a manual restart.  This ensures owner_hex is computed
-    // and passed (NIP-OA auth_tag fallback), the persona is re-snapshotted, and
-    // last_error is persisted on failure.
+    // so the persona is re-snapshotted and last_error is persisted on failure.
     //
     // Errors are non-fatal; the caller always receives the saved config.
     // failed_restart_count surfaces stops that succeeded but respawn failed.
@@ -235,11 +233,10 @@ fn collect_restart_candidates(
 ///    `personas_snapshot` is reused here instead of loading from disk again.
 ///
 /// 2. **Start via the normal preflight path** — calls
-///    `start_local_agent_with_preflight`, which computes and passes `owner_hex`
-///    (NIP-OA fallback for legacy records without `auth_tag`), re-snapshots the
-///    persona (agent starts with current persona config), saves the updated
-///    record, and retains the event for relay sync.  On failure, `last_error` is
-///    persisted under lock so the UI surfaces a diagnosable stopped state.
+///    `start_local_agent_with_preflight`, which re-snapshots the persona (the
+///    agent starts with current persona config), saves the updated record, and
+///    provisions the native child runtime. On failure, `last_error` is persisted
+///    under lock so the UI surfaces a diagnosable stopped state.
 ///
 /// All errors are logged to stderr. Returns `RestartOutcome::FailedAfterStop`
 /// when the stop succeeded but the spawn failed — the caller surfaces this as
@@ -345,10 +342,10 @@ async fn restart_local_agent_on_config_change(
         }
     };
 
-    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
+    let group_ids: Vec<_> = runtime_keys.into_iter().map(|key| key.group_id).collect();
     use tauri::Manager;
     let state = app.state::<AppState>();
-    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
+    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &group_ids)
         .await
     {
         Ok(_) => {

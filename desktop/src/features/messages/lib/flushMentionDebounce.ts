@@ -38,7 +38,7 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   candidates: readonly T[];
   activePersonaIds: ReadonlySet<string>;
   channelType?: ChannelType | null;
-  currentPubkey?: string | null;
+  currentAgentId?: string | null;
   ownerProfiles?: UserProfileLookup;
   profiles?: UserProfileLookup;
 }): FlushMentionDebounceResult | null {
@@ -75,7 +75,7 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
       candidate,
       label,
       channelType: opts.channelType,
-      currentPubkey: opts.currentPubkey,
+      currentAgentId: opts.currentAgentId,
       ownerProfiles: opts.ownerProfiles,
       profiles: opts.profiles,
     }),

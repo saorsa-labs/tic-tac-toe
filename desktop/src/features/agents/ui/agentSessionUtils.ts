@@ -1,5 +1,3 @@
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-
 export function getToolString(
   record: Record<string, unknown>,
   keys: string[],
@@ -117,7 +115,7 @@ export function isInlineImageData(source: string): boolean {
 
 /** Resolve a tool image source for display (inline data URIs or relay URLs). */
 export function resolveToolImageSrc(source: string): string {
-  return isInlineImageData(source) ? source : rewriteRelayUrl(source);
+  return isInlineImageData(source) ? source : source;
 }
 
 function getToolNumber(

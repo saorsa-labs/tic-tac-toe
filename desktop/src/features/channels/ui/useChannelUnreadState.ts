@@ -29,7 +29,7 @@ import { useWelcomeInitialUnreadSuppression } from "./useWelcomeInitialUnreadSup
 type UseChannelUnreadStateOptions = {
   activeChannelId: string | null;
   timelineMessages: TimelineMessage[];
-  currentPubkey: string | undefined;
+  currentAgentId: string | undefined;
   openThreadHeadId: string | null;
   threadReplyTargetId: string | null;
   expandedThreadReplyIds: ReadonlySet<string>;
@@ -57,7 +57,7 @@ type UseChannelUnreadStateOptions = {
 export function useChannelUnreadState({
   activeChannelId,
   timelineMessages,
-  currentPubkey,
+  currentAgentId,
   openThreadHeadId,
   threadReplyTargetId,
   expandedThreadReplyIds,
@@ -198,10 +198,10 @@ export function useChannelUnreadState({
         ),
         openFrontierSeconds,
         isActiveChannelForcedUnread || isActiveWelcomeInitialUnreadSuppressed,
-        currentPubkey,
+        currentAgentId,
       ),
     [
-      currentPubkey,
+      currentAgentId,
       isActiveChannelForcedUnread,
       isActiveWelcomeInitialUnreadSuppressed,
       openFrontierSeconds,
@@ -295,9 +295,9 @@ export function useChannelUnreadState({
         snapshot?.has(replyId)
           ? (snapshot.get(replyId) ?? null)
           : getMessageReadAt(replyId),
-      currentPubkey,
+      currentAgentId,
     );
-  }, [currentPubkey, getMessageReadAt, openThreadHeadId, threadMessages]);
+  }, [currentAgentId, getMessageReadAt, openThreadHeadId, threadMessages]);
   // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
   // to the open thread's subtree and decided per-reply against the live
   // per-message read state (getMessageReadAt): each collapsed row's badge
@@ -317,7 +317,7 @@ export function useChannelUnreadState({
             visibleReplyIds: threadMessages.map((entry) => entry.message.id),
             expandedReplyIds: expandedThreadReplyIds,
             getReadAt: getMessageReadAt,
-            currentPubkey,
+            currentAgentId,
             isForcedUnread: isMsgForcedUnread,
           })
         : new Map<string, number>(),
@@ -328,7 +328,7 @@ export function useChannelUnreadState({
       getMessageReadAt,
       expandedThreadReplyIds,
       getReplyDescendantIdsForMessage,
-      currentPubkey,
+      currentAgentId,
       isMsgForcedUnread,
       readStateVersion,
       forcedUnreadVersion,
@@ -348,11 +348,11 @@ export function useChannelUnreadState({
         repliesByRootId,
         getMessageReadAt,
         (rootId) => !isThreadMuted(rootId),
-        currentPubkey,
+        currentAgentId,
         isMsgForcedUnread,
       ),
     [
-      currentPubkey,
+      currentAgentId,
       timelineMessages,
       repliesByRootId,
       getMessageReadAt,
@@ -387,7 +387,7 @@ export function useChannelUnreadState({
       const { firstUnreadReplyId } = computeThreadUnreadMarker(
         [message],
         getMessageReadAt,
-        currentPubkey,
+        currentAgentId,
         isMsgForcedUnread,
       );
       return firstUnreadReplyId !== null;
@@ -395,7 +395,7 @@ export function useChannelUnreadState({
     [
       messageById,
       getMessageReadAt,
-      currentPubkey,
+      currentAgentId,
       isMsgForcedUnread,
       readStateVersion,
       forcedUnreadVersion,

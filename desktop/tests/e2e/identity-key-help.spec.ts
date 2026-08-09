@@ -1,58 +1,50 @@
 import { expect, test } from "@playwright/test";
 
-import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
+
+// Removed in M2: the first-run "identity key help" trigger/dialog and its
+// `*-seen` persistence flag. The x0x daemon owns the AgentId (64-hex) plus four
+// speakable words, so there is no user-facing "identity key" concept to explain
+// and no private-key surface to back up or reveal. This spec guards that
+// removal: the help surface must not leak back, and no key material may be
+// exposed on first launch.
 
 const HELP_SEEN_KEY = "buzz.machine-onboarding.identity-key-help-seen.v1";
 
-test("identity key help explains the first-run choice", async ({ page }) => {
+test("first launch exposes no identity-key help surface and persists no help flag", async ({
+  page,
+}) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
   await page.goto("/");
 
-  const trigger = page.getByTestId("identity-key-help-trigger");
-  // No initial opacity-0 assertion: on a slow runner the 2s reveal timer can
-  // fire before the first assertion runs, failing the test for the wrong
-  // reason. The reveal + persistence assertions below carry the coverage.
-  await expect(trigger).toHaveCSS("opacity", "1", { timeout: 5000 });
+  // The M2 first-launch gate renders under the daemon identity…
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
+
+  // …and the removed private-key help surface is absent.
+  await expect(page.getByTestId("identity-key-help-trigger")).toHaveCount(0);
+  await expect(page.getByTestId("identity-key-help-dialog")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "What’s an identity key?" }),
+  ).toHaveCount(0);
+  // No nsec/npub import or reveal control is reachable from first launch.
+  await expect(page.getByTestId("nostr-import-nsec-input")).toHaveCount(0);
+  await expect(page.getByTestId("nsec-value")).toHaveCount(0);
+
+  // The help-seen persistence flag is never written.
   await expect
     .poll(() =>
       page.evaluate((key) => localStorage.getItem(key), HELP_SEEN_KEY),
     )
-    .toBe("true");
+    .toBeNull();
 
-  await page.setViewportSize({ width: 720, height: 620 });
-  await trigger.click();
-
-  const dialog = page.getByTestId("identity-key-help-dialog");
-  await expect(dialog).toBeVisible();
-  await waitForAnimations(page);
-  await expect(
-    dialog.getByRole("heading", { name: "What’s an identity key?" }),
-  ).toBeVisible();
-  await expect(dialog).toHaveClass(/shadow-none/);
-  await expect(page.getByTestId("dialog-overlay")).toHaveCSS(
-    "background-color",
-    "rgba(0, 0, 0, 0)",
-  );
-  const dialogWrapper = dialog.locator("..");
-  await expect(dialogWrapper).toHaveCSS("overflow-x", "hidden");
-  const dialogBounds = await dialog.boundingBox();
-  expect(dialogBounds).not.toBeNull();
-  expect(dialogBounds?.x).toBeGreaterThanOrEqual(0);
-  expect(
-    (dialogBounds?.x ?? 0) + (dialogBounds?.width ?? 0),
-  ).toBeLessThanOrEqual(720);
-
-  await page.keyboard.press("Escape");
-  await expect(dialog).not.toBeVisible();
-  await expect(trigger).toHaveCSS("opacity", "1");
-
+  // Stability across navigation: a reload must not bring the surface back.
   await page.reload();
-  await expect(page.getByTestId("identity-key-help-trigger")).toHaveCSS(
-    "opacity",
-    "1",
-  );
+  await expect(page.getByTestId("identity-key-help-trigger")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "What’s an identity key?" }),
+  ).toHaveCount(0);
 });

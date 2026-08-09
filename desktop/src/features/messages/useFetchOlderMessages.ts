@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
+import { useResolvedHistoryScope } from "@/features/messages/lib/useResolvedHistoryScope";
 import {
   channelWindowHasMore,
   channelWindowHistoryExhausted,
@@ -14,6 +15,9 @@ import type { Channel } from "@/shared/api/types";
 export function useFetchOlderMessages(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
+  // Subscribe to the resolved scope so the scope-aware window keys recompute
+  // (and the observers re-read) when the group's stable historyScope arrives.
+  useResolvedHistoryScope(channelId);
   const [isFetchingOlder, setIsFetchingOlder] = useState(false);
   const isFetchingOlderRef = useRef(false);
 

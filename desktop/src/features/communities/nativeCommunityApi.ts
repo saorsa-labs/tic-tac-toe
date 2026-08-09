@@ -1,12 +1,10 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import {
   x0xCreateGroup,
-  x0xJoinGroup,
   x0xLeaveGroup,
   x0xListGroups,
   type X0xNamedGroup,
   type X0xNamedGroupSummary,
-  type X0xGroupPolicyPreset,
 } from "@/shared/api/tauriNativeX0x";
 import type { Community } from "./types";
 
@@ -21,17 +19,12 @@ export function requireAgentId(value: string): string {
   return normalized;
 }
 
-/**
- * Keep the legacy Community render shape while making the opaque daemon group
- * id authoritative. The synthetic URL is a UI namespace only and is never
- * opened as a relay connection.
- */
+/** Convert the daemon's authoritative group summary into the UI model. */
 export function nativeGroupToCommunity(group: X0xNamedGroupSummary): Community {
   return {
     id: group.groupId,
     groupId: group.groupId,
     name: group.name,
-    relayUrl: `x0x://group/${encodeURIComponent(group.groupId)}`,
     addedAt: new Date(0).toISOString(),
   };
 }
@@ -55,24 +48,10 @@ export async function createNativeCommunity(input: {
   name: string;
   description?: string;
   displayName?: string;
-  preset?: X0xGroupPolicyPreset;
 }): Promise<X0xNamedGroup> {
   const name = input.name.trim();
   if (!name) throw new Error("Community name is required.");
   const group = await x0xCreateGroup({ ...input, name });
-  await bindNativeGroup(group.groupId);
-  return group;
-}
-
-export async function joinNativeCommunity(input: {
-  invite: string;
-  displayName?: string;
-}): Promise<X0xNamedGroup> {
-  const invite = input.invite.trim();
-  if (!invite.startsWith("x0x://invite/") && invite.length === 0) {
-    throw new Error("Enter an x0x invite link.");
-  }
-  const group = await x0xJoinGroup({ ...input, invite });
   await bindNativeGroup(group.groupId);
   return group;
 }

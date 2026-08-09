@@ -26,7 +26,7 @@ fn validate_accepts_valid_env_vars() {
 
 #[test]
 fn validate_rejects_reserved_key() {
-    let config = config_with_env(&[("BUZZ_PRIVATE_KEY", "should-not-be-settable")]);
+    let config = config_with_env(&[("X0X_DATA_DIR", "/tmp/attacker-owned")]);
     let err = validate_global_config(&config).unwrap_err();
     assert!(
         err.contains("reserved"),
@@ -79,7 +79,7 @@ fn validate_ignores_empty_values_for_reserved_key_check() {
     // A reserved key with an EMPTY value is a no-op (stripped at save time).
     // validate_global_config skips empty-value entries so it does not reject
     // an empty clear for a key that happens to share a name with a reserved key.
-    let config = config_with_env(&[("BUZZ_PRIVATE_KEY", "")]);
+    let config = config_with_env(&[("X0X_DATA_DIR", "")]);
     // Strip is done inside validate — empty values are stripped before checking.
     assert!(
         validate_global_config(&config).is_ok(),
@@ -302,9 +302,6 @@ fn bare_record() -> ManagedAgentRecord {
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: None,
-        private_key_nsec: "".to_string(),
-        auth_tag: None,
-        relay_url: "ws://localhost:3000".to_string(),
         avatar_url: None,
         acp_command: "buzz-acp".to_string(),
         agent_command: "goose".to_string(),
@@ -345,7 +342,6 @@ fn bare_record() -> ManagedAgentRecord {
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
-        relay_mesh: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
@@ -466,44 +462,6 @@ fn resolve_global_fallback_when_record_and_persona_have_none() {
         provider,
         Some("global-provider"),
         "global provider must be used when record and persona have none"
-    );
-}
-
-/// Tier 4 — no persona linked: record.persona_id is None, record has no
-/// model/provider; global defaults must still fill in (persona lookup skipped).
-#[cfg(feature = "mesh-llm")]
-#[test]
-fn inherited_shared_compute_translates_to_supported_agent_transport() {
-    let record = bare_record();
-    let personas: Vec<AgentDefinition> = vec![];
-    let global = GlobalAgentConfig {
-        model: Some("auto".to_string()),
-        provider: Some(super::super::RELAY_MESH_PROVIDER_ID.to_string()),
-        ..Default::default()
-    };
-    let runtime = super::super::known_acp_runtime("buzz-agent").expect("buzz-agent runtime");
-
-    let effective = super::super::readiness::resolve_effective_agent_env(
-        &record,
-        &personas,
-        Some(runtime),
-        &global,
-    );
-
-    assert_eq!(
-        effective.env.get("BUZZ_AGENT_PROVIDER").map(String::as_str),
-        Some("openai")
-    );
-    assert_eq!(
-        effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
-        Some("auto")
-    );
-    assert_eq!(
-        effective
-            .env
-            .get("OPENAI_COMPAT_BASE_URL")
-            .map(String::as_str),
-        Some(super::super::RELAY_MESH_API_BASE_URL)
     );
 }
 

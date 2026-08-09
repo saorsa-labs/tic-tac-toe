@@ -175,3 +175,36 @@ Milestones map onto the staged fork plan (`buzz-fork-plan.md`):
   REST/WS + history backfill; bridge removed from the app. Acceptance
   tests 2, 4, 5 pass; full Studio functional pass.
 - **M4 (v2 opens) — symphony/ACP + first company template (Stage 4).**
+
+### Implementation snapshot — 2026-08-05
+
+This document remains a draft product contract; the implementation status
+below is evidence, not approval of the draft or of the separately governed
+secure-group design.
+
+- **M0:** implemented. The app consumes the ADR-0023 history/search surface
+  and owns an isolated spawn-or-attach `x0xd` lifecycle.
+- **M1/M2 architecture:** the shipping app did not retain the planned embedded
+  Nostr bridge stage. Production paths have cut directly to x0xd REST/WS and
+  AgentId identity; the no-relay gate passes. The bridge remains a separate
+  interoperability project, not an application runtime.
+- **M3:** implementation is advanced but the milestone is not accepted. Native
+  history/feed/search, DM and public-group messaging, public-group membership,
+  presence, identity, and managed-agent control are wired; unsupported forum,
+  canvas, hosted-join, and relay surfaces are removed. A real-process acceptance
+  harness now starts two fresh, isolated `x0xd` nodes, proves a direct
+  SignedPublic group message is observed by the peer with zero relayed links,
+  restarts the sender on the same data directory, and finds the exact payload in
+  durable history. Remaining release evidence: the two-physical-machine/WAN
+  pass, the 50-message FTS scenario, the managed-agent reply, and durable group-
+  thread publishing. The current x0xd public-message API has no ancestry fields,
+  so group replies fail closed rather than storing local-only thread state.
+- **M4:** a first public-only Company template and Symphony/ACP lifecycle exist
+  with durable fail-closed checkpoints, explicit same-id resume, terminal
+  cancellation, boot reconciliation, and a race-free single-active-instance
+  reservation. The current Symphony runner supports one preset per process, so
+  the template uses one supported harness; multi-harness role routing is not
+  claimed. Live x0xd + Symphony + managed-agent acceptance remains outstanding.
+- **Secure groups and invites:** not implemented as product surfaces. Invite
+  mint/join, private-group UI, and authenticated secure-message paths remain
+  gated on David's explicit approval of the x0x secure-group design.

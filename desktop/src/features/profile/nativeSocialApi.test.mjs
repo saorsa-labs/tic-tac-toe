@@ -20,9 +20,55 @@ afterEach(() => {
   handlers.clear();
 });
 
-const { addNativeContact, getNativePresence, setNativePresence } = await import(
-  "./nativeSocialApi.ts"
-);
+const {
+  addNativeContact,
+  getNativePresence,
+  listNativeAgents,
+  setNativePresence,
+} = await import("./nativeSocialApi.ts");
+
+test("active x0x community members are messageable native agents", async () => {
+  const groupId = "11".repeat(32);
+  const localAgentId = "22".repeat(32);
+  const remoteAgentId = "33".repeat(32);
+  handlers.set("x0x_get_active_group_id", () => groupId);
+  handlers.set("x0x_get_group_members", () => ({
+    members: [
+      {
+        agentId: localAgentId,
+        displayName: "Laptop",
+        state: "active",
+      },
+      {
+        agentId: remoteAgentId,
+        displayName: null,
+        state: "active",
+      },
+      {
+        agentId: "44".repeat(32),
+        displayName: "Former member",
+        state: "removed",
+      },
+    ],
+  }));
+  handlers.set("x0x_get_presence", () => ({
+    [localAgentId]: "online",
+    [remoteAgentId]: "offline",
+  }));
+
+  const agents = await listNativeAgents();
+  assert.deepEqual(
+    agents.map(({ pubkey, respondTo, channelIds }) => ({
+      pubkey,
+      respondTo,
+      channelIds,
+    })),
+    [
+      { pubkey: localAgentId, respondTo: "anyone", channelIds: [groupId] },
+      { pubkey: remoteAgentId, respondTo: "anyone", channelIds: [groupId] },
+    ],
+  );
+});
 
 test("contact add sends only a validated AgentId to authenticated x0xd", async () => {
   handlers.set("x0x_add_contact", () => null);

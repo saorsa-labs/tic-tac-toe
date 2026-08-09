@@ -6,7 +6,6 @@
 //! registered in `lib.rs` through the same `personas::` path as the export
 //! commands.
 
-use nostr::ToBech32;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -17,7 +16,6 @@ use crate::{
         load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
         ManagedAgentRecord, RespondTo,
     },
-    relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
 
@@ -305,8 +303,8 @@ pub async fn preview_agent_snapshot_import(
 ///      `memory_errors`; the agent itself is already created.
 ///
 /// Importing the same file twice yields two distinct agents with different
-/// keypairs. No source identity material (pubkey, nsec, auth_tag, relay_url,
-/// env_vars, backend, lineage) is consumed.
+/// opaque storage identifiers. No source identity or machine-local material is
+/// consumed.
 #[tauri::command]
 pub async fn confirm_agent_snapshot_import(
     input: AgentSnapshotImportConfirm,
@@ -345,37 +343,15 @@ pub async fn confirm_agent_snapshot_import(
         None
     };
 
-    // ── Phase 2: mint keys + auth tag (sync, outside lock) ───────────────────
-    let (agent_keys, private_key_nsec, pubkey, auth_tag, owner_pubkey_hex) = {
-        let owner_keys = state.signing_keys()?;
-        let agent_keys = nostr::Keys::generate();
-        let pubkey = agent_keys.public_key().to_hex();
-        let private_key_nsec = agent_keys
-            .secret_key()
-            .to_bech32()
-            .map_err(|e| format!("failed to encode agent private key: {e}"))?;
-
-        // NIP-OA auth tag: bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
-        let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
-            .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
-        let compat_agent = nostr::PublicKey::from_hex(&pubkey)
-            .map_err(|e| format!("failed to bridge agent pubkey: {e}"))?;
-        let auth_tag = Some(
-            buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
-                .map_err(|e| format!("failed to compute NIP-OA auth tag: {e}"))?,
-        );
-        let owner_pubkey_hex = owner_keys.public_key().to_hex();
-        (
-            agent_keys,
-            private_key_nsec,
-            pubkey,
-            auth_tag,
-            owner_pubkey_hex,
-        )
-    };
+    // ── Phase 2: allocate an opaque storage id (sync, outside lock) ─────────
+    let pubkey = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
 
     // ── Phase 3a: create AgentDefinition + ManagedAgentRecord (sync lock) ──────
-    let (persona, record) = {
+    let persona = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -421,9 +397,6 @@ pub async fn confirm_agent_snapshot_import(
         personas.push(persona.clone());
         save_personas(&app, &personas)?;
 
-        // Enqueue the kind:30175 persona event via the retention path.
-        super::super::pending::retain_persona_pending(&app, &state, &persona);
-
         // Build the managed agent record — no machine-local commands, no
         // secrets, no lineage from the snapshot.
         let record = ManagedAgentRecord {
@@ -431,10 +404,7 @@ pub async fn confirm_agent_snapshot_import(
             name: display_name.clone(),
             display_name: None,
             slug: None,
-            persona_id: Some(persona_id.clone()),
-            private_key_nsec: private_key_nsec.clone(),
-            auth_tag: auth_tag.clone(),
-            relay_url: String::new(), // resolves to workspace relay at runtime
+            persona_id: Some(persona_id.clone()), // resolves to workspace relay at runtime
             avatar_url: effective_avatar.clone(),
             // Machine-local commands: derive from the runtime catalog at
             // spawn time — never manufacture from snapshot data.
@@ -481,7 +451,6 @@ pub async fn confirm_agent_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
-            relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
         };
@@ -489,197 +458,27 @@ pub async fn confirm_agent_snapshot_import(
         records.push(record.clone());
         save_managed_agents(&app, &records)?;
 
-        // Enqueue the kind:30177 managed-agent event via retention.
-        // (Uses the same pattern as agents.rs::retain_managed_agent_pending
-        // inlined here to avoid cross-module private-fn access.)
-        retain_agent_pending(&app, &state, &record);
-
         crate::managed_agents::try_regenerate_nest(&app);
 
         // Notify other mounted clients of local persona+managed-agent writes,
         // matching the contract used by other local managed-agent mutations.
         let _ = app.emit("agents-data-changed", ());
 
-        (persona, record)
+        persona
     };
 
-    // ── Phase 3b: publish kind:0 profile (async, outside lock) ───────────────
-    let relay_url =
-        effective_agent_relay_url(&record.relay_url, &relay_ws_url_with_override(&state));
-    let profile_sync_error = sync_managed_agent_profile(
-        &state,
-        &relay_url,
-        &agent_keys,
-        &display_name,
-        effective_avatar.as_deref(),
-        auth_tag.as_deref(),
-    )
-    .await
-    .err();
-
-    // ── Phase 4: restore memory (async, outside lock) ─────────────────────────
+    // Relay profile sync + engram upload were removed (no native relay contract).
+    // memory_total still reports the snapshot's entry count; with no upload
+    // path, memory_written is always 0.
     let memory_total = snapshot.memory.entries.len();
-    let mut memory_written = 0usize;
-    let mut memory_errors: Vec<String> = Vec::new();
-
-    if memory_total > 0 {
-        let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)
-            .map_err(|e| format!("failed to parse owner pubkey: {e}"))?;
-
-        // Monotonic timestamp seed: use current time, bumped by 1 per entry
-        // so no two events land at the same second.
-        let base_ts = nostr::Timestamp::now().as_secs();
-
-        for (idx, entry) in snapshot.memory.entries.iter().enumerate() {
-            let body = if entry.slug == buzz_core_pkg::engram::CORE_SLUG {
-                buzz_core_pkg::engram::Body::Core {
-                    profile: entry.body.clone(),
-                }
-            } else {
-                buzz_core_pkg::engram::Body::Memory {
-                    slug: entry.slug.clone(),
-                    value: Some(entry.body.clone()),
-                }
-            };
-
-            let created_at = base_ts + idx as u64;
-            match buzz_core_pkg::engram::build_event(&agent_keys, &owner_pubkey, &body, created_at)
-            {
-                Ok(event) => {
-                    let event_json = nostr::JsonUtil::as_json(&event).into_bytes();
-                    let url = format!("{}/events", crate::relay::relay_http_base_url(&relay_url));
-                    match submit_engram_event(
-                        &state,
-                        &agent_keys,
-                        &event_json,
-                        &url,
-                        auth_tag.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(()) => memory_written += 1,
-                        Err(e) => memory_errors.push(format!("slug {:?}: {e}", entry.slug)),
-                    }
-                }
-                Err(e) => {
-                    memory_errors.push(format!("slug {:?}: build failed: {e}", entry.slug));
-                }
-            }
-        }
-    }
 
     Ok(AgentSnapshotImportResult {
         display_name,
         new_pubkey: pubkey,
         persona_id: persona.id,
-        memory_written,
+        memory_written: 0,
         memory_total,
-        memory_errors,
-        profile_sync_error,
+        memory_errors: Vec::new(),
+        profile_sync_error: None,
     })
-}
-
-/// Inline retention for the managed-agent kind:30177 event — mirrors
-/// `agents::retain_managed_agent_pending` without requiring cross-module
-/// private function access.
-fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {
-    use crate::managed_agents::{
-        agent_events::{agent_event_content, build_agent_event},
-        managed_agents_base_dir,
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-    };
-    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
-    use nostr::JsonUtil;
-
-    let result = (|| -> Result<(), String> {
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
-        let content = serde_json::to_string(&agent_event_content(record))
-            .map_err(|e| format!("failed to serialize agent content: {e}"))?;
-        let (owner_pubkey, event) = {
-            let keys = state.signing_keys()?;
-            let owner_pubkey = keys.public_key().to_hex();
-            let existing =
-                get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
-            if existing.as_ref().is_some_and(|row| row.content == content) {
-                return Ok(());
-            }
-            let event = build_agent_event(record)?
-                .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("failed to sign agent event: {e}"))?;
-            (owner_pubkey, event)
-        };
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_MANAGED_AGENT,
-                pubkey: owner_pubkey,
-                d_tag: record.pubkey.clone(),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: snapshot-import retain-agent: {e}");
-    }
-}
-
-/// POST a pre-built signed engram event to the relay, authenticating as the
-/// new agent.
-async fn submit_engram_event(
-    state: &AppState,
-    agent_keys: &nostr::Keys,
-    event_json: &[u8],
-    url: &str,
-    auth_tag: Option<&str>,
-) -> Result<(), String> {
-    use crate::relay::build_nip98_auth_header_for_keys;
-    use reqwest::Method;
-
-    // Wait before signing: the relay enforces NIP-98 freshness (±60s) and the
-    // gate may hold for up to MAX_HINT_SECONDS (300s). Building auth before the
-    // wait produces a stale `created_at` that the relay will reject.
-    crate::relay_admission::wait_for_rate_limit().await;
-    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, url, event_json)?;
-    let mut request = state
-        .http_client
-        .post(url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json");
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-    let response = request
-        .body(event_json.to_vec())
-        .send()
-        .await
-        .map_err(|e| crate::relay::classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        let msg = crate::relay::relay_error_message(response).await;
-        return Err(format!("relay rejected engram: {msg}"));
-    }
-
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("failed to read relay response: {e}"))?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("relay response not JSON: {e}"))?;
-    let accepted = parsed
-        .get("accepted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !accepted {
-        let message = parsed
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        return Err(format!("relay rejected engram: {message}"));
-    }
-    Ok(())
 }

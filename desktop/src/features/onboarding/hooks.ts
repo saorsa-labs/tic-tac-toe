@@ -16,11 +16,10 @@ import {
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
 import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
-import { ensureWelcomeCanvas } from "@/features/onboarding/welcomeCanvas";
 import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { useIdentityQuery } from "@/shared/api/hooks";
+import { useIdentityQuery, useRecoveryStateQuery } from "@/shared/api/hooks";
 import type { Channel } from "@/shared/api/types";
 import {
   createChannel,
@@ -52,14 +51,13 @@ function seedWelcomeExperience(
   const promise = (async () => {
     try {
       await ensureWelcomeTeam(channelId, communityScope);
-      await ensureWelcomeCanvas(channelId);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
         queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
       ]);
       markWelcomeChannelEnsured(pubkey, communityScope);
     } catch (error) {
-      console.warn("Failed to seed the private Welcome experience.", error);
+      console.warn("Failed to seed the Welcome experience.", error);
     }
   })().finally(() => welcomeSeedPromises.delete(key));
   welcomeSeedPromises.set(key, promise);
@@ -82,14 +80,12 @@ export async function initializeStarterChannels(
     let starterChannels: Awaited<
       ReturnType<typeof ensureStarterChannels>
     > | null = null;
-    let starterChannelsError: unknown = null;
     try {
       starterChannels = await ensureStarterChannels({
         ensureStarterChannels: ensureStarterChannelsCommand,
         getChannels,
       });
     } catch (error) {
-      starterChannelsError = error;
       console.warn("Failed to initialize public starter channels.", error);
     }
 
@@ -132,7 +128,7 @@ export async function initializeStarterChannels(
     if (focus) {
       // Refreshing can briefly replace the optimistic cache with an older relay
       // snapshot. Reinsert the just-ensured channels before announcing focus so
-      // the route can consume the pending private Welcome channel immediately.
+      // the route can consume the pending Welcome channel immediately.
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
         const byId = new Map(
           [...channels, ...starterChannelList, welcomeChannel].map(
@@ -145,16 +141,10 @@ export async function initializeStarterChannels(
       notifyWelcomeChannelReady(welcomeChannel.id);
     }
     const focusChannelId = focus ? welcomeChannel.id : undefined;
-    if (starterChannelsError) {
-      return {
-        ok: false,
-        focusChannelId,
-        reason:
-          starterChannelsError instanceof Error
-            ? starterChannelsError.message
-            : "Failed to set up starter channels",
-      };
-    }
+    // Native x0x deliberately has no relay-backed starter-channel seeding.
+    // A personal Welcome group is sufficient to finish onboarding, so the
+    // expected starter-channel rejection must not strand the user on the
+    // final setup screen after that group was created successfully.
     return { ok: true, focusChannelId };
   } catch (error) {
     console.warn("Failed to initialize starter channels.", error);
@@ -185,7 +175,7 @@ const ONBOARDING_COMPLETION_STORAGE_KEY = "buzz-onboarding-complete.v1";
 type OnboardingGateStage = "blocking" | "onboarding" | "ready";
 
 type UseFirstRunOnboardingGateOptions = {
-  currentPubkey: string | null;
+  currentAgentId: string | null;
   identityIsFetching: boolean;
   identityLost: boolean;
   identityStatus: QueryStatus;
@@ -196,9 +186,9 @@ type UseFirstRunOnboardingGateOptions = {
 };
 
 type OnboardingGateState = {
-  currentPubkey: string | null;
-  hasCompletedCurrentPubkey: boolean;
-  hasSettledCurrentPubkey: boolean;
+  currentAgentId: string | null;
+  hasCompletedCurrentAgentId: boolean;
+  hasSettledCurrentAgentId: boolean;
   isOpen: boolean;
 };
 
@@ -221,31 +211,31 @@ function readOnboardingCompletion(pubkey: string | null) {
 }
 
 function createOnboardingGateState(pubkey: string | null): OnboardingGateState {
-  const hasCompletedCurrentPubkey = readOnboardingCompletion(pubkey);
+  const hasCompletedCurrentAgentId = readOnboardingCompletion(pubkey);
 
   return {
-    currentPubkey: pubkey,
-    hasCompletedCurrentPubkey,
-    hasSettledCurrentPubkey: hasCompletedCurrentPubkey,
+    currentAgentId: pubkey,
+    hasCompletedCurrentAgentId,
+    hasSettledCurrentAgentId: hasCompletedCurrentAgentId,
     isOpen: false,
   };
 }
 
 function resolveActiveGateState(
   gateState: OnboardingGateState,
-  currentPubkey: string | null,
+  currentAgentId: string | null,
 ) {
-  return gateState.currentPubkey === currentPubkey
+  return gateState.currentAgentId === currentAgentId
     ? gateState
-    : createOnboardingGateState(currentPubkey);
+    : createOnboardingGateState(currentAgentId);
 }
 
 function updateActiveGateState(
   gateState: OnboardingGateState,
-  currentPubkey: string | null,
+  currentAgentId: string | null,
   update: (activeGateState: OnboardingGateState) => OnboardingGateState,
 ) {
-  return update(resolveActiveGateState(gateState, currentPubkey));
+  return update(resolveActiveGateState(gateState, currentAgentId));
 }
 
 function isSettledQueryStatus(status: QueryStatus) {
@@ -253,20 +243,20 @@ function isSettledQueryStatus(status: QueryStatus) {
 }
 
 function resolveOnboardingGateStage({
-  currentPubkey,
+  currentAgentId,
   gateState,
   identityIsFetching,
   identityStatus,
 }: {
-  currentPubkey: string | null;
+  currentAgentId: string | null;
   gateState: OnboardingGateState;
   identityIsFetching: boolean;
   identityStatus: QueryStatus;
 }): OnboardingGateStage {
-  const isBlockingCurrentPubkey =
-    currentPubkey !== null &&
-    !gateState.hasCompletedCurrentPubkey &&
-    (gateState.isOpen || !gateState.hasSettledCurrentPubkey);
+  const isBlockingCurrentAgentId =
+    currentAgentId !== null &&
+    !gateState.hasCompletedCurrentAgentId &&
+    (gateState.isOpen || !gateState.hasSettledCurrentAgentId);
 
   if (gateState.isOpen) {
     return "onboarding";
@@ -275,7 +265,7 @@ function resolveOnboardingGateStage({
   if (
     identityIsFetching ||
     !isSettledQueryStatus(identityStatus) ||
-    isBlockingCurrentPubkey
+    isBlockingCurrentAgentId
   ) {
     return "blocking";
   }
@@ -284,7 +274,7 @@ function resolveOnboardingGateStage({
 }
 
 export function useFirstRunOnboardingGate({
-  currentPubkey,
+  currentAgentId,
   identityIsFetching,
   identityLost,
   identityStatus,
@@ -294,59 +284,59 @@ export function useFirstRunOnboardingGate({
   profileStatus,
 }: UseFirstRunOnboardingGateOptions) {
   const [gateState, setGateState] = React.useState<OnboardingGateState>(() =>
-    createOnboardingGateState(currentPubkey),
+    createOnboardingGateState(currentAgentId),
   );
-  const activeGateState = resolveActiveGateState(gateState, currentPubkey);
-  const { hasCompletedCurrentPubkey, hasSettledCurrentPubkey } =
+  const activeGateState = resolveActiveGateState(gateState, currentAgentId);
+  const { hasCompletedCurrentAgentId, hasSettledCurrentAgentId } =
     activeGateState;
 
   React.useEffect(() => {
     setGateState((current) =>
-      current.currentPubkey === currentPubkey
+      current.currentAgentId === currentAgentId
         ? current
-        : createOnboardingGateState(currentPubkey),
+        : createOnboardingGateState(currentAgentId),
     );
-  }, [currentPubkey]);
+  }, [currentAgentId]);
 
-  // When the backend signals "identity lost" (keyring was cleared after a
-  // successful migration), force onboarding open immediately so the user can
-  // re-import their nsec. This runs once, after identity settles.
+  // When the backend signals "identity lost", force onboarding open
+  // immediately so the user can resolve a new identity. This runs once,
+  // after identity settles.
   React.useEffect(() => {
-    if (!identityLost || !currentPubkey || identityStatus !== "success") {
+    if (!identityLost || !currentAgentId || identityStatus !== "success") {
       return;
     }
     setGateState((current) =>
-      updateActiveGateState(current, currentPubkey, (activeGateState) => ({
+      updateActiveGateState(current, currentAgentId, (activeGateState) => ({
         ...activeGateState,
-        hasCompletedCurrentPubkey: false,
-        hasSettledCurrentPubkey: true,
+        hasCompletedCurrentAgentId: false,
+        hasSettledCurrentAgentId: true,
         isOpen: true,
       })),
     );
-  }, [currentPubkey, identityLost, identityStatus]);
+  }, [currentAgentId, identityLost, identityStatus]);
 
   React.useEffect(() => {
     // Fast-path: shared identity worktrees have already onboarded in the
     // main checkout. Skip unconditionally without waiting for the relay
-    // profile query. Guarded by !hasCompletedCurrentPubkey so it fires once.
+    // profile query. Guarded by !hasCompletedCurrentAgentId so it fires once.
     if (
       !forceFreshOnboarding &&
       isSharedIdentity &&
-      currentPubkey &&
+      currentAgentId &&
       identityStatus === "success" &&
-      !hasCompletedCurrentPubkey
+      !hasCompletedCurrentAgentId
     ) {
       if (typeof window !== "undefined") {
         window.localStorage.setItem(
-          onboardingCompletionStorageKey(currentPubkey),
+          onboardingCompletionStorageKey(currentAgentId),
           "true",
         );
       }
       setGateState((current) =>
-        updateActiveGateState(current, currentPubkey, (activeGateState) => ({
+        updateActiveGateState(current, currentAgentId, (activeGateState) => ({
           ...activeGateState,
-          hasCompletedCurrentPubkey: true,
-          hasSettledCurrentPubkey: true,
+          hasCompletedCurrentAgentId: true,
+          hasSettledCurrentAgentId: true,
           isOpen: false,
         })),
       );
@@ -354,15 +344,15 @@ export function useFirstRunOnboardingGate({
     }
 
     // Original guard — restored to simple form.
-    if (hasSettledCurrentPubkey || !currentPubkey) {
+    if (hasSettledCurrentAgentId || !currentAgentId) {
       return;
     }
 
     if (identityStatus === "error") {
       setGateState((current) =>
-        updateActiveGateState(current, currentPubkey, (activeGateState) => ({
+        updateActiveGateState(current, currentAgentId, (activeGateState) => ({
           ...activeGateState,
-          hasSettledCurrentPubkey: true,
+          hasSettledCurrentAgentId: true,
         })),
       );
       return;
@@ -392,36 +382,36 @@ export function useFirstRunOnboardingGate({
       profileHasEvent === true;
 
     setGateState((current) =>
-      updateActiveGateState(current, currentPubkey, (activeGateState) => {
+      updateActiveGateState(current, currentAgentId, (activeGateState) => {
         // Re-read localStorage here to handle the webkit2gtk WAL race: the
         // synchronous useState initializer may have run before the WAL was
         // merged into the main SQLite file, returning null for a flag that is
         // actually present. By the time this effect fires (identity + profile
         // settled), the WAL has had time to merge and the read is reliable.
         const hasCompletedAfterRecheck =
-          readOnboardingCompletion(currentPubkey);
+          readOnboardingCompletion(currentAgentId);
         const alreadyOnboarded =
-          activeGateState.hasCompletedCurrentPubkey ||
+          activeGateState.hasCompletedCurrentAgentId ||
           hasCompletedAfterRecheck ||
           hasExistingProfile;
         if (alreadyOnboarded && typeof window !== "undefined") {
           window.localStorage.setItem(
-            onboardingCompletionStorageKey(currentPubkey),
+            onboardingCompletionStorageKey(currentAgentId),
             "true",
           );
         }
         return {
           ...activeGateState,
-          hasCompletedCurrentPubkey: alreadyOnboarded,
-          hasSettledCurrentPubkey: true,
+          hasCompletedCurrentAgentId: alreadyOnboarded,
+          hasSettledCurrentAgentId: true,
           isOpen: !alreadyOnboarded,
         };
       }),
     );
   }, [
-    currentPubkey,
-    hasCompletedCurrentPubkey,
-    hasSettledCurrentPubkey,
+    currentAgentId,
+    hasCompletedCurrentAgentId,
+    hasSettledCurrentAgentId,
     identityStatus,
     isSharedIdentity,
     profileHasEvent,
@@ -431,35 +421,35 @@ export function useFirstRunOnboardingGate({
 
   const skipForNow = React.useCallback(() => {
     setGateState((current) =>
-      updateActiveGateState(current, currentPubkey, (activeGateState) => ({
+      updateActiveGateState(current, currentAgentId, (activeGateState) => ({
         ...activeGateState,
-        hasSettledCurrentPubkey: true,
+        hasSettledCurrentAgentId: true,
         isOpen: false,
       })),
     );
-  }, [currentPubkey]);
+  }, [currentAgentId]);
 
   const complete = React.useCallback(() => {
-    if (typeof window !== "undefined" && currentPubkey) {
+    if (typeof window !== "undefined" && currentAgentId) {
       window.localStorage.setItem(
-        onboardingCompletionStorageKey(currentPubkey),
+        onboardingCompletionStorageKey(currentAgentId),
         "true",
       );
     }
 
     setGateState({
-      currentPubkey,
-      hasCompletedCurrentPubkey: true,
-      hasSettledCurrentPubkey: true,
+      currentAgentId,
+      hasCompletedCurrentAgentId: true,
+      hasSettledCurrentAgentId: true,
       isOpen: false,
     });
-  }, [currentPubkey]);
+  }, [currentAgentId]);
 
   return {
     complete,
     skipForNow,
     stage: resolveOnboardingGateStage({
-      currentPubkey,
+      currentAgentId,
       gateState: activeGateState,
       identityIsFetching,
       identityStatus,
@@ -470,23 +460,28 @@ export function useFirstRunOnboardingGate({
 export function useAppOnboardingState(isSharedIdentity: boolean) {
   const queryClient = useQueryClient();
   const { activeCommunity } = useCommunities();
-  const identityQuery = useIdentityQuery();
+  const recoveryStateQuery = useRecoveryStateQuery();
+  const recovery = recoveryStateQuery.data;
+  const recoveryReady = recoveryStateQuery.status === "success";
+  const identityLost = recovery?.lost === true;
+  // Keyring unreachable at boot — the real key is still in the OS keyring but
+  // the session cannot access it. No in-app recovery is possible; the user
+  // must unlock the keyring externally and relaunch. Mutually exclusive with lost.
+  const identityLocked = recovery?.locked === true;
+  // Boot-time Phase 2 reset failed — wipe was attempted but verification failed.
+  // The sentinel is preserved so the next relaunch retries automatically.
+  const identityResetFailed = recovery?.resetFailed === true;
+  const identityQuery = useIdentityQuery(
+    recoveryReady && !identityLost && !identityLocked && !identityResetFailed,
+  );
   const identity = identityQuery.data;
-  const currentPubkey = identity?.pubkey ?? null;
-  const starterChannelsCommunityScope = activeCommunity?.relayUrl ?? null;
+  const currentAgentId = identity?.agentId ?? null;
+  const starterChannelsCommunityScope = activeCommunity?.groupId ?? null;
   const starterChannelsInitPromisesRef = React.useRef(
     new Map<string, Promise<ChannelInitResult>>(),
   );
   const [isCompletingStarterSetup, setIsCompletingStarterSetup] =
     React.useState(false);
-  const identityLost = identity?.lost === true;
-  // Keyring unreachable at boot — the real key is still in the OS keyring but
-  // the session cannot access it. No in-app recovery is possible; the user
-  // must unlock the keyring externally and relaunch. Mutually exclusive with lost.
-  const identityLocked = identity?.locked === true;
-  // Boot-time Phase 2 reset failed — wipe was attempted but verification failed.
-  // The sentinel is preserved so the next relaunch retries automatically.
-  const identityResetFailed = identity?.resetFailed === true;
 
   // Sticky boot fact: once identity was lost at boot, this remains true for the
   // entire session. Per-component state in OnboardingFlow cannot carry this
@@ -497,8 +492,9 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   }, [identityLost]);
 
   // Sticky boot fact: once identity was locked at boot, this remains true for
-  // the entire session. After import_identity clears the locked flag, the
-  // relaunchRequired derivation uses this to force the relaunch screen.
+  // the entire session. The keyring-locked state clears only on external
+  // unlock + relaunch; the relaunchRequired derivation uses this to force the
+  // relaunch screen.
   const [bootedLocked, setBootedLocked] = React.useState(false);
   React.useEffect(() => {
     if (identityLocked) setBootedLocked(true);
@@ -508,7 +504,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     !identityLost && !identityLocked && identityQuery.status === "success",
   );
   const onboardingGate = useFirstRunOnboardingGate({
-    currentPubkey,
+    currentAgentId,
     identityIsFetching: identityQuery.fetchStatus === "fetching",
     identityLost,
     identityStatus: identityQuery.status,
@@ -523,11 +519,11 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   );
   const requestStarterChannels = React.useCallback(
     (focus: boolean): Promise<ChannelInitResult> => {
-      if (!currentPubkey || !starterChannelsCommunityScope) {
+      if (!currentAgentId || !starterChannelsCommunityScope) {
         return Promise.resolve({ ok: true });
       }
 
-      const starterChannelsInitKey = `${starterChannelsCommunityScope}:${currentPubkey}`;
+      const starterChannelsInitKey = `${starterChannelsCommunityScope}:${currentAgentId}`;
       const currentPromise = starterChannelsInitPromisesRef.current.get(
         starterChannelsInitKey,
       );
@@ -547,7 +543,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
             if (!result.ok) return result;
             return initializeStarterChannels(queryClient, {
               focus: true,
-              pubkey: currentPubkey,
+              pubkey: currentAgentId,
               communityScope: starterChannelsCommunityScope,
             });
           });
@@ -560,7 +556,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       }
       const promise = initializeStarterChannels(queryClient, {
         focus,
-        pubkey: currentPubkey,
+        pubkey: currentAgentId,
         communityScope: starterChannelsCommunityScope,
       }).finally(() => {
         starterChannelsInitPromisesRef.current.delete(starterChannelsInitKey);
@@ -572,23 +568,23 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       );
       return promise;
     },
-    [currentPubkey, queryClient, starterChannelsCommunityScope],
+    [currentAgentId, queryClient, starterChannelsCommunityScope],
   );
 
   React.useEffect(() => {
     if (
       onboardingGate.stage !== "ready" ||
-      !currentPubkey ||
+      !currentAgentId ||
       !starterChannelsCommunityScope ||
-      !readOnboardingCompletion(currentPubkey) ||
-      hasEnsuredWelcomeChannel(currentPubkey, starterChannelsCommunityScope)
+      !readOnboardingCompletion(currentAgentId) ||
+      hasEnsuredWelcomeChannel(currentAgentId, starterChannelsCommunityScope)
     ) {
       return;
     }
 
     void requestStarterChannels(false);
   }, [
-    currentPubkey,
+    currentAgentId,
     onboardingGate.stage,
     requestStarterChannels,
     starterChannelsCommunityScope,
@@ -662,16 +658,17 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     identityQuery.status === "success";
 
   return {
-    currentPubkey,
+    currentAgentId,
     flow,
     identityLost,
     // reset-failed is the highest-precedence stage: a failed boot-time reset
     // means identity resolution was skipped entirely. Nothing can proceed until
     // the user relaunches and the wipe retries.
-    stage:
-      identityResetFailed && identityQuery.status === "success"
+    stage: !recoveryReady
+      ? ("blocking" as const)
+      : identityResetFailed
         ? ("reset-failed" as const)
-        : identityLocked && identityQuery.status === "success"
+        : identityLocked
           ? ("keyring-locked" as const)
           : relaunchRequired
             ? ("relaunch-required" as const)

@@ -27,20 +27,20 @@ export function combineObserverIngestionAgents(
   managedAgents: readonly IngestionAgent[],
   relayAgentPubkeys: readonly string[],
   ownerByPubkey: ReadonlyMap<string, string>,
-  currentPubkey: string | null | undefined,
+  currentAgentId: string | null | undefined,
 ): IngestionAgent[] {
   const managed = managedAgents.map((agent) => ({
     pubkey: agent.pubkey,
     status: agent.status,
   }));
-  if (!currentPubkey) {
+  if (!currentAgentId) {
     return managed;
   }
 
   const managedSet = new Set(
     managed.map((agent) => normalizePubkey(agent.pubkey)),
   );
-  const me = normalizePubkey(currentPubkey);
+  const me = normalizePubkey(currentAgentId);
   const owned: IngestionAgent[] = [];
   for (const pubkey of relayAgentPubkeys) {
     const key = normalizePubkey(pubkey);
@@ -67,7 +67,7 @@ export function combineObserverIngestionAgents(
  * managed agent or declared-owned relay agent), its turn activity is ingested
  * app-wide — not only while a panel that happens to mount a bridge is open.
  *
- * Mounts before identity resolves by design: while `currentPubkey` is still
+ * Mounts before identity resolves by design: while `currentAgentId` is still
  * `undefined`, `combineObserverIngestionAgents` returns managed agents only,
  * and relay-owned agents are folded in on the render after identity arrives.
  * Do not gate this hook on identity/startup readiness — that would drop
@@ -75,7 +75,7 @@ export function combineObserverIngestionAgents(
  */
 export function useAgentObserverIngestion() {
   const identityQuery = useIdentityQuery();
-  const currentPubkey = identityQuery.data?.pubkey;
+  const currentAgentId = identityQuery.data?.agentId;
 
   const managedAgentsQuery = useManagedAgentsQuery();
   const managedAgents = managedAgentsQuery.data;
@@ -87,7 +87,7 @@ export function useAgentObserverIngestion() {
   );
 
   const profilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
-    enabled: Boolean(currentPubkey) && relayAgentPubkeys.length > 0,
+    enabled: Boolean(currentAgentId) && relayAgentPubkeys.length > 0,
   });
   const profiles = profilesQuery.data?.profiles;
 
@@ -107,9 +107,9 @@ export function useAgentObserverIngestion() {
       managedAgents ?? [],
       relayAgentPubkeys,
       ownerByPubkey,
-      currentPubkey,
+      currentAgentId,
     );
-  }, [currentPubkey, managedAgents, profiles, relayAgentPubkeys]);
+  }, [currentAgentId, managedAgents, profiles, relayAgentPubkeys]);
 
   useManagedAgentObserverBridge(ingestionAgents);
   useActiveAgentTurnsBridge(ingestionAgents);

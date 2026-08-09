@@ -1,6 +1,5 @@
 import * as React from "react";
 import {
-  EMPTY_SET,
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
@@ -28,12 +27,9 @@ import {
 import {
   hasMentionForEvent,
   isHighPriorityEventForUser,
-  shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
-import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 import { DM_NOTIFIABLE_EVENT_KINDS } from "./isDmNotifiableKind";
 import {
   activityScopeKey,
@@ -55,8 +51,7 @@ export {
 
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
-  relayClient?: RelayClient;
-  relayUrl?: string;
+  groupId?: string;
   mutedChannelIds?: ReadonlySet<string>;
 };
 
@@ -140,25 +135,22 @@ export function useUnreadChannels(
 ) {
   const {
     pubkey,
-    relayClient,
-    relayUrl: relayUrlOption,
+    groupId,
     mutedChannelIds: mutedChannelIdsOption,
     ...liveUpdateOptions
   } = options;
   const activeChannelId = activeChannel?.id ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
-  // Scoped relay key for activity storage; empty string when relay not yet known
-  // so rows from an unknown relay never load into the wrong community.
-  const normalizedRelayUrl = relayUrlOption
-    ? normalizeRelayUrl(relayUrlOption)
-    : "";
+  // The native group id is a stable x0x identifier — no URL normalization.
+  // activityScopeKey returns "" when it is absent so rows from an unknown
+  // group never load into the wrong community.
   // Single identity for the in-memory thread-activity buffer — computed once
   // per render and used at reset, both writers, and the return fence. The
   // helper returns "" when either value is absent, which never matches a valid
   // loaded scope, so the fence returns [] until the buffer is seeded.
   const currentActivityScope = activityScopeKey(
     normalizedPubkey,
-    normalizedRelayUrl,
+    groupId ?? "",
   );
 
   const {
@@ -169,7 +161,7 @@ export function useUnreadChannels(
     setContextParentResolver,
     readStateVersion,
     getOwnTimestamp,
-  } = useReadState(pubkey, relayClient);
+  } = useReadState(pubkey);
 
   // Observed "latest external trigger event" per channel (unix seconds). This
   // is *derived relay evidence*, not source-of-truth: it's populated from a
@@ -242,15 +234,10 @@ export function useUnreadChannels(
   // Thread reply events that triggered notifications — surfaced in the Home
   // activity feed as synthetic FeedItems.
   const threadActivityRef = React.useRef<ThreadActivityItem[]>([]);
-  // Tracks the (pubkey:relayUrl) scope currently loaded into threadActivityRef.
+  // Tracks the (pubkey:groupId) scope currently loaded into threadActivityRef.
   // Writers guard against this before merging so in-flight writes from a prior
   // scope cannot corrupt the new one; renders return [] until it matches.
   const threadActivityScopeRef = React.useRef<string>("");
-
-  // Tracks which channels we've already issued a catch-up REQ for this
-  // session. Prevents re-fetching on every channels-list refetch, while still
-  // letting newly-joined channels be caught up. Reset on identity change.
-  const caughtUpChannelsRef = React.useRef(new Set<string>());
 
   const [latestVersion, bumpLatestVersion] = React.useReducer(
     (x: number) => x + 1,
@@ -266,17 +253,16 @@ export function useUnreadChannels(
     0,
   );
 
-  // Reset all in-session state when the identity or relay changes. In-memory
+  // Reset all in-session state when the identity or group changes. In-memory
   // caches are cleared; persisted stores are loaded for the new pubkey (so
   // forced-unread, participation, etc. are correct for the new identity).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayClient are intentional reset signals
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey is the intentional reset signal
   React.useEffect(() => {
     latestByChannelRef.current = new Map();
     observedUnreadEventsByChannelRef.current = new Map();
     // Load persisted forced-unread map for the new pubkey (do NOT clear the
     // store — another device's data should survive identity switches here).
     forcedUnreadRef.current = pubkey ? forcedUnreadStore.read(pubkey) : {};
-    caughtUpChannelsRef.current = new Set();
     participatedRootIdsRef.current = pubkey
       ? participationStore.read(pubkey)
       : new Set();
@@ -288,13 +274,13 @@ export function useUnreadChannels(
       : new Set();
     mutedRootIdsRef.current = pubkey ? mutedStore.read(pubkey) : new Set();
     threadActivityRef.current =
-      normalizedPubkey && normalizedRelayUrl
-        ? readActivityFromStorage(normalizedPubkey, normalizedRelayUrl)
+      normalizedPubkey && groupId
+        ? readActivityFromStorage(normalizedPubkey, groupId)
         : [];
     threadActivityScopeRef.current = currentActivityScope;
     bumpLatestVersion();
     bumpMembershipVersion();
-  }, [pubkey, relayClient, normalizedRelayUrl]);
+  }, [pubkey, groupId]);
 
   // `topLevelOnly` is the passive channel-open path (NIP-RS Option 1): the
   // caller's `readAt` is already the newest TOP-LEVEL message, so the marker
@@ -481,7 +467,7 @@ export function useUnreadChannels(
     (channelId: string, event: RelayEvent) => {
       // Guard: don't merge into a ref whose scope has drifted from the current
       // identity. Also reject an empty scope — activityScopeKey() returns ""
-      // when pubkey or relay is absent, and "" !== "" is false, so without this
+      // when pubkey or group is absent, and "" !== "" is false, so without this
       // guard a writer could fire before the first valid scope is established.
       if (
         !currentActivityScope ||
@@ -505,12 +491,8 @@ export function useUnreadChannels(
       if (!added.didAdd) return;
       const didRecordMentionedRoot = recordMentionedRoot(event);
       threadActivityRef.current = added.items;
-      if (normalizedPubkey !== null && normalizedRelayUrl) {
-        writeActivityToStorage(
-          normalizedPubkey,
-          normalizedRelayUrl,
-          added.items,
-        );
+      if (normalizedPubkey !== null && groupId) {
+        writeActivityToStorage(normalizedPubkey, groupId, added.items);
       }
       if (didRecordMentionedRoot) {
         bumpMembershipVersion();
@@ -521,7 +503,7 @@ export function useUnreadChannels(
       channels,
       currentActivityScope,
       normalizedPubkey,
-      normalizedRelayUrl,
+      groupId,
       recordMentionedRoot,
     ],
   );
@@ -559,263 +541,6 @@ export function useUnreadChannels(
     mutedRootIds: mutedRootIdsRef.current,
     mutedChannelIds: mutedChannelIdsRef.current,
   });
-
-  // Effect-key the catch-up on the *set* of channel IDs, not the array
-  // reference. React Query refetches return new array identities even when
-  // the contents are unchanged; without this we'd cancel and never re-fire
-  // every in-flight catch-up.
-  const channelIdsKey = React.useMemo(
-    () => [...new Set(channels.map((channel) => channel.id))].sort().join(","),
-    [channels],
-  );
-
-  // Catch-up: for each channel we haven't already caught up this session,
-  // ask the relay "are there any external trigger messages newer than the
-  // NIP-RS read marker?" If yes, advance latestByChannelRef so the unread
-  // predicate fires. This is the only way historical unreads survive an
-  // app restart now that we don't persist any client-side "latest" state.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: options.followedRootIds intentionally omitted — it's a Set reference that changes identity every render; the catch-up is a one-shot per-channel operation controlled by caughtUpChannelsRef, not reactive to follow changes
-  React.useEffect(() => {
-    if (!isReadStateReady) return;
-    if (!relayClient) return;
-    if (channelIdsKey.length === 0) return;
-
-    const targetIds = channelIdsKey.split(",");
-    const toFetch = targetIds.filter(
-      (id) => !caughtUpChannelsRef.current.has(id),
-    );
-    if (toFetch.length === 0) return;
-
-    // Claim optimistically so re-renders mid-flight don't kick off duplicate
-    // REQs. If the effect is cancelled (cleanup) we release the claims so
-    // the next run retries.
-    for (const id of toFetch) {
-      caughtUpChannelsRef.current.add(id);
-    }
-
-    let isCancelled = false;
-
-    // Snapshot membership sizes so the `.then` can detect whether the catch-up
-    // discovered new participated/authored/mentioned roots (pass 1 mutates the
-    // refs in place). A pure-participation or pure-mention discovery produces no
-    // maxExternal advance, so without this the notify gate would never
-    // invalidate to surface the badge.
-    const participatedSizeBefore = participatedRootIdsRef.current.size;
-    const authoredSizeBefore = authoredRootIdsRef.current.size;
-    const mentionedSizeBefore = mentionedRootIdsRef.current.size;
-
-    type CatchUpResult =
-      | {
-          channelId: string;
-          ok: true;
-          maxExternal: number;
-          unreadEvents: ObservedUnreadEvent[];
-          threadReplies: ThreadActivityItem[];
-        }
-      | { channelId: string; ok: false };
-
-    void Promise.all(
-      toFetch.map(async (channelId): Promise<CatchUpResult> => {
-        try {
-          const readAt = getEffectiveTimestamp(channelId);
-          const channel = channels.find((c) => c.id === channelId);
-          // NIP-01 `since` is inclusive of `created_at >= since`. The +1
-          // makes the relay-side filter strict-newer; the client-side
-          // `> readAt` check below is the belt to the suspenders.
-          const sinceParam = readAt === null ? 0 : readAt + 1;
-
-          const events = await relayClient.fetchEvents({
-            kinds: [...channelCatchUpEventKinds(channel?.channelType)],
-            "#h": [channelId],
-            since: sinceParam,
-            limit: CATCH_UP_LIMIT,
-          });
-
-          // Pass 1: build participation from self-authored thread replies,
-          // track self-authored top-level messages for author notifications,
-          // and capture external mentions so their threads gate a badge.
-          for (const event of events) {
-            const isSelf =
-              normalizedPubkey !== null &&
-              event.pubkey.toLowerCase() === normalizedPubkey;
-            if (isSelf) {
-              const ref = getThreadReference(event.tags);
-              if (ref.rootId !== null) {
-                participatedRootIdsRef.current.add(ref.rootId);
-              } else {
-                authoredRootIdsRef.current.add(event.id);
-              }
-            } else {
-              recordMentionedRoot(event);
-            }
-          }
-
-          if (normalizedPubkey !== null) {
-            participationStore.write(
-              normalizedPubkey,
-              participatedRootIdsRef.current,
-            );
-            authoredStore.write(normalizedPubkey, authoredRootIdsRef.current);
-          }
-
-          // Pass 2: compute maxExternal and collect thread reply activity,
-          // applying the notification filter to both.
-          let maxExternal = 0;
-          const unreadEvents: ObservedUnreadEvent[] = [];
-          const threadReplies: ThreadActivityItem[] = [];
-          const chType = channel?.channelType;
-          const chName = channel?.name ?? "";
-          for (const event of events) {
-            if (
-              normalizedPubkey !== null &&
-              event.pubkey.toLowerCase() === normalizedPubkey
-            ) {
-              continue;
-            }
-            if (readAt !== null && event.created_at <= readAt) continue;
-            const eventChannelId =
-              event.tags.find((t) => t[0] === "h")?.[1] ?? null;
-            if (
-              !shouldNotifyForEvent(event, normalizedPubkey ?? "", {
-                participatedRootIds: participatedRootIdsRef.current,
-                followedRootIds: options.followedRootIds ?? EMPTY_SET,
-                authoredRootIds: authoredRootIdsRef.current,
-                mutedRootIds: mutedRootIdsRef.current,
-                mutedChannelIds: mutedChannelIdsRef.current,
-                channelId: eventChannelId,
-              })
-            ) {
-              continue;
-            }
-            const evtRef = getThreadReference(event.tags);
-            const isThreadedReply =
-              evtRef.parentId !== null && !isBroadcastReply(event.tags);
-            if (event.created_at > maxExternal) {
-              maxExternal = event.created_at;
-            }
-            const isHighPriority =
-              chType === "dm" ||
-              (normalizedPubkey !== null &&
-                isHighPriorityEventForUser(event, normalizedPubkey));
-            unreadEvents.push(
-              makeObservedUnreadEvent({
-                id: event.id,
-                createdAt: event.created_at,
-                rootId: resolveObservedUnreadRootId(event.tags),
-                highPriority: isHighPriority,
-                channelType: chType,
-                isThreadedReply,
-              }),
-            );
-            if (isThreadedReply) {
-              threadReplies.push({
-                id: event.id,
-                kind: event.kind,
-                pubkey: event.pubkey,
-                content: event.content,
-                createdAt: event.created_at,
-                channelId,
-                channelName: chName,
-                tags: [...event.tags],
-              });
-            }
-          }
-
-          return {
-            channelId,
-            ok: true,
-            maxExternal,
-            unreadEvents,
-            threadReplies,
-          };
-        } catch {
-          // Transient relay failure for this channel — release the claim
-          // so we retry on the next effect run instead of staying stuck
-          // until identity reset.
-          return { channelId, ok: false };
-        }
-      }),
-    ).then((results) => {
-      if (isCancelled) return;
-      // Guard: don't merge catch-up results into a ref whose scope has drifted
-      // (relay/pubkey changed while this async fetch was in flight). Also reject
-      // an empty scope for the same reason as the live writer above.
-      if (
-        !currentActivityScope ||
-        threadActivityScopeRef.current !== currentActivityScope
-      )
-        return;
-      let didAdvance = false;
-      const allThreadReplies: ThreadActivityItem[] = [];
-      for (const result of results) {
-        if (!result.ok) {
-          caughtUpChannelsRef.current.delete(result.channelId);
-          continue;
-        }
-        const { channelId, maxExternal, unreadEvents, threadReplies } = result;
-        allThreadReplies.push(...threadReplies);
-        if (unreadEvents.length > 0) {
-          for (const event of unreadEvents) {
-            recordUnreadEvent(channelId, event);
-          }
-          didAdvance = true;
-        }
-        if (maxExternal > 0) {
-          const readAtNow = getEffectiveTimestamp(channelId) ?? 0;
-          if (maxExternal > readAtNow) {
-            const current = latestByChannelRef.current.get(channelId) ?? 0;
-            if (maxExternal > current) {
-              latestByChannelRef.current.set(channelId, maxExternal);
-              didAdvance = true;
-            }
-          }
-        }
-      }
-      if (allThreadReplies.length > 0) {
-        const added = addThreadActivityItems(
-          threadActivityRef.current,
-          allThreadReplies,
-        );
-        if (added.didAdd) {
-          threadActivityRef.current = added.items;
-          if (normalizedPubkey && normalizedRelayUrl) {
-            writeActivityToStorage(
-              normalizedPubkey,
-              normalizedRelayUrl,
-              added.items,
-            );
-          }
-          didAdvance = true;
-        }
-      }
-      if (didAdvance) bumpLatestVersion();
-      if (
-        participatedRootIdsRef.current.size !== participatedSizeBefore ||
-        authoredRootIdsRef.current.size !== authoredSizeBefore ||
-        mentionedRootIdsRef.current.size !== mentionedSizeBefore
-      ) {
-        bumpMembershipVersion();
-      }
-    });
-
-    return () => {
-      isCancelled = true;
-      // Release the claims so the next effect run can retry these channels.
-      // The identity-reset effect replaces the Set entirely, so this is a
-      // no-op in that case (harmless).
-      for (const id of toFetch) {
-        caughtUpChannelsRef.current.delete(id);
-      }
-    };
-  }, [
-    channelIdsKey,
-    getEffectiveTimestamp,
-    isReadStateReady,
-    normalizedPubkey,
-    normalizedRelayUrl,
-    recordUnreadEvent,
-    relayClient,
-  ]);
 
   // Unread = channels (excluding active) that have either been manually
   // marked unread this session, or whose observed latest external trigger

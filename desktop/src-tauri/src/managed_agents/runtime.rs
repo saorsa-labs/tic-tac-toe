@@ -8,8 +8,8 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -23,9 +23,7 @@ pub(crate) use path::should_use_inherited;
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
-
 mod sweep;
-pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
@@ -414,7 +412,7 @@ pub(crate) fn valid_agent_runtime_receipt(
     instance_id: &str,
 ) -> bool {
     let Ok(canonical) =
-        ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), &receipt.key.relay_url)
+        ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), &receipt.key.group_id)
     else {
         return false;
     };
@@ -444,7 +442,7 @@ fn terminate_runtime_receipt_with(
     }
     Err(format!(
         "prior runtime {} for pair {} on {} did not exit",
-        receipt.pid, receipt.key.pubkey, receipt.key.relay_url
+        receipt.pid, receipt.key.pubkey, receipt.key.group_id
     ))
 }
 
@@ -1340,35 +1338,32 @@ fn persona_drift_state(
     (out_of_date, false)
 }
 
-/// Resolve the runtime-pair key this record maps to for the active
-/// workspace: always the active workspace relay (the legacy per-record relay
-/// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
-/// records that cannot form a valid pair key yet (e.g. key-less agents that
-/// mint keys on first start).
+/// Resolve the runtime-pair key this record maps to for the active workspace
+/// group. Returns `None` for records that cannot form a valid pair key yet
+/// (e.g. key-less agents that mint keys on first start).
 pub(crate) fn workspace_pair_key(
     app: &AppHandle,
     record: &ManagedAgentRecord,
 ) -> Option<ManagedAgentRuntimeKey> {
     use tauri::Manager;
     let state = app.state::<crate::app_state::AppState>();
-    resolve_workspace_pair_key(
-        &record.pubkey,
-        &record.relay_url,
-        &crate::relay::relay_ws_url_with_override(&state),
-    )
+    let group_id = state
+        .active_group_id
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_default();
+    resolve_workspace_pair_key(&record.pubkey, &group_id)
 }
 
-/// Pure core of [`workspace_pair_key`]: workspace-relay resolution (legacy
-/// record pins ignored) plus canonical key construction, kept `AppHandle`-free
-/// so summary/stop scoping semantics are unit-testable.
+/// Pure core of [`workspace_pair_key`]: canonical key construction from the
+/// active group id, kept `AppHandle`-free so summary/stop scoping semantics
+/// are unit-testable.
 pub(crate) fn resolve_workspace_pair_key(
     pubkey: &str,
-    record_relay_url: &str,
-    workspace_relay_url: &str,
+    group_id: &str,
 ) -> Option<ManagedAgentRuntimeKey> {
-    let effective_relay =
-        crate::relay::effective_agent_relay_url(record_relay_url, workspace_relay_url);
-    ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
+    ManagedAgentRuntimeKey::new(pubkey.to_string(), group_id).ok()
 }
 
 pub fn build_managed_agent_summary(
@@ -1466,7 +1461,7 @@ pub fn build_managed_agent_summary(
                     record,
                     personas,
                     &teams_for_hash,
-                    &key.relay_url,
+                    &key.group_id,
                     &global_for_hash,
                 );
             let availability_drift = super::availability_drift(
@@ -1490,7 +1485,6 @@ pub fn build_managed_agent_summary(
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
         team_id: record.team_id.clone(),
-        relay_url: record.relay_url.clone(),
         acp_command: record.acp_command.clone(),
         agent_command: effective_command,
         agent_command_override: record.agent_command_override.clone(),
@@ -1543,17 +1537,9 @@ pub fn find_managed_agent_mut<'a>(
 /// belt-and-suspenders: an inherited parent env var must not leak into a
 /// child agent and silently change its security posture.
 ///
-/// The `owner_hex` argument is the current workspace owner pubkey. It's used
-/// as a fallback for legacy records (`auth_tag.is_none()`) — without it, the
-/// harness's owner cache stays empty and `owner-only` / `allowlist` modes
-/// drop everything.
-///
 /// Returns `Err(...)` if the record's allowlist fails validation. The harness
 /// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(
-    record: &ManagedAgentRecord,
-    owner_hex: Option<&str>,
-) -> Result<RespondToEnv, String> {
+pub(crate) fn build_respond_to_env(record: &ManagedAgentRecord) -> Result<RespondToEnv, String> {
     // Defensive re-validation: an on-disk record could have been hand-edited.
     let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
     if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
@@ -1574,21 +1560,6 @@ pub(crate) fn build_respond_to_env(
         set.push(("BUZZ_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
     } else {
         remove.push("BUZZ_ACP_RESPOND_TO_ALLOWLIST");
-    }
-
-    // Legacy fallback: agents created before NIP-OA lack `auth_tag`. Without
-    // it the harness can't resolve the owner, and owner-dependent gate modes
-    // would drop every event. Forwarding the workspace owner pubkey via
-    // BUZZ_ACP_AGENT_OWNER keeps those records functional. Modern records
-    // (`auth_tag = Some(...)`) use `BUZZ_AUTH_TAG` as before.
-    if record.auth_tag.is_none() {
-        if let Some(owner) = owner_hex {
-            set.push(("BUZZ_ACP_AGENT_OWNER", owner.to_string()));
-        } else {
-            remove.push("BUZZ_ACP_AGENT_OWNER");
-        }
-    } else {
-        remove.push("BUZZ_ACP_AGENT_OWNER");
     }
 
     Ok((set, remove))
@@ -1621,20 +1592,13 @@ pub(crate) fn configure_runtime_cli(
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
-///
-/// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
-/// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
 pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
-    relay_url: &str,
+    group_id: &str,
     lazy: bool,
-    owner_hex: Option<&str>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
-    if let Some(error) = spawn_key_refusal(record) {
-        return Err(error);
-    }
-    let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), group_id)?;
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -1685,9 +1649,8 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // The caller supplies the explicit workspace group id for this pair.
+    let effective_group_id = runtime_key.group_id.clone();
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -1717,8 +1680,33 @@ pub fn spawn_agent_child(
         command.env("PATH", path);
     }
     command.env("RUST_LOG", child_rust_log_filter());
-    command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
-    command.env("BUZZ_RELAY_URL", &effective_relay_url);
+    // ── Native x0x identity and observer transport ────────────────────────
+    // Each managed agent gets a dedicated x0xd child. Its isolated data dir
+    // owns the ML-DSA keys; the harness receives only native identity handles.
+    match crate::managed_agents::agent_identity::provision_managed_agent_child(
+        &record.pubkey,
+    ) {
+        Ok(child) => {
+            let owner_agent_id = crate::local_stack::fetch_agent()
+                .ok()
+                .and_then(|v| v.get("agent_id").and_then(|a| a.as_str()).map(str::to_string));
+            match owner_agent_id {
+                Some(owner_id) => {
+                    command.env("X0X_DATA_DIR", &child.data_dir);
+                    command.env("X0X_OWNER_AGENT_ID", &owner_id);
+                    command.env("X0X_AGENT_ID", &child.agent_id);
+                }
+                None => eprintln!(
+                    "buzz-desktop: agent {} native observer transport disabled — owner agent_id unavailable",
+                    record.name
+                ),
+            }
+        }
+        Err(error) => eprintln!(
+            "buzz-desktop: agent {} native observer transport disabled — child x0xd bring-up failed: {error:?}",
+            record.name
+        ),
+    }
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
@@ -1913,17 +1901,9 @@ pub fn spawn_agent_child(
     command.env_remove("BUZZ_ACP_API_TOKEN");
     command.env_remove("BUZZ_API_TOKEN");
 
-    if let Some(ref auth_tag) = record.auth_tag {
-        command.env("BUZZ_AUTH_TAG", auth_tag);
-    } else {
-        command.env_remove("BUZZ_AUTH_TAG");
-    }
-
-    // Inbound author gate: who is this agent allowed to respond to?
-    // Validation is strict here — a malformed allowlist on disk fails before
-    // we spawn anything (the harness would also reject it, but we'd rather
-    // fail with a clear error than crash-loop the child).
-    let (gate_set, gate_remove) = build_respond_to_env(record, owner_hex)?;
+    // Inbound author gate. Sender authority comes from authenticated x0x DMs;
+    // this environment only carries the user's response policy.
+    let (gate_set, gate_remove) = build_respond_to_env(record)?;
     for (key, value) in &gate_set {
         command.env(key, value);
     }
@@ -1932,40 +1912,6 @@ pub fn spawn_agent_child(
     }
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
-
-    // ── Git credential helper for Buzz relay ──────────────────────────
-    //
-    // Agents need to clone/push repos hosted on the Buzz relay's git
-    // server, which authenticates via NIP-98. The `git-credential-nostr`
-    // binary signs auth events using the agent's nostr key.
-    //
-    // We configure git via GIT_CONFIG_COUNT env vars (ephemeral, no
-    // filesystem writes) scoped to the relay's git URL so we don't
-    // interfere with other remotes (e.g. GitHub).
-    //
-    // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
-    if let Some(cred_helper) = resolve_command("git-credential-nostr") {
-        let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
-
-        command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
-        command.env("GIT_TERMINAL_PROMPT", "0");
-        command.env("GIT_CONFIG_COUNT", "2");
-        command.env(
-            "GIT_CONFIG_KEY_0",
-            format!("credential.{relay_http_url}/git.helper"),
-        );
-        command.env("GIT_CONFIG_VALUE_0", cred_helper.display().to_string());
-        command.env(
-            "GIT_CONFIG_KEY_1",
-            format!("credential.{relay_http_url}/git.useHttpPath"),
-        );
-        command.env("GIT_CONFIG_VALUE_1", "true");
-    } else {
-        eprintln!(
-            "buzz-desktop: git-credential-nostr not found — agent {} will not have automatic Buzz git auth",
-            record.name,
-        );
-    }
 
     // ── User env vars: live persona env under agent overrides ──────────
     //
@@ -1978,11 +1924,8 @@ pub fn spawn_agent_child(
     // filtering. Precedence: baked floor < Buzz-set env above < GLOBAL <
     // PERSONA < per-agent.
     //
-    // These writes go LAST so user-provided values win over every Buzz-set env
-    // above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
-    // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
-    // which `merged_user_env` strips. Those carry Buzz's identity and must
-    // never be GUI-overridable.
+    // These writes go last so user-provided values win over normal settings;
+    // reserved native identity variables remain filtered by `merged_user_env`.
     // global < live persona < agent (last-wins on collision at each layer).
     let persona_over_global = super::env_vars::merged_user_env(
         &global.env_vars,
@@ -1992,18 +1935,6 @@ pub fn spawn_agent_child(
         command.env(key, value);
     }
     configure_runtime_cli(&mut command, runtime_meta);
-
-    // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
-    // transport at spawn time and scrub any unrelated ambient OpenAI key.
-    #[cfg(feature = "mesh-llm")]
-    if effective_provider == Some(super::RELAY_MESH_PROVIDER_ID) {
-        let mut mesh_env = std::collections::BTreeMap::new();
-        super::apply_relay_mesh_env(&mut mesh_env, effective_provider, effective_model);
-        command.env_remove("OPENAI_API_KEY");
-        for (key, value) in mesh_env {
-            command.env(key, value);
-        }
-    }
 
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
@@ -2038,13 +1969,12 @@ pub fn spawn_agent_child(
 
     // Stamp the effective spawn config so the summary builder can flag
     // needs_restart when disk state drifts from what this process runs.
-    // `effective_relay_url` is already resolved, and resolution is idempotent,
-    // so it serves as the workspace-relay input here.
+    // `effective_group_id` is the workspace group this pair runs under.
     let spawn_config_hash = super::spawn_hash::spawn_config_hash(
         record,
         &personas,
         &teams,
-        &effective_relay_url,
+        &effective_group_id,
         &global,
     );
 
@@ -2099,17 +2029,14 @@ pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
-    owner_hex: Option<&str>,
 ) -> Result<(), String> {
-    let relay_url = {
+    let group_id = {
         use tauri::Manager;
         let state = app.state::<crate::app_state::AppState>();
-        crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &crate::relay::relay_ws_url_with_override(&state),
-        )
+        let guard = state.active_group_id.lock().map_err(|e| e.to_string())?;
+        guard.clone().unwrap_or_default()
     };
-    let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)?;
+    let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &group_id)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime
             .child
@@ -2127,7 +2054,7 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    let mut process = spawn_agent_child(app, record, &key.group_id, false)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),

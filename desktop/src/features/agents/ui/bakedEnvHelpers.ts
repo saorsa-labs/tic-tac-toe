@@ -86,7 +86,7 @@ export function getGlobalModelFallback(
   if (universal?.trim()) return universal.trim();
 
   const providerKey = providerModelEnvKey(provider);
-  if (!providerKey) return provider === "relay-mesh" ? "auto" : null;
+  if (!providerKey) return provider === "shared-compute" ? "auto" : null;
   const globalProviderModel = globalEnv[providerKey]?.trim();
   if (globalProviderModel) return globalProviderModel;
   const providerModel = bakedEnv?.find(

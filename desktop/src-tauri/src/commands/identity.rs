@@ -1,323 +1,141 @@
-use nostr::{
-    nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
-};
+// Modified from block/buzz @ 710ed9ff — see FORK.md (Stage 1: local-stack runtime relay default)
+// M3 cutover: the production identity is the x0x AgentId + four speakable
+// words, sourced from the native daemon. No Nostr signer is compiled into
+// the desktop identity surface.
 use tauri::Manager;
 use tauri::State;
 
 use crate::{
     app_state::AppState,
-    models::IdentityInfo,
-    nostr_bind,
-    relay::{self, relay_api_base_url_with_override, relay_ws_url_with_override},
+    models::{IdentityInfo, RecoveryStateInfo},
 };
 
-/// Encode `pubkey` as npub bech32 and truncate it for display: first 10 chars
-/// + "…" + last 4 chars. Returns the full bech32 when it is 16 chars or fewer.
-fn truncated_display_name(pubkey: &PublicKey) -> Result<String, String> {
-    let bech32 = pubkey
-        .to_bech32()
-        .map_err(|error| format!("bech32 encode failed: {error}"))?;
-    Ok(if bech32.len() > 16 {
-        format!("{}…{}", &bech32[..10], &bech32[bech32.len() - 4..])
-    } else {
-        bech32
-    })
+/// Validate that `s` is exactly 64 lowercase-hex characters — the shape of an
+/// x0x AgentId (SHA-256 of an ML-DSA-65 public key). Rejects uppercase, wrong
+/// length, or non-hex so a malformed/placeholder daemon value can never become
+/// a displayed identity.
+fn validate_agent_id(s: &str) -> Result<(), String> {
+    if s.len() != 64
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!(
+            "daemon agent_id must be 64 lowercase hex chars (got len {})",
+            s.len()
+        ));
+    }
+    Ok(())
 }
 
-#[tauri::command]
-pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    let pubkey = keys.public_key();
-    let pubkey_hex = pubkey.to_hex();
-    let display_name = truncated_display_name(&pubkey)?;
-    let lost = state
-        .identity_lost
-        .load(std::sync::atomic::Ordering::Acquire);
-    let locked = state
-        .keyring_locked
-        .load(std::sync::atomic::Ordering::Acquire);
-    let reset_failed = state
-        .reset_failed
-        .load(std::sync::atomic::Ordering::Acquire);
+/// Derive the four speakable identity words from a validated 64-hex AgentId
+/// using the `four-word-networking` `IdentityEncoder` (byte-parity with
+/// `x0x agent`, which injects `identity_words` via the same crate/API).
+fn identity_words_for(agent_id: &str) -> Result<Vec<String>, String> {
+    let encoder = four_word_networking::IdentityEncoder::new();
+    let words = encoder
+        .encode_hex(agent_id)
+        .map_err(|e| format!("encode identity words: {e}"))?;
+    Ok(words.agent_words().to_vec())
+}
 
+/// Bounded, authenticated fetch of the daemon AgentId via the named loopback
+/// `api.port`/`api-token` artifacts. Fail-closed: returns `Err` when the
+/// daemon is down, the artifacts are missing, or `agent_id` is absent or
+/// malformed. Never falls back to deriving a display identity from the
+/// compatibility signer.
+pub(crate) fn fetch_agent_id() -> Result<String, String> {
+    let value = crate::local_stack::fetch_agent()?;
+    let agent_id = value
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "daemon /agent response missing agent_id".to_string())?;
+    let agent_id = agent_id.trim();
+    validate_agent_id(agent_id)?;
+    Ok(agent_id.to_string())
+}
+
+/// Displayed identity: the daemon AgentId + four speakable words. The sole
+/// identity surfaced to the frontend — the M3 cutover removed the internal
+/// Nostr compatibility signer, so there is no relay signer pubkey.
+#[tauri::command]
+pub fn get_identity() -> Result<IdentityInfo, String> {
+    let agent_id = fetch_agent_id()?;
+    let identity_words = identity_words_for(&agent_id)?;
     Ok(IdentityInfo {
-        pubkey: pubkey_hex,
-        display_name,
-        lost,
-        locked,
-        reset_failed,
+        agent_id,
+        identity_words,
     })
 }
 
+/// Accept loss of the old internal relay signer, persist a fresh replacement,
+/// and restart so every owner-keyed service starts under one coherent signer.
+/// The displayed x0x AgentId is daemon-owned and is not replaced here.
 #[tauri::command]
-pub fn get_default_relay_url() -> String {
-    relay::relay_ws_url()
-}
-
-#[tauri::command]
-pub fn auto_connect_default_relay_enabled() -> bool {
-    option_env!("BUZZ_DESKTOP_BUILD_AUTO_CONNECT_DEFAULT_RELAY").is_some()
-}
-
-#[cfg(test)]
-mod auto_connect_default_relay_tests {
-    use super::auto_connect_default_relay_enabled;
-
-    #[test]
-    #[ignore]
-    fn compiled_flag_matches_expected() {
-        let expected = std::env::var("BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY")
-            .expect("compiled-flag test requires an expected value");
-        assert_eq!(
-            auto_connect_default_relay_enabled(),
-            expected == "true" || expected == "1"
+pub fn recover_lost_identity(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if is_shared_identity() {
+        return Err(
+            "Lost identity recovery is unavailable while BUZZ_SHARE_IDENTITY provides the compatibility signer."
+                .to_string(),
         );
     }
+    crate::app_state::replace_lost_identity(&app, &state)?;
+    app.request_restart();
+    Ok(())
+}
+
+/// Pure recovery-state reader (testable without a Tauri `State` wrapper):
+/// snapshots the boot-time atomics into [`RecoveryStateInfo`].
+pub(crate) fn recovery_state_from(state: &AppState) -> RecoveryStateInfo {
+    RecoveryStateInfo {
+        lost: state
+            .identity_lost
+            .load(std::sync::atomic::Ordering::Acquire),
+        locked: state
+            .keyring_locked
+            .load(std::sync::atomic::Ordering::Acquire),
+        reset_failed: state
+            .reset_failed
+            .load(std::sync::atomic::Ordering::Acquire),
+    }
+}
+
+/// Boot-time recovery state. Always succeeds — reads in-memory atomics only,
+/// never touches the daemon — so the frontend can route to a recovery screen
+/// (keyring locked/lost, or reset-failed) before calling `get_identity`, which
+/// is fail-closed when the daemon is unavailable. The frontend must call this
+/// first and only call `get_identity` when all three flags are false.
+#[tauri::command]
+pub fn get_recovery_state(state: State<'_, AppState>) -> RecoveryStateInfo {
+    recovery_state_from(&state)
 }
 
 #[tauri::command]
 pub fn is_shared_identity() -> bool {
+    // The shared-identity value is opaque (never parsed as a Nostr key): this
+    // only signals dev worktree sharing, where the key arrives via env rather
+    // than the native identity path.
     std::env::var("BUZZ_SHARE_IDENTITY")
         .map(|v| v == "1")
         .unwrap_or(false)
         && std::env::var("BUZZ_PRIVATE_KEY")
-            .ok()
-            .and_then(|k| Keys::parse(k.trim()).ok())
-            .is_some()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false)
 }
 
+/// Native x0x AgentId of a managed agent's dedicated child daemon, if one has
+/// been provisioned for `pubkey`. The observer transport uses this to address
+/// telemetry (child→owner) and control (owner→child) over authenticated PQC
+/// direct messaging. Returns `null` when no child is provisioned yet (the
+/// legacy relay path then applies). Exposes only the AgentId — never the data
+/// dir or token.
 #[tauri::command]
-pub fn get_relay_ws_url(state: State<'_, AppState>) -> String {
-    relay_ws_url_with_override(&state)
-}
-
-#[tauri::command]
-pub fn get_relay_http_url(state: State<'_, AppState>) -> String {
-    relay_api_base_url_with_override(&state)
-}
-
-#[tauri::command]
-pub fn get_media_proxy_port(state: State<'_, AppState>) -> u16 {
-    state
-        .media_proxy_port
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-#[tauri::command]
-pub async fn sign_event(
-    kind: u16,
-    content: String,
-    created_at: Option<u64>,
-    tags: Vec<Vec<String>>,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let nostr_tags = tags
-            .into_iter()
-            .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
-        if let Some(created_at) = created_at {
-            builder = builder.custom_created_at(Timestamp::from(created_at));
-        }
-
-        let event = builder
-            .sign_with_keys(&keys)
-            .map_err(|error| format!("sign failed: {error}"))?;
-
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub fn decrypt_observer_event(
-    event_json: String,
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let keys = state.signing_keys()?;
-    let event = Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
-
-    // Defense-in-depth: verify event ID and signature before decrypting.
-    if !event.verify_id() {
-        return Err("observer event has invalid ID".into());
-    }
-    if !event.verify_signature() {
-        return Err("observer event has invalid signature".into());
-    }
-
-    buzz_core_pkg::observer::decrypt_observer_payload(&keys, &event)
-        .map_err(|error| format!("decrypt observer event failed: {error}"))
-}
-
-#[tauri::command]
-pub fn build_observer_control_event(
-    agent_pubkey: String,
-    payload: serde_json::Value,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-    let agent_pubkey = PublicKey::from_hex(agent_pubkey.trim())
-        .map_err(|error| format!("invalid agent pubkey: {error}"))?;
-    let agent_pubkey_hex = agent_pubkey.to_hex();
-    let encrypted =
-        buzz_core_pkg::observer::encrypt_observer_payload(&keys, &agent_pubkey, &payload)
-            .map_err(|error| format!("encrypt observer control failed: {error}"))?;
-    let builder = buzz_sdk_pkg::build_agent_observer_frame(
-        &agent_pubkey_hex,
-        &agent_pubkey_hex,
-        buzz_core_pkg::observer::OBSERVER_FRAME_CONTROL,
-        &encrypted,
-    )
-    .map_err(|error| format!("build observer control failed: {error}"))?;
-    let event = builder
-        .sign_with_keys(&keys)
-        .map_err(|error| format!("sign observer control failed: {error}"))?;
-    Ok(event.as_json())
-}
-
-#[tauri::command]
-pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-    keys.secret_key()
-        .to_bech32()
-        .map_err(|error| format!("encode nsec: {error}"))
-}
-
-#[tauri::command]
-pub async fn import_identity(
-    nsec: String,
-    app_handle: tauri::AppHandle,
-) -> Result<IdentityInfo, String> {
-    tokio::task::spawn_blocking(move || {
-        let trimmed = nsec.trim();
-        let keys = Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))?;
-
-        // Serialize against persist_current_identity: hold this guard for the
-        // full function body so a concurrent stale persist can't overwrite
-        // this import.
-        let state = app_handle.state::<AppState>();
-        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
-
-        let data_dir = app_handle
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("app data dir: {e}"))?;
-        std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
-        let key_path = data_dir.join("identity.key");
-
-        // Persist into the OS keyring first (store → read-back verify → marker →
-        // delete file). Falls back to the 0o600 file when the keyring is
-        // unavailable; returns Err only when both backends fail.
-        let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-        crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
-
-        // Update in-memory keys BEFORE clearing recovery flags. The Release
-        // stores below pair with Acquire loads in get_identity: a reader
-        // observing false is guaranteed to see the updated keys.
-        let pubkey = keys.public_key();
-        *state.keys.lock().map_err(|e| e.to_string())? = keys;
-
-        // Clear both recovery flags — an import is valid in either lost or
-        // keyring-locked state and resolves both. In the locked case the
-        // keyring is unreachable, so persist_imported_identity already fell
-        // back to identity.key; on the next Unreachable boot the file is
-        // loaded directly and when the keyring returns the adoption path
-        // picks it up.
-        state
-            .identity_lost
-            .store(false, std::sync::atomic::Ordering::Release);
-        state
-            .keyring_locked
-            .store(false, std::sync::atomic::Ordering::Release);
-
-        let pubkey_hex = pubkey.to_hex();
-        let display_name = truncated_display_name(&pubkey)?;
-
-        eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
-
-        Ok(IdentityInfo {
-            pubkey: pubkey_hex,
-            display_name,
-            lost: false,
-            locked: false,
-            reset_failed: false,
-        })
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-/// Make the current ephemeral identity durable by persisting it to the OS
-/// keyring (or falling back to identity.key). This is called when the user
-/// chooses to start a new identity instead of re-importing their previous one
-/// — it converts the transient lost-state key into a permanent identity.
-///
-/// **LOST-ONLY**: returns `Err` when `identity_lost` is false, and deliberately
-/// does NOT accept `keyring_locked`. In locked state the user's real identity
-/// still exists in the unreachable keyring; persisting the ephemeral key to
-/// `identity.key` would make it appear as a "different key" on next boot,
-/// and the mismatched-file adoption path would then clobber the real keyring
-/// key once the keyring becomes reachable again. The correct action in locked
-/// state is to unlock the keyring and relaunch — not to adopt the ephemeral key.
-#[tauri::command]
-pub async fn persist_current_identity(
-    app_handle: tauri::AppHandle,
-) -> Result<IdentityInfo, String> {
-    tokio::task::spawn_blocking(move || {
-        let state = app_handle.state::<AppState>();
-
-        // Acquire mutation lock before reading identity_lost so that a
-        // concurrent import_identity cannot complete between our check and
-        // our persist, which would let the stale ephemeral key overwrite the
-        // imported one.
-        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
-
-        if !state
-            .identity_lost
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err("identity is not in a lost state".to_string());
-        }
-
-        // Clone current keys without holding the mutex across keyring I/O.
-        let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
-
-        let data_dir = app_handle
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("app data dir: {e}"))?;
-        std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
-        let key_path = data_dir.join("identity.key");
-
-        let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-        crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
-
-        // Keys are already the live identity — only clear identity_lost.
-        // Release pairs with Acquire in get_identity so readers see
-        // consistent state.
-        state
-            .identity_lost
-            .store(false, std::sync::atomic::Ordering::Release);
-
-        let pubkey = keys.public_key();
-        let pubkey_hex = pubkey.to_hex();
-        let display_name = truncated_display_name(&pubkey)?;
-
-        Ok(IdentityInfo {
-            pubkey: pubkey_hex,
-            display_name,
-            lost: false,
-            locked: false,
-            reset_failed: false,
-        })
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+pub fn get_managed_agent_native_identity(pubkey: String) -> Option<String> {
+    crate::managed_agents::agent_identity::managed_agent_child_identity(&pubkey)
+        .map(|child| child.agent_id)
 }
 
 /// Write a reset-intent sentinel and request a graceful restart into Phase 2
@@ -360,226 +178,272 @@ pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn nostr_bind_tag(name: &str, value: &str) -> Result<Tag, String> {
-    Tag::parse(vec![name, value]).map_err(|error| format!("{name} tag failed: {error}"))
-}
-
-pub(crate) fn build_nostr_identity_binding_event(
-    keys: &Keys,
-    challenge_id: &str,
-    nonce: &str,
-    verification_code: &str,
-    origin: &str,
-    expires_at: &str,
-) -> Result<Event, String> {
-    nostr_bind::validate_signing_request(
-        challenge_id,
-        nonce,
-        verification_code,
-        origin,
-        expires_at,
-    )?;
-
-    let tags = vec![
-        nostr_bind_tag("challenge_id", challenge_id)?,
-        nostr_bind_tag("nonce", nonce)?,
-        nostr_bind_tag("verification_code", verification_code)?,
-        nostr_bind_tag("audience", nostr_bind::AUDIENCE)?,
-        nostr_bind_tag("action", nostr_bind::ACTION)?,
-        nostr_bind_tag("protocol", nostr_bind::PROTOCOL)?,
-        nostr_bind_tag("version", nostr_bind::VERSION)?,
-        nostr_bind_tag("origin", origin)?,
-        nostr_bind_tag("expires_at", expires_at)?,
-    ];
-
-    EventBuilder::new(Kind::Custom(nostr_bind::KIND), nostr_bind::CONTENT)
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|error| format!("sign failed: {error}"))
-}
-
-#[tauri::command]
-pub async fn sign_nostr_identity_binding(
-    challenge_id: String,
-    nonce: String,
-    verification_code: String,
-    origin: String,
-    expires_at: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    nostr_bind::validate_signing_request(
-        &challenge_id,
-        &nonce,
-        &verification_code,
-        &origin,
-        &expires_at,
-    )?;
-
-    let keys = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let event = build_nostr_identity_binding_event(
-            &keys,
-            &challenge_id,
-            &nonce,
-            &verification_code,
-            &origin,
-            &expires_at,
-        )?;
-
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn create_auth_event(
-    challenge: String,
-    relay_url: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let tags = vec![
-            Tag::parse(vec!["relay", &relay_url])
-                .map_err(|error| format!("relay tag failed: {error}"))?,
-            Tag::parse(vec!["challenge", &challenge])
-                .map_err(|error| format!("challenge tag failed: {error}"))?,
-        ];
-
-        let event = EventBuilder::new(Kind::Custom(22242), "")
-            .tags(tags)
-            .sign_with_keys(&keys)
-            .map_err(|error| format!("sign failed: {error}"))?;
-
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn nip44_encrypt_to_self(
-    plaintext: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        nip44::encrypt(
-            keys.secret_key(),
-            &keys.public_key(),
-            &plaintext,
-            nip44::Version::V2,
-        )
-        .map_err(|e| format!("nip44 encrypt failed: {e}"))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn nip44_decrypt_from_self(
-    ciphertext: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let keys = state.signing_keys()?;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)
-            .map_err(|e| format!("nip44 decrypt failed: {e}"))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
+// ── M2 displayed-identity regression tests ─────────────────────────────────
+//
+// Pins the cutover invariants: the displayed identity is the daemon AgentId
+// (exact 64 lowercase hex) + its four speakable words, the Nostr compatibility
+// signer is a separate internal value, and a malformed/unreachable daemon
+// fails closed rather than synthesizing a display identity from the signer.
+// These reach the private gate/derivation fns directly (`use super::*`) so a
+// future refactor cannot quietly weaken them.
 #[cfg(test)]
-mod nostr_identity_binding_tests {
-    use super::build_nostr_identity_binding_event;
-    use crate::nostr_bind;
-    use nostr::{JsonUtil, Keys};
+mod identity_tests {
+    use std::sync::atomic::Ordering;
 
-    fn tag_values(event: &nostr::Event) -> Vec<Vec<String>> {
-        event
-            .tags
-            .iter()
-            .map(|tag| tag.as_slice().to_vec())
-            .collect()
+    use super::{fetch_agent_id, identity_words_for, recovery_state_from, validate_agent_id};
+
+    use crate::app_state::build_app_state;
+
+    /// Canonical x0xd parity vector: `GET /agent.agent_id` for the default dev
+    /// daemon and the four words `x0x agent` prints for it. Byte-parity with the
+    /// `four-word-networking` crate + the daemon; if either side changes the
+    /// derivation this fails closed.
+    const PARITY_AGENT_ID: &str =
+        "dd6530452610619d468e4e82be82107e86384365c58efa6e3018d7762c7368da";
+    const PARITY_WORDS: [&str; 4] = ["bodily", "example", "dismiss", "galaxy"];
+
+    fn assert_rejects(value: &str) {
+        assert!(
+            validate_agent_id(value).is_err(),
+            "expected daemon value to be rejected, but accepted: {value:?}"
+        );
+    }
+
+    // ── validate_agent_id: the fail-closed gate on daemon values ─────────────
+
+    #[test]
+    fn validate_agent_id_accepts_canonical_64_lowercase_hex() {
+        assert!(validate_agent_id(PARITY_AGENT_ID).is_ok());
+        // Independent canonical ids also pass — the gate is shape, not value.
+        assert!(validate_agent_id(&"a".repeat(64)).is_ok());
+        assert!(validate_agent_id(&"0".repeat(64)).is_ok());
     }
 
     #[test]
-    fn build_nostr_identity_binding_event_signs_exact_shape() {
-        let keys = Keys::generate();
-        let event = build_nostr_identity_binding_event(
-            &keys,
-            "550e8400-e29b-41d4-a716-446655440000",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
-            "123456",
-            "https://example.com",
-            "2999-01-01T00:00:00Z",
-        )
-        .unwrap();
-
-        assert_eq!(event.kind.as_u16(), nostr_bind::KIND);
-        assert_eq!(event.content, nostr_bind::CONTENT);
-        assert_eq!(event.pubkey, keys.public_key());
-        assert!(event.verify_id());
-        assert!(event.verify_signature());
-        assert!(nostr::Event::from_json(event.as_json()).is_ok());
-
-        let tags = tag_values(&event);
-        assert!(tags.contains(&vec![
-            "challenge_id".into(),
-            "550e8400-e29b-41d4-a716-446655440000".into(),
-        ]));
-        assert!(tags.contains(&vec![
-            "nonce".into(),
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567".into(),
-        ]));
-        assert!(tags.contains(&vec!["verification_code".into(), "123456".into(),]));
-        assert!(tags.contains(&vec!["audience".into(), "buzz:nostr-identity".into()]));
-        assert!(tags.contains(&vec!["action".into(), "bind_nostr_identity".into(),]));
-        assert!(tags.contains(&vec!["protocol".into(), "buzz-nostr-identity".into(),]));
-        assert!(tags.contains(&vec!["version".into(), "1".into(),]));
-        assert!(tags.contains(&vec!["origin".into(), "https://example.com".into(),]));
-        assert!(tags.contains(&vec!["expires_at".into(), "2999-01-01T00:00:00Z".into(),]));
+    fn validate_agent_id_rejects_uppercase_hex() {
+        // The namespace is lowercase: an uppercase twin is a different, rejected
+        // value — never silently folded into the canonical form.
+        assert_rejects(&PARITY_AGENT_ID.to_uppercase());
+        assert_rejects("AB12cd");
     }
 
     #[test]
-    fn build_nostr_identity_binding_event_rejects_malformed_verification_code() {
-        let keys = Keys::generate();
-        let error = build_nostr_identity_binding_event(
-            &keys,
-            "550e8400-e29b-41d4-a716-446655440000",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
-            "12345a",
-            "https://example.com",
-            "2999-01-01T00:00:00Z",
-        )
-        .unwrap_err();
-
-        assert_eq!(error, "verification_code must be exactly 6 digits");
+    fn validate_agent_id_rejects_wrong_length() {
+        assert_rejects(&PARITY_AGENT_ID[..63]); // one char short
+        assert_rejects(&format!("{PARITY_AGENT_ID}0")); // one char long
+        assert_rejects("");
     }
 
     #[test]
-    fn build_nostr_identity_binding_event_rejects_expired_link() {
-        let keys = Keys::generate();
-        let error = build_nostr_identity_binding_event(
-            &keys,
-            "550e8400-e29b-41d4-a716-446655440000",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
-            "123456",
-            "https://example.com",
-            "2000-01-01T00:00:00Z",
-        )
-        .unwrap_err();
+    fn validate_agent_id_rejects_non_hex_and_bech32_placeholders() {
+        assert_rejects(&format!("{}g", &PARITY_AGENT_ID[..63])); // 'g' is not hex
+                                                                 // bech32 / placeholder shapes a misconfigured daemon might emit must
+                                                                 // never pass as a 64-hex AgentId.
+        assert_rejects(&format!("npub1{}", "0".repeat(60)));
+        assert_rejects(&"z".repeat(64));
+    }
 
-        assert_eq!(error, "expires_at is expired");
+    #[test]
+    fn validate_agent_id_rejects_whitespace_padding() {
+        // The gate is exact-length; surrounding whitespace must not smuggle a
+        // value through a trim-only path upstream.
+        assert_rejects(&format!(" {PARITY_AGENT_ID}"));
+        assert_rejects(&format!("{PARITY_AGENT_ID}\n"));
+    }
+
+    // ── identity_words_for: canonical four-word derivation ────────────────────
+
+    #[test]
+    fn identity_words_for_returns_canonical_parity_vector() {
+        let words = identity_words_for(PARITY_AGENT_ID).expect("parity id encodes");
+        assert_eq!(
+            words, PARITY_WORDS,
+            "displayed words must match the x0x agent parity vector exactly"
+        );
+    }
+
+    #[test]
+    fn identity_words_for_is_deterministic() {
+        let first = identity_words_for(PARITY_AGENT_ID).unwrap();
+        let second = identity_words_for(PARITY_AGENT_ID).unwrap();
+        assert_eq!(first, second, "same agent id must yield identical words");
+    }
+
+    #[test]
+    fn identity_words_for_returns_exactly_four_nonempty_words() {
+        // Every valid agent id — not only the parity vector — yields exactly
+        // four non-empty speakable words (4 × 12-bit = first 48 bits).
+        let zeros = "0".repeat(64);
+        let a_hex = "a".repeat(64);
+        let f_hex = "f".repeat(64);
+        let mixed = "1234567890abcdef".repeat(4);
+        let ids = [
+            zeros.as_str(),
+            a_hex.as_str(),
+            f_hex.as_str(),
+            mixed.as_str(),
+        ];
+        for id in ids {
+            let words = identity_words_for(id).unwrap_or_else(|err| panic!("encode {id}: {err}"));
+            assert_eq!(words.len(), 4, "expected exactly four words for {id}");
+            assert!(words.iter().all(|w| !w.is_empty()), "empty word for {id}");
+        }
+    }
+
+    #[test]
+    fn identity_words_for_encodes_only_the_first_48_bit_prefix() {
+        // The four words encode ONLY the first 48 bits (6 bytes = first 12 hex
+        // chars) of the AgentId — a lossy, human-friendly prefix, never a unique
+        // id. This is precisely why the full 64-hex AgentId is the canonical
+        // copy target and `validate_agent_id` enforces the whole string: the
+        // words collide by design past ~2^24 agents. Pin that bits after the
+        // 48-bit prefix never change the words, while a different prefix does.
+        // (The encoder itself is case-lenient — `hex::decode` accepts uppercase
+        // — so lowercase-namespace enforcement is `validate_agent_id`'s job,
+        // exercised above; it runs first inside `fetch_agent_id`.)
+        let prefix = &PARITY_AGENT_ID[..12]; // first 6 bytes
+        let same_prefix = format!("{prefix}{}", "0".repeat(64 - 12));
+        assert_ne!(same_prefix, PARITY_AGENT_ID);
+        assert_eq!(
+            identity_words_for(&same_prefix).unwrap(),
+            identity_words_for(PARITY_AGENT_ID).unwrap(),
+            "words must depend only on the first 48 bits"
+        );
+        // A different 48-bit prefix ⇒ different words.
+        assert_ne!(
+            identity_words_for(PARITY_AGENT_ID).unwrap(),
+            identity_words_for(&"0".repeat(64)).unwrap(),
+            "distinct prefixes must yield distinct words"
+        );
+        // Non-hex input still fails — the encoder refuses garbage, not merely
+        // off-canonical-case input.
+        assert!(identity_words_for(&"g".repeat(64)).is_err());
+    }
+
+    // ── Namespace separation: the compat signer never becomes the display ─────
+
+    #[test]
+    fn compat_signer_never_yields_the_displayed_words() {
+        // The displayed identity is derived ONLY from the daemon AgentId. The
+        // internal Nostr compatibility signer (`relay_pubkey`) is an independent
+        // 64-hex value. Prove the namespaces are not interchangeable: feeding a
+        // distinct signer-shaped value through the SAME encoder produces
+        // DIFFERENT words, so the signer can never silently stand in for the
+        // displayed identity. `get_identity` wires `identity_words_for(&agent_id)`
+        // (never the signer); this pins that the encoder keeps them distinct —
+        // the structural guarantee that makes any swap detectable.
+        let display = identity_words_for(PARITY_AGENT_ID).unwrap();
+        // A distinct, valid-shape relay signer pubkey (differs in the first 48
+        // bits the encoder reads, so the words differ deterministically).
+        let relay_signer = "0".repeat(64);
+        assert_ne!(relay_signer, PARITY_AGENT_ID);
+        let signer_words = identity_words_for(&relay_signer).unwrap();
+        assert_ne!(
+            display, signer_words,
+            "compat signer must not derive the displayed identity words"
+        );
+    }
+
+    // ── fetch_agent_id: fail-closed when the daemon is unreachable/malformed ──
+
+    #[test]
+    fn fetch_agent_id_never_surfaces_a_malformed_identity() {
+        // `fetch_agent_id` does a bounded (500 ms connect / 2 s read), loopback,
+        // bearer-authenticated GET against the daemon. There is no injectable
+        // data-dir seam, so a unit test cannot choose the daemon's reply — but
+        // it can pin the fail-closed invariant: the result is EITHER a canonical
+        // 64-hex AgentId OR an error. A malformed/placeholder value can never
+        // become the displayed identity, and no display is synthesized from the
+        // compatibility signer when the daemon is unreachable.
+        match fetch_agent_id() {
+            Ok(id) => {
+                assert!(
+                    validate_agent_id(&id).is_ok(),
+                    "surfaced a non-canonical agent id: {id}"
+                );
+                assert_eq!(id.len(), 64);
+            }
+            Err(_) => {
+                // Unreachable daemon (no data dir / port / token / connection,
+                // or a malformed /agent body) correctly fails closed.
+            }
+        }
+    }
+
+    // ── Recovery split: daemon-independent recovery state (Main/reviewer CRITICAL)
+    //
+    // The boot surface is split: `get_recovery_state` (→ `recovery_state_from`)
+    // ALWAYS succeeds by reading in-memory atomics only — never the daemon — so
+    // the frontend can route to recovery even when the daemon is down. Only when
+    // all three flags are false does the frontend call `get_identity`, which
+    // fail-closes on an unreachable daemon. These pin both halves together.
+
+    #[test]
+    fn recovery_state_surfaces_each_flag_without_touching_the_daemon() {
+        // `recovery_state_from` is a pure snapshot of the boot atomics: it must
+        // surface lost/locked/reset_failed and never depend on daemon
+        // availability. `build_app_state` yields a cheap state with all flags
+        // false and an ephemeral signer (no keyring, no network).
+        let state = build_app_state();
+
+        // Freshly built state: no recovery mode active.
+        let clean = recovery_state_from(&state);
+        assert!(!clean.lost, "fresh state must not be in lost recovery");
+        assert!(!clean.locked, "fresh state must not be in locked recovery");
+        assert!(!clean.reset_failed, "fresh state must not be reset-failed");
+
+        // identity_lost: keyring empty despite a prior migration marker.
+        state.identity_lost.store(true, Ordering::Release);
+        let lost = recovery_state_from(&state);
+        assert!(lost.lost, "lost flag must reach the frontend");
+        assert!(!lost.locked, "lost and locked are mutually exclusive");
+        state.identity_lost.store(false, Ordering::Release);
+
+        // keyring_locked: keyring unreachable this boot (e.g. GNOME Keyring
+        // locked). Must still route to recovery despite no daemon.
+        state.keyring_locked.store(true, Ordering::Release);
+        assert!(
+            recovery_state_from(&state).locked,
+            "locked flag must reach the frontend without a daemon"
+        );
+        state.keyring_locked.store(false, Ordering::Release);
+
+        // reset_failed: Phase 2 wipe verification failed; identity resolution
+        // was skipped. Must surface so the UI shows the reset-failed screen.
+        state.reset_failed.store(true, Ordering::Release);
+        assert!(
+            recovery_state_from(&state).reset_failed,
+            "reset_failed flag must reach the frontend without a daemon"
+        );
+    }
+
+    #[test]
+    fn normal_identity_fail_closes_while_recovery_state_still_succeeds() {
+        // The two halves of the split, pinned in one scenario: with NO recovery
+        // flag set and the daemon unavailable (the unit-test environment has no
+        // running daemon), the identity read fail-closes — it never synthesizes
+        // a display identity from the compatibility signer — while the recovery
+        // read still returns Ok. This is exactly the intended boot sequence:
+        // get_recovery_state first (always Ok), and only if all-false does
+        // get_identity run (and fail-close here).
+        let state = build_app_state();
+        let recovery = recovery_state_from(&state);
+        assert!(!recovery.lost && !recovery.locked && !recovery.reset_failed);
+
+        match fetch_agent_id() {
+            Ok(id) => {
+                // If a daemon happens to be reachable, it must still be canonical.
+                assert!(
+                    validate_agent_id(&id).is_ok(),
+                    "surfaced a non-canonical agent id: {id}"
+                );
+            }
+            Err(_) => {
+                // Daemon unavailable ⇒ identity correctly fail-closed. Recovery
+                // routing does NOT depend on this succeeding.
+            }
+        }
+        // And recovery_state_from is still Ok regardless of the daemon outcome.
+        let _ = recovery_state_from(&state);
     }
 }

@@ -492,7 +492,7 @@ test("search results use your resolved profile label instead of You", async ({
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText("Welcome to #general");
-  await expect(results).toContainText("npub1mock...");
+  await expect(results).toContainText("bodily example dismiss galaxy");
   await expect(results).not.toContainText("You");
 });
 

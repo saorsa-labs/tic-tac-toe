@@ -23,11 +23,9 @@
 //! header (accepted on every route including `/ws` per `auth::authorize`). It
 //! is never placed in a URL query string.
 
-use std::fmt;
-use std::time::Duration;
-
 use futures_util::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{fmt, time::Duration};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{
     self, client::IntoClientRequest, protocol::Message as WsMessage,
@@ -179,6 +177,15 @@ struct HistoryResponse {
     next_before_id: Option<i64>,
 }
 
+/// Envelope returned by `GET /history/message/:msg_id`. `record` is `None`
+/// only via the client's 404→`None` mapping (the daemon's 200 always carries
+/// one); `#[serde(default)]` keeps a malformed body from panic-decoding.
+#[derive(Debug, Deserialize)]
+struct HistoryMessageResponse {
+    #[serde(default)]
+    record: Option<HistoryRow>,
+}
+
 /// A page of history rows with a computed `has_more` flag and the keyset
 /// cursor for the next (older) page. `has_more` is `true` when the server
 /// returned a full `limit`-sized page (the standard keyset heuristic); the
@@ -197,27 +204,98 @@ struct PublishBody<'a> {
     payload: &'a str,
 }
 
+/// `POST /groups/:id/send` body: `{ body, kind, thread_root?, thread_parent? }`.
+/// The daemon authority-signs the message (SignedPublic only) and records it
+/// under `Scope::Group`; MlsEncrypted groups are rejected with 400. Optional
+/// `thread_root`/`thread_parent` (ADR-0029) carry 64-hex canonical msg_ids;
+/// both are omitted from the wire when `None` (non-threaded v1 messages).
+#[derive(Serialize)]
+struct SendGroupBody<'a> {
+    body: &'a str,
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_root: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_parent: Option<&'a str>,
+}
+
+/// `POST /direct/send` body. The daemon validates `agent_id` as a 64-hex
+/// AgentId and `payload` as base64; optional `thread_root`/`thread_parent` are
+/// 64-hex canonical msg_ids (validated to 32 bytes via `ThreadMeta::from_hex`).
+/// All fields are snake_case on the wire (the daemon deserializes verbatim).
+#[derive(Serialize)]
+struct SendDirectBody<'a> {
+    agent_id: &'a str,
+    payload: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_root: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_parent: Option<&'a str>,
+}
+
+/// `POST /direct/send` receipt. The daemon returns the chosen delivery `path`
+/// (`loopback` | `gossip_inbox` | `raw_quic` | `raw_quic_acked` | `relayed`),
+/// `retries_used`, the hex `request_id`, and an optional `require_ack` probe
+/// result. The canonical durable `msg_id` is NOT returned here — it is
+/// `compute_local_send_msg_id(request_id, payload)` (BLAKE3), surfaced later via
+/// `/history`/`/ws/direct` backfill. `#[serde(default)]` so a minimal `{ ok }`
+/// body still parses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectSendReceipt {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub retries_used: Option<u64>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+// ── Group transport resolution (live topic + send route) ────────────────────
+
+/// `policy.confidentiality` projection from `GET /groups/:id`. The daemon
+/// serializes the enum snake_case (`"signed_public"` | `"mls_encrypted"`).
+#[derive(Debug, Default, Deserialize)]
+struct GroupPolicyWire {
+    #[serde(default)]
+    confidentiality: Option<String>,
+}
+
+/// `GET /groups/:id` projection — only the transport-relevant fields.
+#[derive(Debug, Deserialize)]
+struct GroupDetailWire {
+    #[serde(default)]
+    chat_topic: String,
+    #[serde(default)]
+    policy: GroupPolicyWire,
+}
+
+/// `GET /groups/:id/state` projection — `group_id` is the **stable** id
+/// (Phase D.3), which can differ from the mls id used for REST routing and is
+/// what the public-message gossip topic is keyed by.
+#[derive(Debug, Deserialize)]
+struct GroupStateWire {
+    #[serde(default)]
+    group_id: String,
+}
+
 // ── WebSocket subscribe DTOs ───────────────────────────────────────────────
 
-/// Optional backfill spec carried on a subscribe request (ADR-0023 §7 + the
-/// M3 `scope` extension, frozen by the thread-contract work). When present,
-/// the daemon replays up to `limit` stored rows for `scope` (or, if `scope` is
-/// absent, each `topics` entry's `topic:<name>` scope) oldest-first, emits a
-/// `live` marker, then forwards live `message` frames.
+/// Optional backfill spec carried on a `Subscribe` frame (ADR-0023 §7). The
+/// daemon's `WsBackfill` honours **only** `limit`: it replays up to `limit`
+/// stored rows for each subscribed topic's `topic:<name>` scope oldest-first,
+/// emits a `live` marker, then forwards live `message` frames.
+///
+/// `scope` / `before_id` / `since_ms` are NOT honoured on the WS path — group
+/// durable history lives under `Scope::Group` and DM history under `Scope::Dm`,
+/// neither of which the topic-keyed WS backfill reads. Cold-load those scopes
+/// via REST [`X0xClient::history_list`](Self::history_list) and open the WS
+/// live-only (`backfill: None`). DM cold-load+live uses `/ws/direct` (see
+/// [`X0xClient::run_subscribe_direct`](Self::run_subscribe_direct)).
 #[derive(Debug, Clone, Deserialize)]
 pub struct X0xBackfillRequest {
-    /// Max stored rows to replay (server clamps like `/history`).
+    /// Max stored rows to replay per subscribed topic (server clamps).
     pub limit: usize,
-    /// Canonical scope to replay (`group:<id>` | `dm:<agent>` | `topic:<name>`).
-    /// Absent ⇒ per-topic replay (legacy behaviour).
-    #[serde(default)]
-    pub scope: Option<String>,
-    /// Keyset cursor: replay rows strictly older than this rowid.
-    #[serde(default)]
-    pub before_id: Option<i64>,
-    /// Inclusive lower bound on `seen_at_ms`.
-    #[serde(default)]
-    pub since_ms: Option<i64>,
 }
 
 /// `WsInbound::Subscribe` — the client→server frame.
@@ -233,38 +311,37 @@ struct WsSubscribe {
 #[derive(Serialize)]
 struct WsBackfillSpec {
     limit: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scope: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    before_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    since_ms: Option<i64>,
 }
 
 impl From<X0xBackfillRequest> for WsBackfillSpec {
     fn from(r: X0xBackfillRequest) -> Self {
-        Self {
-            limit: r.limit,
-            scope: r.scope,
-            before_id: r.before_id,
-            since_ms: r.since_ms,
-        }
+        Self { limit: r.limit }
     }
 }
 
-/// A single frame on the `/ws` stream, mirroring the daemon's `WsOutbound`
+/// A single frame on a daemon WebSocket stream, mirroring `WsOutbound`
 /// (`#[serde(tag = "type")]`). Emitted to the frontend over a Tauri `Channel`.
 ///
-/// The `message` variant carries optional `thread_root` / `thread_parent`:
-/// backfill frames include them (once the daemon ships the `scope` extension);
-/// live frames may omit them. Both are `#[serde(default)]`-nullable so the
-/// frame union is stable regardless of which path produced the row.
+/// The `message` variant (topic gossip) and `direct_message` variant (DM,
+/// `/ws/direct`) both carry optional `thread_root` / `thread_parent` and an
+/// optional `msg_id`. `msg_id` is populated once the daemon ships its
+/// always-present `msg_id` addition; it is `None` on older daemons. All
+/// optional fields are `#[serde(default)]`-nullable so the union is stable
+/// regardless of which daemon version or path produced the frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all(serialize = "camelCase"))]
+// NOTE: an internally-tagged enum's container `rename_all` only renames the
+// variant discriminator (the `type` tag), NOT struct-variant fields. Each
+// multi-word field therefore carries an explicit asymmetry: serialize as
+// camelCase (the Tauri-Channel / TS contract) and deserialize the daemon's
+// snake_case wire. Single-word fields (topic/payload/origin/sender/verified)
+// match in both directions and need no rename.
+#[serde(tag = "type")]
 pub enum X0xFrame {
     #[serde(rename = "connected")]
     Connected {
+        #[serde(rename(serialize = "sessionId", deserialize = "session_id"))]
         session_id: String,
+        #[serde(rename(serialize = "agentId", deserialize = "agent_id"))]
         agent_id: String,
     },
     #[serde(rename = "message")]
@@ -273,21 +350,95 @@ pub enum X0xFrame {
         payload: String,
         #[serde(default)]
         origin: Option<String>,
-        #[serde(default)]
+        /// Canonical message id (64-hex). Populated once the daemon ships the
+        /// `msg_id` addition on `WsOutbound::Message`; absent on older daemons.
+        #[serde(default, rename(serialize = "msgId", deserialize = "msg_id"))]
+        msg_id: Option<String>,
+        #[serde(default, rename(serialize = "threadRoot", deserialize = "thread_root"))]
         thread_root: Option<String>,
-        #[serde(default)]
+        #[serde(
+            default,
+            rename(serialize = "threadParent", deserialize = "thread_parent")
+        )]
+        thread_parent: Option<String>,
+    },
+    /// A direct-message frame from `/ws/direct`. Mirrors the daemon's
+    /// `WsOutbound::DirectMessage`. `payload` is base64 application bytes;
+    /// `sender`/`machine_id` are 64-hex ids; `received_at` is unix-ms.
+    #[serde(rename = "direct_message")]
+    DirectMessage {
+        #[serde(default, rename(serialize = "msgId", deserialize = "msg_id"))]
+        msg_id: Option<String>,
+        sender: String,
+        #[serde(rename(serialize = "machineId", deserialize = "machine_id"))]
+        machine_id: String,
+        payload: String,
+        #[serde(rename(serialize = "receivedAt", deserialize = "received_at"))]
+        received_at: u64,
+        verified: bool,
+        #[serde(
+            default,
+            rename(serialize = "trustDecision", deserialize = "trust_decision")
+        )]
+        trust_decision: Option<String>,
+        #[serde(default, rename(serialize = "threadRoot", deserialize = "thread_root"))]
+        thread_root: Option<String>,
+        #[serde(
+            default,
+            rename(serialize = "threadParent", deserialize = "thread_parent")
+        )]
         thread_parent: Option<String>,
     },
     #[serde(rename = "subscribed")]
     Subscribed { topics: Vec<String> },
     #[serde(rename = "unsubscribed")]
     Unsubscribed { topics: Vec<String> },
-    /// Backfill-then-live marker: everything before this on the topic came
-    /// from the durable store; everything after is live.
+    /// Backfill-then-live marker: everything before this came from the
+    /// durable store; everything after is live. On `/ws/direct` the daemon
+    /// emits `{ type: "live", topic: "direct" }`.
     #[serde(rename = "live")]
     Live { topic: String },
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+/// Confidentiality of a named group, as reported by the daemon's
+/// `policy.confidentiality`. Determines the live topic and the available send
+/// route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupConfidentiality {
+    /// Signed-but-readable plaintext; chat flows on
+    /// `x0x.groups.public.{stable_group_id}` and sends go through
+    /// `POST /groups/:id/send` (authority-signed, durable).
+    SignedPublic,
+    /// MLS end-to-end encryption; chat flows on the daemon-reported
+    /// `chat_topic`. The desktop send boundary REJECTS MlsEncrypted groups
+    /// (secure-group crypto is not approved), so no `/groups/:id/secure/send`
+    /// route is ever reached from Tauri; this variant only drives live-topic
+    /// resolution for already-joined MLS groups.
+    MlsEncrypted,
+}
+
+/// Resolved transport plan for a named group's live + send surfaces.
+#[derive(Debug, Clone)]
+pub struct GroupTransport {
+    /// The gossip topic live chat frames arrive on.
+    pub live_topic: String,
+    /// The group's confidentiality (drives the send route).
+    pub confidentiality: GroupConfidentiality,
+    /// The stable group id (Phase D.3). Equal to the REST-routing id for
+    /// pre-D.3 groups; may differ once a state-commit chain is established.
+    /// This is the scope durable group history is recorded under
+    /// (`Scope::Group(stable_id)`).
+    pub stable_group_id: String,
+}
+
+/// The gossip topic SignedPublic group chat flows on, keyed by the **stable**
+/// group id. Mirrors the daemon's `groups::public_topic_for(stable_id)`
+/// (`PUBLIC_GROUP_TOPIC_PREFIX.{group_id}`). Centralized so the client never
+/// hand-synthesizes a divergent topic string.
+fn group_public_topic(stable_group_id: &str) -> String {
+    format!("x0x.groups.public.{stable_group_id}")
 }
 
 // ── Client ─────────────────────────────────────────────────────────────────
@@ -308,6 +459,11 @@ struct Resolved {
     ws_base: String,
     token: String,
 }
+
+/// The concrete WS stream produced by `connect_async` over loopback. Aliased
+/// so the connect helper and read loop share one signature.
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 impl X0xClient {
     /// Build from the app-wide HTTP client (the same localhost-resolved,
@@ -539,8 +695,34 @@ impl X0xClient {
         })
     }
 
-    /// `POST /publish` — publish a base64 payload to a gossip topic (the
-    /// native workspace/group message-send surface for M3).
+    /// `GET /history/message/:msg_id` — single durable-history row by canonical
+    /// BLAKE3 `msg_id` (lowercase 64-hex). Index-backed point lookup on the
+    /// daemon; no scope hint is needed (`msg_id` is globally unique in one
+    /// store) and no network/cross-user lookup occurs.
+    ///
+    /// Returns `Ok(None)` on `404 NOT_FOUND` (well-formed id, no matching row) —
+    /// **distinct** from a transport or decode error, which propagates as
+    /// `Err`. A malformed id surfaces as the daemon's `400` (`Err::Status`).
+    pub async fn history_get(
+        &self,
+        msg_id_hex: &str,
+    ) -> Result<Option<HistoryRow>, X0xClientError> {
+        let path = format!("/history/message/{msg_id_hex}");
+        match self.get_json::<HistoryMessageResponse>(&path, &[]).await {
+            Ok(resp) => Ok(resp.record),
+            // Not-found is a normal outcome, not a transport fault.
+            Err(X0xClientError::Status(404, _)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `POST /publish` — publish a base64 payload to a true gossip topic.
+    ///
+    /// This is the **topic-scope** send surface only. It gossips and does NOT
+    /// record durable history, so it MUST NOT be used for group scopes — group
+    /// sends go through [`Self::send_group_message`] (SignedPublic, durable) and
+    /// are unsupported for MlsEncrypted (no plaintext-send route). See
+    /// [`Self::resolve_group_transport`] for the confidentiality-driven routing.
     pub async fn publish(&self, topic: &str, payload_b64: &str) -> Result<(), X0xClientError> {
         let body = PublishBody {
             topic,
@@ -548,6 +730,126 @@ impl X0xClient {
         };
         let _: serde_json::Value = self.post_json("/publish", &body).await?;
         Ok(())
+    }
+
+    /// Resolve the live transport topic + send route for a named group.
+    ///
+    /// Mirrors the reference GUI client:
+    /// - **SignedPublic** → live chat flows on `x0x.groups.public.{stable_id}`;
+    ///   the stable id is fetched via `GET /groups/:id/state` (it can differ
+    ///   from the mls id used for REST routing).
+    /// - **MlsEncrypted** → live chat flows on the daemon-reported `chat_topic`
+    ///   (`x0x.group.{prefix}.chat/general`).
+    ///
+    /// Both are authoritative daemon values — the client never synthesizes a
+    /// topic string. An unknown/missing confidentiality is never defaulted to
+    /// MLS: it fails closed here so an unrecognised group can never reach the
+    /// secure-send route.
+    pub async fn resolve_group_transport(
+        &self,
+        group_id: &str,
+    ) -> Result<GroupTransport, X0xClientError> {
+        let path = format!("/groups/{group_id}");
+        let detail: GroupDetailWire = self.get_json(&path, &[]).await?;
+        let confidentiality = match detail.policy.confidentiality.as_deref() {
+            Some("signed_public") => GroupConfidentiality::SignedPublic,
+            Some("mls_encrypted") => GroupConfidentiality::MlsEncrypted,
+            // Never default an unknown/missing confidentiality to MLS — that
+            // would launder an unrecognised group onto the secure-send route.
+            // Fail closed here so the send boundary only ever observes
+            // explicitly-tagged groups (and the secure send itself rejects
+            // MlsEncrypted).
+            other => {
+                return Err(X0xClientError::Transport(format!(
+                    "group {group_id} reports unsupported confidentiality ({other:?}); refusing transport (only signed_public groups are sendable)"
+                )));
+            }
+        };
+        match confidentiality {
+            GroupConfidentiality::SignedPublic => {
+                let state: GroupStateWire = self
+                    .get_json(&format!("/groups/{group_id}/state"), &[])
+                    .await?;
+                let stable = state.group_id;
+                Ok(GroupTransport {
+                    live_topic: group_public_topic(&stable),
+                    confidentiality,
+                    stable_group_id: stable,
+                })
+            }
+            GroupConfidentiality::MlsEncrypted => Ok(GroupTransport {
+                // chat_topic already carries the `/general` suffix
+                // (general_chat_topic); no synthesis here.
+                live_topic: detail.chat_topic,
+                confidentiality,
+                stable_group_id: group_id.to_string(),
+            }),
+        }
+    }
+
+    /// `POST /groups/:id/send` — durable SignedPublic group send.
+    ///
+    /// The daemon authority-signs the message, publishes the signed envelope
+    /// on `x0x.groups.public.{stable_id}`, and records it under
+    /// `Scope::Group`. It returns 400 for MlsEncrypted groups — callers MUST
+    /// branch on [`GroupTransport::confidentiality`] first and never fall back
+    /// to [`Self::publish`] for a group scope.
+    ///
+    /// Optional `thread_root`/`thread_parent` (ADR-0029) carry 64-hex canonical
+    /// msg_ids for threaded replies; both `None` produces a v1 non-threaded
+    /// message. The response carries the daemon-computed `msg_id`
+    /// (`BLAKE3(signable_bytes)`) which callers use as the canonical identity
+    /// for optimistic reconciliation and thread ancestry.
+    pub async fn send_group_message(
+        &self,
+        group_id: &str,
+        body: &str,
+        kind: &str,
+        thread_root: Option<&str>,
+        thread_parent: Option<&str>,
+    ) -> Result<Option<String>, X0xClientError> {
+        let req = SendGroupBody {
+            body,
+            kind,
+            thread_root,
+            thread_parent,
+        };
+        let resp: serde_json::Value = self
+            .post_json(&format!("/groups/{group_id}/send"), &req)
+            .await?;
+        Ok(resp
+            .get("msg_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string))
+    }
+
+    /// `POST /direct/send` — native one-to-one direct message send.
+    ///
+    /// Sends base64 application `payload` to the 64-hex recipient `agent_id`
+    /// over the daemon's authenticated DM path (raw-QUIC preferred when a live
+    /// connection exists, gossip-inbox fallback otherwise). Optional
+    /// `thread_root`/`thread_parent` are 64-hex canonical msg_ids, validated
+    /// daemon-side via `ThreadMeta::from_hex` (32 bytes each).
+    ///
+    /// The daemon records the outbound row under `Scope::Dm(<recipient_hex>)`
+    /// with `msg_id = compute_local_send_msg_id(request_id, payload)`; that
+    /// canonical id is reconciled with the optimistic (clientId-keyed) row via
+    /// the shared `localKey` when history/live rehydrates — the receipt itself
+    /// carries only the `request_id`, never the canonical msg_id.
+    pub async fn send_direct_message(
+        &self,
+        agent_id: &str,
+        payload_b64: &str,
+        thread_root: Option<&str>,
+        thread_parent: Option<&str>,
+    ) -> Result<DirectSendReceipt, X0xClientError> {
+        let body = SendDirectBody {
+            agent_id,
+            payload: payload_b64,
+            thread_root,
+            thread_parent,
+        };
+        self.post_json("/direct/send", &body).await
     }
 
     /// Open a backfill-then-live stream over the daemon `/ws` surface and
@@ -559,34 +861,18 @@ impl X0xClient {
     /// This is a STREAM, not a poll loop: it holds one WS connection open for
     /// the life of the subscription. Thread ancestry arrives from the server
     /// (`thread_root`/`thread_parent` on backfill frames) and is never
-    /// reconstructed here.
+    /// reconstructed here. Backfill replays per-topic `Scope::Topic` rows
+    /// only — group/dm durable history is NOT readable on this path; cold-load
+    /// those via [`Self::history_list`] (groups) or [`Self::run_subscribe_direct`].
     pub async fn run_subscribe(
         &self,
         topics: Vec<String>,
         backfill: Option<X0xBackfillRequest>,
         tx: mpsc::Sender<X0xFrame>,
     ) -> Result<(), X0xClientError> {
-        let r = self.resolve()?;
-        let url = format!("{}/ws", r.ws_base);
-
-        // Build the upgrade request and attach the bearer header (browsers
-        // can't set WS headers, but this is a native tungstenite client).
-        let mut req = url
-            .into_client_request()
-            .map_err(|e| X0xClientError::Transport(format!("ws request build: {e}")))?;
-        {
-            let auth = format!("Bearer {}", r.token);
-            let value = tungstenite::http::HeaderValue::from_str(&auth)
-                .map_err(|e| X0xClientError::Transport(format!("ws auth header: {e}")))?;
-            req.headers_mut()
-                .insert(tungstenite::http::header::AUTHORIZATION, value);
-        }
-
-        let (mut stream, _resp) =
-            tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(req))
-                .await
-                .map_err(|_| X0xClientError::Transport("ws connect timed out".to_string()))?
-                .map_err(|e| X0xClientError::Transport(format!("ws connect: {e}")))?;
+        let mut stream = self
+            .ws_connect(&format!("{}/ws", self.resolve()?.ws_base))
+            .await?;
 
         // Send the Subscribe frame.
         let sub = WsSubscribe {
@@ -601,13 +887,78 @@ impl X0xClient {
             .await
             .map_err(|e| X0xClientError::Transport(format!("subscribe send: {e}")))?;
 
-        // Read loop: parse each text frame, forward to the channel, honour
-        // close/error/drop.
+        Self::ws_read_loop(&mut stream, &tx).await;
+        // Best-effort graceful close; ignore failures (we're tearing down).
+        let _ = stream.send(WsMessage::Close(None)).await;
+        Ok(())
+    }
+
+    /// Open a live direct-message stream over `/ws/direct` and forward every
+    /// frame to `tx`. The daemon auto-subscribes the session to direct
+    /// delivery — **no `Subscribe` frame is sent** — and replays up to
+    /// `backfill` stored DM rows (all `dm:` scopes, oldest→newest) before a
+    /// `live` marker, then streams live `direct_message` frames.
+    ///
+    /// Frames are mapped to [`X0xFrame`] (`direct_message`, `connected`,
+    /// `live`, `error`). This is the DM-scope live path: `dm:<peer>` triggers
+    /// it; the peer filter is applied by the consumer (the daemon delivers all
+    /// DMs to the session).
+    pub async fn run_subscribe_direct(
+        &self,
+        backfill: Option<usize>,
+        tx: mpsc::Sender<X0xFrame>,
+    ) -> Result<(), X0xClientError> {
+        let ws_base = self.resolve()?.ws_base;
+        let url = match backfill {
+            Some(n) => format!("{ws_base}/ws/direct?backfill={n}"),
+            None => format!("{ws_base}/ws/direct"),
+        };
+        let mut stream = self.ws_connect(&url).await?;
+        Self::ws_read_loop(&mut stream, &tx).await;
+        let _ = stream.send(WsMessage::Close(None)).await;
+        Ok(())
+    }
+
+    /// Build an authenticated WS upgrade request to `url` and complete the
+    /// handshake within [`WS_CONNECT_TIMEOUT`]. Returns the live socket.
+    async fn ws_connect(&self, url: &str) -> Result<WsStream, X0xClientError> {
+        let token = self.resolve()?.token;
+        let mut req = url
+            .into_client_request()
+            .map_err(|e| X0xClientError::Transport(format!("ws request build: {e}")))?;
+        {
+            // Browsers can't set WS headers, but this is a native tungstenite
+            // client — attach the bearer token as an Authorization header.
+            let auth = format!("Bearer {token}");
+            let value = tungstenite::http::HeaderValue::from_str(&auth)
+                .map_err(|e| X0xClientError::Transport(format!("ws auth header: {e}")))?;
+            req.headers_mut()
+                .insert(tungstenite::http::header::AUTHORIZATION, value);
+        }
+        let (stream, _resp) =
+            tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(req))
+                .await
+                .map_err(|_| X0xClientError::Transport("ws connect timed out".to_string()))?
+                .map_err(|e| X0xClientError::Transport(format!("ws connect: {e}")))?;
+        Ok(stream)
+    }
+
+    /// Shared read loop for `/ws` and `/ws/direct`: parse each text frame,
+    /// forward to the channel, honour close/error/drop. Returns when the
+    /// stream ends (the caller owns the graceful close).
+    async fn ws_read_loop(stream: &mut WsStream, tx: &mpsc::Sender<X0xFrame>) {
         while let Some(msg) = stream.next().await {
             let msg = match msg {
                 Ok(m) => m,
                 Err(e) => {
-                    return Err(X0xClientError::Transport(format!("ws read: {e}")));
+                    // Surface the transport failure as an error frame so the
+                    // frontend learns why the stream died.
+                    let _ = tx
+                        .send(X0xFrame::Error {
+                            message: format!("ws read: {e}"),
+                        })
+                        .await;
+                    return;
                 }
             };
             match msg {
@@ -617,13 +968,12 @@ impl X0xClient {
                         Ok(frame) => {
                             let is_error = matches!(frame, X0xFrame::Error { .. });
                             if tx.send(frame).await.is_err() {
-                                // Receiver gone (frontend dropped the Channel):
-                                // stop reading and let the socket close below.
-                                break;
+                                // Receiver gone (frontend dropped the Channel).
+                                return;
                             }
                             if is_error {
                                 // A daemon-reported error ends the stream.
-                                break;
+                                return;
                             }
                         }
                         Err(_) => {
@@ -637,147 +987,13 @@ impl X0xClient {
                 WsMessage::Ping(p) => {
                     let _ = stream.send(WsMessage::Pong(p)).await;
                 }
-                WsMessage::Close(_) => break,
+                WsMessage::Close(_) => return,
                 _ => {}
             }
         }
-
-        // Best-effort graceful close; ignore failures (we're tearing down).
-        let _ = stream.send(WsMessage::Close(None)).await;
-        Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn error_display_never_leaks_token() {
-        // The token never flows into an error variant by construction; this
-        // guards the contract against a future field addition that surfaces it.
-        let cases = [
-            X0xClientError::DaemonUnavailable("api-token missing"),
-            X0xClientError::Transport("connection refused".into()),
-            X0xClientError::Status(401, "unauthorized".into()),
-            X0xClientError::Decode("EOF".into()),
-        ];
-        for e in cases {
-            let s = e.to_string();
-            assert!(!s.contains("Bearer"), "token prefix leaked: {s}");
-        }
-    }
-
-    #[test]
-    fn history_row_thread_fields_default_null() {
-        // A daemon predating the thread contract omits thread_root/parent; the
-        // row must still parse with both null.
-        let json = serde_json::json!({
-            "id": 7i64,
-            "msg_id": "deadbeef",
-            "scope": "group:abc",
-            "author_agent": null,
-            "author_machine": null,
-            "sent_at_ms": 0i64,
-            "seen_at_ms": 0i64,
-            "direction": "inbound",
-            "content_type": "text/plain",
-            "payload": "",
-            "signed": false,
-            "provenance": "verified_envelope"
-        });
-        let row: HistoryRow = serde_json::from_value(json).expect("legacy row must parse");
-        assert_eq!(row.thread_root, None);
-        assert_eq!(row.thread_parent, None);
-    }
-
-    #[test]
-    fn history_row_root_is_self_referential() {
-        let root_id = "cafebabe";
-        let json = serde_json::json!({
-            "id": 1i64,
-            "msg_id": root_id,
-            "scope": "topic:m3",
-            "author_agent": "00",
-            "author_machine": null,
-            "sent_at_ms": 1i64,
-            "seen_at_ms": 1i64,
-            "direction": "outbound",
-            "content_type": "text/plain",
-            "payload": "aGk=",
-            "signed": true,
-            "provenance": "verified_envelope",
-            "thread_root": root_id,
-            "thread_parent": null
-        });
-        let row: HistoryRow = serde_json::from_value(json).unwrap();
-        assert_eq!(row.thread_root.as_deref(), Some(root_id));
-        assert_eq!(row.thread_parent, None);
-        // Self-referential root invariant: thread_root == msg_id.
-        assert_eq!(row.thread_root.as_deref(), Some(row.msg_id.as_str()));
-    }
-
-    #[test]
-    fn ws_frame_round_trips() {
-        // The frame union must deserialize the daemon's WsOutbound shapes.
-        let live = r#"{"type":"live","topic":"topic:m3"}"#;
-        let f: X0xFrame = serde_json::from_str(live).unwrap();
-        assert!(matches!(f, X0xFrame::Live { ref topic } if topic == "topic:m3"));
-
-        let msg = r#"{"type":"message","topic":"topic:m3","payload":"aGk=","origin":"00","thread_root":"cafebabe","thread_parent":"deadbeef"}"#;
-        let f: X0xFrame = serde_json::from_str(msg).unwrap();
-        match f {
-            X0xFrame::Message {
-                thread_root,
-                thread_parent,
-                ..
-            } => {
-                assert_eq!(thread_root.as_deref(), Some("cafebabe"));
-                assert_eq!(thread_parent.as_deref(), Some("deadbeef"));
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-    #[test]
-    fn ws_frame_serializes_camelcase_for_ts_channel() {
-        // The Channel-facing frame MUST serialize camelCase (DesktopNativeApi TS
-        // contract) while still deserializing the daemon's snake_case wire.
-        let f = X0xFrame::Connected {
-            session_id: "s1".into(),
-            agent_id: "a1".into(),
-        };
-        let s = serde_json::to_string(&f).unwrap();
-        assert!(s.contains(r#""type":"connected""#), "tag unchanged: {s}");
-        assert!(
-            s.contains(r#""sessionId":"s1""#),
-            "camelCase sessionId: {s}"
-        );
-        assert!(s.contains(r#""agentId":"a1""#), "camelCase agentId: {s}");
-        assert!(
-            !s.contains("session_id"),
-            "snake_case leaked into serialize: {s}"
-        );
-
-        let m = X0xFrame::Message {
-            topic: "topic:m3".into(),
-            payload: "aGk=".into(),
-            origin: None,
-            thread_root: Some("cafebabe".into()),
-            thread_parent: None,
-        };
-        let s = serde_json::to_string(&m).unwrap();
-        assert!(
-            s.contains(r#""threadRoot":"cafebabe""#),
-            "camelCase threadRoot: {s}"
-        );
-
-        // Round-trip: the daemon's snake_case wire still deserializes.
-        let back: X0xFrame = serde_json::from_str(
-            r#"{"type":"message","topic":"t","payload":"","origin":null,"thread_root":"x","thread_parent":null}"#,
-        )
-        .unwrap();
-        assert!(
-            matches!(back, X0xFrame::Message { thread_root, .. } if thread_root.as_deref() == Some("x"))
-        );
-    }
-}
+#[path = "x0x_client_tests.rs"]
+mod tests;

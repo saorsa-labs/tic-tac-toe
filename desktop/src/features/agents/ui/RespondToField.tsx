@@ -5,7 +5,6 @@ import {
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
 import { truncatePubkey } from "@/shared/lib/pubkey";
-import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
@@ -169,8 +168,8 @@ export function CreateAgentRespondToField({
       )}
       {!isPersonaVariant ? (
         <p className="text-xs text-muted-foreground">
-          Controls which Nostr authors the agent listens to (@mentions, DMs,
-          thread replies). The agent&apos;s owner can always shut it down with
+          Controls which people the agent listens to (@mentions, DMs, thread
+          replies). The agent&apos;s owner can always shut it down with
           <span className="font-mono"> !shutdown</span>.
         </p>
       ) : null}
@@ -220,7 +219,6 @@ function AllowlistPicker({
   onQueryChange,
   onRemove,
   onToggleDirectEntry,
-  ownerPubkey,
   pasteInvalid,
   pasteText,
   pasteValidCount,
@@ -275,15 +273,10 @@ function AllowlistPicker({
           </span>
         </div>
       ) : null}
-      {!isPersona && ownerPubkey ? (
+      {!isPersona ? (
         <p className="text-xs text-muted-foreground">
-          Owner (
-          <PubKey pubkey={ownerPubkey} />) is always implicitly allowed by the
-          harness — no need to add it here.
-        </p>
-      ) : !isPersona ? (
-        <p className="text-xs text-muted-foreground">
-          The agent&apos;s owner is always implicitly allowed.
+          The agent&apos;s owner is always implicitly allowed by the harness —
+          no need to add it here.
         </p>
       ) : null}
       <div className="rounded-lg border border-border/80 bg-background">
@@ -294,9 +287,7 @@ function AllowlistPicker({
             data-testid="agent-respond-to-search"
             disabled={disabled}
             onChange={(event) => onQueryChange(event.target.value)}
-            placeholder={
-              isPersona ? "Search people" : "Search by name or NIP-05."
-            }
+            placeholder={isPersona ? "Search people" : "Search by name."}
             value={query}
           />
         </div>
@@ -313,7 +304,6 @@ function AllowlistPicker({
                   displayName={truncatePubkey(pubkey)}
                   size="xs"
                 />
-                <PubKey pubkey={pubkey} />
                 <button
                   aria-label={`Remove ${truncatePubkey(pubkey)}`}
                   className="text-muted-foreground transition-colors hover:text-foreground"
@@ -380,7 +370,7 @@ function AllowlistPicker({
                       {truncatePubkey(deferredQuery)}
                     </p>
                     <p className="truncate text-xs text-muted-foreground">
-                      Add pubkey directly
+                      Add member by ID
                     </p>
                   </div>
                 </div>
@@ -422,7 +412,7 @@ function AllowlistPicker({
             >
               <p className="text-xs text-muted-foreground">
                 One per line, or comma/space-separated. 64-char lowercase hex
-                only — npub decoding is not yet supported here.
+                only.
               </p>
               <Textarea
                 className="min-h-20 font-mono text-xs"

@@ -7,7 +7,7 @@ import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 type ChannelManagementAuxiliaryPanelProps = {
   activeChannel: Channel;
   canResetThreadPanelWidth: boolean;
-  currentPubkey?: string;
+  currentAgentId?: string;
   isSinglePanelView: boolean;
   onChannelManagementDeleted?: () => void;
   onCloseChannelManagement?: () => void;
@@ -23,7 +23,7 @@ type ChannelManagementAuxiliaryPanelProps = {
 export function ChannelManagementAuxiliaryPanel({
   activeChannel,
   canResetThreadPanelWidth,
-  currentPubkey,
+  currentAgentId,
   isSinglePanelView,
   onChannelManagementDeleted,
   onCloseChannelManagement,
@@ -37,7 +37,7 @@ export function ChannelManagementAuxiliaryPanel({
     <ChannelManagementSheet
       animateSplitEnter={isSinglePanelView && !useSplitAuxiliaryPane}
       channel={activeChannel}
-      currentPubkey={currentPubkey}
+      currentAgentId={currentAgentId}
       layout={useSplitAuxiliaryPane || isSinglePanelView ? "split" : "overlay"}
       onDeleted={onChannelManagementDeleted}
       onOpenChange={(nextOpen) => {

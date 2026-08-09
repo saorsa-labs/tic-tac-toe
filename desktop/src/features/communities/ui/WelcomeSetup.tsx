@@ -3,7 +3,6 @@ import { Check, Copy } from "lucide-react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { createNativeCommunity } from "@/features/communities/nativeCommunityApi";
-import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
 import {
   OnboardingFooter,
@@ -72,11 +71,9 @@ export function WelcomeSetup({
     try {
       const group = await createNativeCommunity({
         name: communityName,
-        preset: "private_secure",
       });
       communityOnboarding.start({
         source: "first-community",
-        relayUrl: "x0x://local",
         communityName: group.name,
         groupId: group.groupId,
       });
@@ -88,19 +85,6 @@ export function WelcomeSetup({
       setIsCreating(false);
     }
   }, [communityName, communityOnboarding, isCreating]);
-
-  const redeemInvite = React.useCallback(
-    (relayUrl: string, code: string, policyReceipt?: string) => {
-      communityOnboarding.start({
-        source: "first-community",
-        firstCommunityPage: page === "member" ? "member" : "join",
-        relayUrl,
-        inviteCode: code,
-        policyReceipt,
-      });
-    },
-    [communityOnboarding, page],
-  );
 
   const transitionDirection =
     transitionMode === "backward" ? "backward" : "forward";
@@ -258,9 +242,7 @@ export function WelcomeSetup({
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
                   {page === "create"
                     ? "x0xd creates the group and its post-quantum identity locally."
-                    : page === "member"
-                      ? "Paste the x0x invite link you received. Your role is restored by the daemon."
-                      : "Paste the x0x invite link you received."}
+                    : "Ask the community owner to add you as a member."}
                 </p>
               </div>
               <div className="flex w-full flex-1 flex-col items-center justify-center gap-16">
@@ -299,26 +281,13 @@ export function WelcomeSetup({
                     </div>
                   </form>
                 ) : (
-                  <InviteRedeemForm
-                    error={null}
-                    isRedeeming={false}
-                    onCancel={() =>
-                      showPage(page === "member" ? "existing" : "welcome")
-                    }
-                    onRedeem={redeemInvite}
-                    placeholder="x0x://invite/..."
-                    variant="onboarding-spotlight"
-                  />
-                )}
-                {page === "join" ? (
                   <div className="w-full max-w-[560px] text-left">
                     <p className="text-sm font-medium text-foreground">
                       Joining a private community?
                     </p>
                     <p className="mt-2 text-sm leading-6 text-foreground/75">
-                      Some communities need the owner to add you before you can
-                      join. Copy your Agent ID and send it to the community
-                      owner.
+                      Ask the owner to add you as a member, then copy your Agent
+                      ID below and send it to them out of band.
                     </p>
                     <div className="mt-4 flex items-center gap-3 rounded-xl border border-foreground/10 bg-background/35 px-4 py-3">
                       <code
@@ -352,8 +321,19 @@ export function WelcomeSetup({
                     {idError ? (
                       <p className="mt-3 text-sm text-destructive">{idError}</p>
                     ) : null}
+                    <div className="mt-6 flex justify-center gap-3">
+                      <Button
+                        onClick={() =>
+                          showPage(page === "member" ? "existing" : "welcome")
+                        }
+                        type="button"
+                        variant="ghost"
+                      >
+                        Back
+                      </Button>
+                    </div>
                   </div>
-                ) : null}
+                )}
               </div>
             </OnboardingSlideTransition>
           )}

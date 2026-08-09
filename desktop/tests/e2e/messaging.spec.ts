@@ -152,7 +152,7 @@ test("send a message and see it in timeline", async ({ page }) => {
 
   await expect(page.getByTestId("message-timeline")).toContainText(message);
   await expect(page.getByTestId("message-row").last()).toContainText(
-    "npub1mock...",
+    "bodily example dismiss galaxy",
   );
 });
 
@@ -276,7 +276,19 @@ test("supported link previews keep the message link visible", async ({
   ).toBeVisible();
   const previewCard = row.locator('[data-link-preview="github-pull-request"]');
   await expect(previewCard).toBeVisible();
-  await expectCornerRadiusPx(previewCard, 16);
+  // The smooth-corners clip-path is applied in a layout effect, so a single
+  // computed-style read can transiently miss the radius before the card's
+  // layout settles. Poll until it reads the 16px corner-radius contract.
+  await expect
+    .poll(async () =>
+      previewCard.evaluate((element) => {
+        const radius = Number.parseFloat(
+          window.getComputedStyle(element).borderTopLeftRadius,
+        );
+        return Number.isFinite(radius) ? radius : 0;
+      }),
+    )
+    .toBeCloseTo(16, 0);
   await expectSmoothCorners(previewCard);
 });
 
@@ -652,8 +664,32 @@ test("shows your avatar on your own message when profile avatar is set", async (
   await page.goto("/");
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
-  await page.getByTestId("profile-avatar-url").fill(avatarUrl);
+  // The avatar editor opens via a requestAnimationFrame after the edit click,
+  // and its entrance transition can reset the controlled URL input on the
+  // frame it settles — so a single .fill() intermittently lands empty. When it
+  // does, no onChange commits, `hasProfileChanges` stays false, and Done
+  // closes the editor WITHOUT saving (update_profile never fires), so the own
+  // message renders the initials fallback. Fill, then keep filling until the
+  // value actually sticks.
+  const urlInput = page.getByTestId("profile-avatar-url");
+  await expect
+    .poll(
+      async () => {
+        await urlInput.fill(avatarUrl);
+        return urlInput.inputValue();
+      },
+      { timeout: 5_000, intervals: [200, 500] },
+    )
+    .toBe(avatarUrl);
+
   await page.getByTestId("profile-avatar-done").click();
+  // Done fires the profile save (update_profile) and only unmounts the editor
+  // once it resolves — onSuccess writes the avatar into the shared ["profile"]
+  // cache that ChannelScreen's `currentProfile` (profileQuery.data) reads, and
+  // the own-message avatar is sourced from currentProfile.avatarUrl. Wait for
+  // that unmount before leaving: the editor also closes on the no-change path,
+  // so this wait is what proves the save actually ran. Mirrors profile.spec.ts.
+  await expect(page.getByTestId("profile-avatar-editor-shell")).toHaveCount(0);
   await page.getByTestId("settings-back-to-app").click();
 
   await page.getByTestId("channel-general").click();
@@ -662,9 +698,17 @@ test("shows your avatar on your own message when profile avatar is set", async (
   await page.getByTestId("message-input").fill(message);
   await page.getByTestId("send-message").click();
 
-  const lastMessage = page.getByTestId("message-row").last();
-  await expect(lastMessage).toContainText(message);
-  await expect(lastMessage.getByTestId("message-avatar-image")).toHaveAttribute(
+  // The timeline is virtualized (@tanstack/react-virtual), so during the
+  // post-send bottom-settle the newest row can briefly sit outside the render
+  // window and a positional `.last()` resolves to a sibling. Filter by the
+  // unique body to pin the exact sent row across the pending → confirmed
+  // remount and assert its data-SVG avatar directly (never the initials
+  // fallback).
+  const sentMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ hasText: message });
+  await expect(sentMessage.getByTestId("message-avatar-image")).toHaveAttribute(
     "src",
     avatarUrl,
   );

@@ -46,6 +46,43 @@ export function selectBufferedTimelineMessages<T extends { id: string }>({
   return buffered;
 }
 
+export function countBufferedTimelinePendingMessages<T extends { id: string }>({
+  frozenMessageIds,
+  isAtBottom,
+  messages,
+}: {
+  frozenMessageIds: readonly string[] | null;
+  isAtBottom: boolean;
+  messages: T[];
+}): number {
+  if (isAtBottom || frozenMessageIds === null) return 0;
+
+  if (frozenMessageIds.length === 0) {
+    return new Set(messages.map((message) => message.id)).size;
+  }
+
+  const frozenIds = new Set(frozenMessageIds);
+  if (
+    frozenMessageIds.some(
+      (id) => !messages.some((message) => message.id === id),
+    )
+  ) {
+    // Match `selectBufferedTimelineMessages`: an authoritative replacement is
+    // admitted in full, so none of it remains buffered as a live-tail arrival.
+    return 0;
+  }
+
+  const lastFrozenId = frozenMessageIds[frozenMessageIds.length - 1];
+  const lastFrozenIndex = messages.findIndex(
+    (message) => message.id === lastFrozenId,
+  );
+  const pendingIds = new Set<string>();
+  for (const message of messages.slice(lastFrozenIndex + 1)) {
+    if (!frozenIds.has(message.id)) pendingIds.add(message.id);
+  }
+  return pendingIds.size;
+}
+
 export function useBufferedTimelineMessages<T extends { id: string }>({
   channelId,
   isAtBottom,
@@ -85,6 +122,10 @@ export function useBufferedTimelineMessages<T extends { id: string }>({
   previousBufferedRef.current = stableBuffered;
   return {
     messages: stableBuffered,
-    pendingCount: Math.max(0, messages.length - stableBuffered.length),
+    pendingCount: countBufferedTimelinePendingMessages({
+      frozenMessageIds: frozenMessageIdsRef.current,
+      isAtBottom,
+      messages,
+    }),
   };
 }

@@ -68,6 +68,8 @@ export type SymphonyDaemonStatus = {
   baseUrl: string | null;
   owned: boolean;
   error: string | null;
+  /** Bound active Company instance, if any (live supervision signal). */
+  activeInstanceId: string | null;
 };
 
 export type CompanyGroupKind = "engineering" | "sales" | "all_hands" | "custom";
@@ -92,11 +94,17 @@ export type CompanyTemplate = {
 };
 
 export type CompanyInstantiationErrorKind =
+  // Provisioning step labels (resumable failures).
   | "group"
   | "store"
   | "task_list"
+  | "symphony_config"
+  | "workflow_md"
+  // Public group member-add (ref: "{role}→{localGroup}").
+  | "membership"
+  // Managed-agent identity binding.
   | "agent"
-  | "workflow"
+  // Daemon bring-up or run soft-failure (not resumable provisioning).
   | "daemon";
 export type CompanyInstantiationError = {
   kind: CompanyInstantiationErrorKind;
@@ -113,12 +121,37 @@ export type CompanyInstantiatedAgent = {
   role: string;
   groupId: string;
 };
+/** Lifecycle status of an instantiation/resume attempt. Provisioning +
+ * post-phases either reach `complete`, stop `resumable` (durable, retryable),
+ * or are aborted `cancelled` (terminal). `in_progress` is a persisted-manifest
+ * status only (between runs); an attempt always returns one of these three. */
+export type CompanyInstantiationStatus = "complete" | "resumable" | "cancelled";
+
+/** Lifecycle status of a persisted Company instance (manifest on disk). */
+export type CompanyInstanceStatus =
+  | "complete"
+  | "resumable"
+  | "in_progress"
+  | "cancelled";
+
 export type CompanyInstantiationResult = {
   instanceId: string;
   runId: string | null;
+  /** Lifecycle outcome of the attempt: complete, resumable, or cancelled. */
+  status: CompanyInstantiationStatus;
   groups: CompanyInstantiatedGroup[];
   agents: CompanyInstantiatedAgent[];
   workflowMd: string | null;
   errors: CompanyInstantiationError[];
 };
 export type InstantiateCompanyTemplateInput = { displayName?: string };
+
+/** Persisted Company instance surfaced by `list_company_instances`.
+ * Wire is camelCase (Rust struct carries `rename_all = "camelCase"`). */
+export type CompanyInstanceSummary = {
+  instanceId: string;
+  runId: string | null;
+  status: CompanyInstanceStatus;
+  /** True on the one bound active Company instance, false elsewhere. */
+  active: boolean;
+};

@@ -1,6 +1,5 @@
 import { mergeAttributes, Node, nodeInputRule } from "@tiptap/core";
 
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { escapeRegExp } from "@/shared/lib/mentionPattern";
 
 /**
@@ -184,7 +183,7 @@ export const CustomEmojiNode = Node.create<CustomEmojiNodeOptions>({
   renderHTML({ node, HTMLAttributes }) {
     const shortcode = String(node.attrs.shortcode ?? "");
     const rawSrc = String(node.attrs.src ?? "");
-    const src = rawSrc ? rewriteRelayUrl(rawSrc) : rawSrc;
+    const src = rawSrc ? rawSrc : rawSrc;
     return [
       "img",
       mergeAttributes(HTMLAttributes, {

@@ -46,8 +46,8 @@ import {
 } from "./agentConfigOptions";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
-  relayMeshModelPickerState,
-} from "./relayMeshModelPicker";
+  sharedComputeModelPickerState,
+} from "./sharedComputeModelPicker";
 import {
   computeEditAgentFormValidity,
   envVarsEqual,
@@ -154,8 +154,6 @@ export function AgentInstanceEditDialog({
   );
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
-  const [isAvatarUploadPending, setIsAvatarUploadPending] =
-    React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
   // Runtime selector: defaults to "custom" until the dialog opens and the
@@ -189,7 +187,6 @@ export function AgentInstanceEditDialog({
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
-      setIsAvatarUploadPending(false);
       runtimeTouched.current = false;
       const matched =
         runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
@@ -554,12 +551,15 @@ export function AgentInstanceEditDialog({
   function handleProviderDropdownChange(nextValue: string) {
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-    if (nextProvider === "relay-mesh" && selectedRuntimeId !== "buzz-agent") {
+    if (
+      nextProvider === "shared-compute" &&
+      selectedRuntimeId !== "buzz-agent"
+    ) {
       handleRuntimeDropdownChange("buzz-agent");
     }
     const nextSelection = selectionOnProviderDropdownChange(selection, {
       runtime:
-        nextProvider === "relay-mesh"
+        nextProvider === "shared-compute"
           ? "buzz-agent"
           : (selectedRuntime?.id ?? selectedRuntimeId),
       nextValue,
@@ -567,7 +567,7 @@ export function AgentInstanceEditDialog({
     });
     applySelection({
       ...nextSelection,
-      model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
+      model: nextProvider === "shared-compute" ? "auto" : nextSelection.model,
     });
   }
 
@@ -607,8 +607,7 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
-    !updateMutation.isPending &&
-    !isAvatarUploadPending;
+    !updateMutation.isPending;
 
   async function handleSubmit() {
     try {
@@ -769,11 +768,11 @@ export function AgentInstanceEditDialog({
       ? getBakedModelInheritLabel(inheritedModelDefault.value)
       : getDefaultLlmModelLabel(inheritedModelDefault.value);
   const {
-    isRelayMesh,
+    isSharedCompute,
     options: effectiveModelOptions,
     selectValue: modelSelectValue,
     showCustomInput: showCustomModelInput,
-  } = relayMeshModelPickerState({
+  } = sharedComputeModelPickerState({
     discoveredOptions: discoveredModelOptions,
     fallbackOptions: [{ id: "", label: inheritedModelLabel }],
     isCustomEditing: isCustomModelEditing,
@@ -781,9 +780,9 @@ export function AgentInstanceEditDialog({
     provider: providerForDiscovery,
   });
   const modelDropdownOptions = buildModelDropdownOptions({
-    allowCustom: !isRelayMesh,
-    globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
-    globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
+    allowCustom: !isSharedCompute,
+    globalModel: isSharedCompute ? undefined : inheritedModelDefault.value,
+    globalModelLabel: isSharedCompute ? undefined : inheritedModelLabel,
     loading: modelDiscoveryLoading && discoveredModelOptions === null,
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
@@ -841,7 +840,7 @@ export function AgentInstanceEditDialog({
         footer={
           <div className="flex w-full items-center justify-end gap-2">
             <Button
-              disabled={updateMutation.isPending || isAvatarUploadPending}
+              disabled={updateMutation.isPending}
               onClick={() => handleOpenChange(false)}
               type="button"
               variant="outline"
@@ -868,7 +867,6 @@ export function AgentInstanceEditDialog({
               hideEditControl
               label={previewLabel}
               onClearAvatar={() => setAvatarUrl("")}
-              onUploadPendingChange={setIsAvatarUploadPending}
               onSelectAvatar={setAvatarUrl}
             />
             {onEditLinkedPersona ? (

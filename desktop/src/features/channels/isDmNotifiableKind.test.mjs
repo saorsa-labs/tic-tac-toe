@@ -19,8 +19,6 @@ import {
 test("human-visible message kinds fire DM notifications", () => {
   assert.equal(isDmNotifiableKind(9), true, "kind:9 stream message");
   assert.equal(isDmNotifiableKind(40002), true, "kind:40002 stream message v2");
-  assert.equal(isDmNotifiableKind(45001), true, "kind:45001 forum post");
-  assert.equal(isDmNotifiableKind(45003), true, "kind:45003 forum comment");
   assert.equal(
     isDmNotifiableKind(KIND_HUDDLE_STARTED),
     true,
@@ -35,6 +33,19 @@ test("non-message kinds do NOT fire DM notifications", () => {
   assert.equal(isDmNotifiableKind(40003), false, "kind:40003 message edit");
   assert.equal(isDmNotifiableKind(40008), false, "kind:40008 message diff");
   assert.equal(isDmNotifiableKind(40099), false, "kind:40099 system message");
+  // Forum post/comment kinds (45001/45003) were removed from the notifiable
+  // set when the forum surface was cut. They must stay non-notifiable — a
+  // re-add would resurrect phantom DM notifications for forum traffic.
+  assert.equal(
+    isDmNotifiableKind(45001),
+    false,
+    "kind:45001 forum post (removed)",
+  );
+  assert.equal(
+    isDmNotifiableKind(45003),
+    false,
+    "kind:45003 forum comment (removed)",
+  );
   assert.equal(
     isDmNotifiableKind(KIND_HUDDLE_PARTICIPANT_JOINED),
     false,

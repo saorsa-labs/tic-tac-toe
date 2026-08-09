@@ -64,12 +64,12 @@ export function PulseScreen() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <PulseView currentPubkey={identityQuery.data?.pubkey} />
+            <PulseView currentAgentId={identityQuery.data?.agentId} />
           </div>
           {profilePanelPubkey ? (
             <UserProfilePanel
               canResetWidth={threadPanelWidth.canReset}
-              currentPubkey={identityQuery.data?.pubkey}
+              currentAgentId={identityQuery.data?.agentId}
               onClose={handleCloseProfilePanel}
               onOpenDm={handleOpenDm}
               onOpenProfile={handleOpenProfilePanel}

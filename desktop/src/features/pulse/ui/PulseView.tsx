@@ -21,7 +21,7 @@ import {
 import { groupAgentNotes } from "@/features/pulse/lib/groupAgentNotes";
 import { usePulseNoteActions } from "@/features/pulse/lib/useNoteActions";
 import { AgentActivityCard } from "@/features/pulse/ui/AgentActivityCard";
-import { ForumComposer } from "@/features/forum/ui/ForumComposer";
+import { NoteComposer } from "@/features/pulse/ui/NoteComposer";
 import { NoteCard } from "@/features/pulse/ui/NoteCard";
 import { PulseTabBar } from "@/features/pulse/ui/PulseTabBar";
 import type { UserNote } from "@/shared/api/socialTypes";
@@ -44,7 +44,7 @@ const pulsePanelId = (tab: PulseTab) => `pulse-panel-${tab}`;
 const pulseTabId = (tab: PulseTab) => `pulse-tab-${tab}`;
 
 type PulseViewProps = {
-  currentPubkey?: string;
+  currentAgentId?: string;
 };
 
 function EmptyState({ message }: { message: string }) {
@@ -72,11 +72,11 @@ function TimelineSkeleton() {
   );
 }
 
-export function PulseView({ currentPubkey }: PulseViewProps) {
+export function PulseView({ currentAgentId }: PulseViewProps) {
   const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
   const [searchQuery, setSearchQuery] = React.useState("");
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  const contactListQuery = useContactListQuery(currentPubkey);
+  const contactListQuery = useContactListQuery(currentAgentId);
   const contacts = contactListQuery.data?.contacts ?? [];
   const contactPubkeys = React.useMemo(
     () => contacts.map((c) => c.pubkey),
@@ -136,17 +136,17 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
 
   const mentionPubkeys = React.useMemo(
     () =>
-      [...new Set([currentPubkey, ...peoplePubkeys, ...agentPubkeys])].filter(
+      [...new Set([currentAgentId, ...peoplePubkeys, ...agentPubkeys])].filter(
         (pubkey): pubkey is string =>
           typeof pubkey === "string" && pubkey.length > 0,
       ),
-    [currentPubkey, peoplePubkeys, agentPubkeys],
+    [currentAgentId, peoplePubkeys, agentPubkeys],
   );
 
   const everyoneQuery = useGlobalNotesQuery(activeTab === "everyone");
   const peopleQuery = useTimelineQuery(peoplePubkeys, activeTab === "people");
   const likedNotesQuery = useLikedNotesQuery(
-    currentPubkey,
+    currentAgentId,
     activeTab === "liked",
   );
   const agentTimelineQuery = useTimelineQuery(
@@ -154,9 +154,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     activeTab === "agents",
   );
   const myNotesQuery = useMyNotesQuery(
-    activeTab === "mine" ? currentPubkey : undefined,
+    activeTab === "mine" ? currentAgentId : undefined,
   );
-  const publishMutation = usePublishNoteMutation(currentPubkey);
+  const publishMutation = usePublishNoteMutation(currentAgentId);
   const visibleNotes: UserNote[] = React.useMemo(() => {
     if (activeTab === "everyone") {
       return everyoneQuery.data?.notes ?? [];
@@ -189,13 +189,13 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     () => visibleNotes.map((note) => note.id),
     [visibleNotes],
   );
-  const reactionsQuery = usePulseReactionsQuery(visibleNoteIds, currentPubkey);
+  const reactionsQuery = usePulseReactionsQuery(visibleNoteIds, currentAgentId);
   const reactionQueryKey = React.useMemo(
     () => pulseQueryKeys.reactions(visibleNoteIds),
     [visibleNoteIds],
   );
   const noteActions = usePulseNoteActions({
-    currentPubkey,
+    currentAgentId,
     reactionQueryKey,
     reactions: reactionsQuery.data ?? new Map(),
   });
@@ -219,12 +219,12 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     enabled: mentionPubkeys.length > 0,
   });
   const mentionProfiles = mentionProfilesQuery.data?.profiles ?? {};
-  const currentProfile = currentPubkey
-    ? (mentionProfiles[currentPubkey.toLowerCase()] ?? null)
+  const currentProfile = currentAgentId
+    ? (mentionProfiles[currentAgentId.toLowerCase()] ?? null)
     : null;
   const currentDisplayName =
     currentProfile?.displayName ??
-    (currentPubkey ? truncatePubkey(currentPubkey) : "You");
+    (currentAgentId ? truncatePubkey(currentAgentId) : "You");
 
   const pulseMentionMembers = React.useMemo<ChannelMember[]>(() => {
     const members: ChannelMember[] = [];
@@ -302,7 +302,6 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
             <NoteCard
               actions={{
                 reply: noteActions.reply,
-                share: noteActions.share,
                 startDm: noteActions.startDm,
                 toggleUpvote: noteActions.toggleUpvote,
               }}
@@ -310,7 +309,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
               currentUserDisplayName={currentDisplayName}
               currentUserProfile={currentProfile}
               isAgent={agentPubkeySet.has(note.pubkey)}
-              isOwnNote={note.pubkey === currentPubkey}
+              isOwnNote={note.pubkey === currentAgentId}
               isReplySending={noteActions.isReplySending}
               isUpvotePending={noteActions.isUpvotePending(note.id)}
               isUpvoted={noteActions.isUpvoted(note.id)}
@@ -386,7 +385,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                     : "Failed to publish note"}
                 </div>
               )}
-              <ForumComposer
+              <NoteComposer
                 autocompleteBelow
                 className="pulse-composer overflow-hidden rounded-2xl border-border/50 bg-background/70 p-2 shadow-none backdrop-blur-xl supports-[backdrop-filter]:bg-background/55"
                 compact

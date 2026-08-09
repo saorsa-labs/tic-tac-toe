@@ -6,8 +6,7 @@ import {
   buildWelcomeStarterCreateInput,
   LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT,
   pickWelcomeGuideAgent,
-  pickWelcomeGuideAgentForRelay,
-  pickWelcomeTeamStarterAgentForRelay,
+  pickWelcomeTeamStarterAgent,
   welcomeStarterRuntimeUpdate,
   WELCOME_GUIDE_AGENT_NAME,
   WELCOME_GUIDE_PERSONA_ID,
@@ -19,7 +18,6 @@ const PUB_A = "a".repeat(64);
 const PUB_B = "b".repeat(64);
 const PUB_C = "c".repeat(64);
 const RELAY_A = "ws://localhost:3000";
-const RELAY_B = "ws://localhost:3001";
 
 function makeAgent(overrides = {}) {
   return {
@@ -102,42 +100,6 @@ test("pickWelcomeGuideAgent ignores non-Kit agents with the legacy prompt", () =
   assert.equal(pickWelcomeGuideAgent([nonKit, fizz]), fizz);
 });
 
-test("pickWelcomeGuideAgentForRelay ignores Fizz agents from other communities", () => {
-  const otherCommunityFizz = makeAgent({
-    pubkey: PUB_A,
-    personaId: WELCOME_GUIDE_PERSONA_ID,
-    relayUrl: RELAY_A,
-    status: "running",
-  });
-  const currentCommunityFizz = makeAgent({
-    pubkey: PUB_B,
-    personaId: WELCOME_GUIDE_PERSONA_ID,
-    relayUrl: RELAY_B,
-    status: "stopped",
-  });
-
-  assert.equal(
-    pickWelcomeGuideAgentForRelay(
-      [otherCommunityFizz, currentCommunityFizz],
-      RELAY_B,
-    ),
-    currentCommunityFizz,
-  );
-});
-
-test("pickWelcomeGuideAgentForRelay returns null when Fizz only exists in another community", () => {
-  const otherCommunityFizz = makeAgent({
-    pubkey: PUB_A,
-    personaId: WELCOME_GUIDE_PERSONA_ID,
-    relayUrl: RELAY_A,
-  });
-
-  assert.equal(
-    pickWelcomeGuideAgentForRelay([otherCommunityFizz], RELAY_B),
-    null,
-  );
-});
-
 test("starter persona activation is serialized to protect the shared store", async () => {
   const calls = [];
   let activeWrites = 0;
@@ -202,7 +164,6 @@ test("all Welcome starters use the onboarding runtime preference", async () => {
     assert.equal(input.harnessOverride, true);
     assert.equal(input.personaId, starter.personaId);
     assert.equal(input.teamId, WELCOME_TEAM_ID);
-    assert.equal(input.relayUrl, RELAY_A);
     assert.equal(input.spawnAfterCreate, false);
     assert.equal(input.startOnAppLaunch, false);
   }
@@ -305,10 +266,7 @@ test("starter matching ignores user agents with a Welcome persona", () => {
     teamId: null,
   });
 
-  assert.equal(
-    pickWelcomeTeamStarterAgentForRelay([userHoney], honey, RELAY_A),
-    null,
-  );
+  assert.equal(pickWelcomeTeamStarterAgent([userHoney], honey), null);
 });
 
 test("starter matching uses persona identity rather than display name", () => {
@@ -320,35 +278,27 @@ test("starter matching uses persona identity rather than display name", () => {
   const nameOnlyHoney = makeAgent({ name: honey.name, pubkey: PUB_B });
 
   assert.equal(
-    pickWelcomeTeamStarterAgentForRelay(
-      [nameOnlyHoney, renamedHoney],
-      honey,
-      RELAY_A,
-    ),
+    pickWelcomeTeamStarterAgent([nameOnlyHoney, renamedHoney], honey),
     renamedHoney,
   );
 });
 
-test("starter matching is relay scoped and normalizes trailing slashes", () => {
+test("starter matching reuses the team persona across groups (group-independent)", () => {
+  // Native reuse is group-independent: the same team persona is reused wherever
+  // it runs, with no per-community scoping. A running instance wins by status.
   const bumble = WELCOME_TEAM_STARTERS[2];
-  const otherRelay = makeAgent({
+  const firstInstance = makeAgent({
     personaId: bumble.personaId,
-    relayUrl: RELAY_B,
     status: "running",
   });
-  const matchingRelay = makeAgent({
+  const secondInstance = makeAgent({
     personaId: bumble.personaId,
-    relayUrl: `${RELAY_A}/`,
     pubkey: PUB_B,
   });
 
   assert.equal(
-    pickWelcomeTeamStarterAgentForRelay(
-      [otherRelay, matchingRelay],
-      bumble,
-      RELAY_A,
-    ),
-    matchingRelay,
+    pickWelcomeTeamStarterAgent([firstInstance, secondInstance], bumble),
+    firstInstance,
   );
 });
 
@@ -367,15 +317,11 @@ test("starter matching prefers running, then deployed instances", () => {
   });
 
   assert.equal(
-    pickWelcomeTeamStarterAgentForRelay(
-      [stopped, deployed, running],
-      fizz,
-      RELAY_A,
-    ),
+    pickWelcomeTeamStarterAgent([stopped, deployed, running], fizz),
     running,
   );
   assert.equal(
-    pickWelcomeTeamStarterAgentForRelay([stopped, deployed], fizz, RELAY_A),
+    pickWelcomeTeamStarterAgent([stopped, deployed], fizz),
     deployed,
   );
 });

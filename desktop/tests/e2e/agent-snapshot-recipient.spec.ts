@@ -155,7 +155,9 @@ test("recipient_timeline_renders_agent_snapshot_card_not_file_card", async ({
   expect(mediaBox?.width).toBe(mediaBox?.height);
 
   // Metadata names the sharer and keeps the file size.
-  await expect(card).toContainText("Shared by npub1mock... · 1.2 KB");
+  await expect(card).toContainText(
+    "Shared by bodily example dismiss galaxy · 1.2 KB",
+  );
   await expect(card).not.toContainText("Agent snapshot");
 
   // Both actions must be present.

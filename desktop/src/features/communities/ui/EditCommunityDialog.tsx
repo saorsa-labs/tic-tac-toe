@@ -1,10 +1,7 @@
 import * as React from "react";
 
 import type { Community } from "@/features/communities/types";
-import {
-  expandTilde,
-  normalizeRelayUrl,
-} from "@/features/communities/communityStorage";
+import { expandTilde } from "@/features/communities/communityStorage";
 import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
@@ -22,9 +19,7 @@ type EditCommunityDialogProps = {
   onOpenChange: (open: boolean) => void;
   onSave: (
     id: string,
-    updates: Partial<
-      Pick<Community, "name" | "relayUrl" | "token" | "reposDir">
-    >,
+    updates: Partial<Pick<Community, "name" | "reposDir">>,
   ) => void;
   onRemove?: (id: string) => void;
   canRemove?: boolean;
@@ -39,17 +34,12 @@ export function EditCommunityDialog({
   canRemove,
 }: EditCommunityDialogProps) {
   const [name, setName] = React.useState("");
-  const [relayUrl, setRelayUrl] = React.useState("");
-  const [token, setToken] = React.useState("");
   const [reposDir, setReposDir] = React.useState("");
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
 
-  // Sync form state when the dialog opens with a community
   React.useEffect(() => {
     if (community && open) {
       setName(community.name);
-      setRelayUrl(community.relayUrl);
-      setToken(community.token ?? "");
       setReposDir(community.reposDir ?? "");
       setReposDirError(null);
     }
@@ -60,37 +50,16 @@ export function EditCommunityDialog({
   }, [onOpenChange]);
 
   const handleSubmit = React.useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!community || !relayUrl.trim()) {
-        return;
-      }
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      if (!community) return;
 
-      const updates: Partial<
-        Pick<Community, "name" | "relayUrl" | "token" | "reposDir">
-      > = {};
-
+      const updates: Partial<Pick<Community, "name" | "reposDir">> = {};
       const trimmedName = name.trim();
       if (trimmedName && trimmedName !== community.name) {
         updates.name = trimmedName;
       }
 
-      const normalizedUrl = normalizeRelayUrl(relayUrl.trim());
-      if (normalizedUrl !== community.relayUrl) {
-        updates.relayUrl = normalizedUrl;
-      }
-
-      const trimmedToken = token.trim() || undefined;
-      if (trimmedToken !== community.token) {
-        updates.token = trimmedToken;
-      }
-
-      // Expand `~` to an absolute path before save — the backend rejects
-      // tilde paths. An empty field clears the override (REPOS reverts to a
-      // real dir). Validate the expanded value (the bytes the backend
-      // canonicalizes) before save so a bad path is caught here instead of
-      // bricking a later boot. Only emit when the resolved value actually
-      // changed so a no-op edit doesn't trigger a backend re-apply.
       const expandedReposDir = await expandTilde(reposDir);
       if (expandedReposDir !== community.reposDir) {
         try {
@@ -105,10 +74,9 @@ export function EditCommunityDialog({
       if (Object.keys(updates).length > 0) {
         onSave(community.id, updates);
       }
-
       handleClose();
     },
-    [community, name, relayUrl, token, reposDir, onSave, handleClose],
+    [community, handleClose, name, onSave, reposDir],
   );
 
   const handleRemove = React.useCallback(() => {
@@ -116,11 +84,9 @@ export function EditCommunityDialog({
       onRemove(community.id);
       handleClose();
     }
-  }, [community, onRemove, handleClose]);
+  }, [community, handleClose, onRemove]);
 
-  if (!community) {
-    return null;
-  }
+  if (!community) return null;
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -128,12 +94,13 @@ export function EditCommunityDialog({
         <DialogHeader>
           <DialogTitle>Edit Community</DialogTitle>
           <DialogDescription>
-            Update this community's name or relay URL.
+            Update this device&apos;s community label and agent checkout
+            directory.
           </DialogDescription>
         </DialogHeader>
         <form
           className="flex flex-col gap-4"
-          onSubmit={(e) => void handleSubmit(e)}
+          onSubmit={(event) => void handleSubmit(event)}
         >
           <div className="flex flex-col gap-1.5">
             <label
@@ -145,43 +112,10 @@ export function EditCommunityDialog({
             <Input
               autoFocus
               id="edit-ws-name"
-              onChange={(e) => setName(e.target.value)}
+              onChange={(event) => setName(event.target.value)}
               placeholder="My Community"
               type="text"
               value={name}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label
-              className="text-sm font-medium text-foreground"
-              htmlFor="edit-ws-relay-url"
-            >
-              Relay URL
-            </label>
-            <Input
-              id="edit-ws-relay-url"
-              onChange={(e) => setRelayUrl(e.target.value)}
-              placeholder="wss://relay.example.com"
-              type="text"
-              value={relayUrl}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label
-              className="text-sm font-medium text-foreground"
-              htmlFor="edit-ws-token"
-            >
-              API Token
-              <span className="ml-1 text-xs font-normal text-muted-foreground">
-                (optional)
-              </span>
-            </label>
-            <Input
-              id="edit-ws-token"
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="buzz_..."
-              type="password"
-              value={token}
             />
           </div>
           <div className="flex flex-col gap-1.5">
@@ -196,8 +130,8 @@ export function EditCommunityDialog({
             </label>
             <Input
               id="edit-ws-repos-dir"
-              onChange={(e) => {
-                setReposDir(e.target.value);
+              onChange={(event) => {
+                setReposDir(event.target.value);
                 setReposDirError(null);
               }}
               placeholder="~/Development"
@@ -208,7 +142,7 @@ export function EditCommunityDialog({
               <p className="text-xs text-destructive">{reposDirError}</p>
             ) : null}
             <p className="text-xs text-muted-foreground">
-              Point the agent's <code>REPOS</code> directory at an existing
+              Point the agent&apos;s <code>REPOS</code> directory at an existing
               folder so agents work in your local checkouts. Leave blank to use
               the default location.
             </p>
@@ -231,7 +165,7 @@ export function EditCommunityDialog({
               <Button onClick={handleClose} type="button" variant="outline">
                 Cancel
               </Button>
-              <Button disabled={!name.trim() || !relayUrl.trim()} type="submit">
+              <Button disabled={!name.trim()} type="submit">
                 Save Changes
               </Button>
             </div>

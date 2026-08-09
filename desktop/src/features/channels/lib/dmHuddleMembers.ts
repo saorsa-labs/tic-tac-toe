@@ -4,22 +4,22 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 export function getDmHuddleMemberPubkeys(
   channel: Channel | null,
   agentPubkeys: ReadonlySet<string> | undefined,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
 ) {
   if (channel?.channelType !== "dm" || !agentPubkeys) {
     return [];
   }
 
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
   const seen = new Set<string>();
 
   return channel.participantPubkeys.filter((pubkey) => {
     const normalizedPubkey = normalizePubkey(pubkey);
     if (
-      normalizedCurrentPubkey &&
-      normalizedPubkey === normalizedCurrentPubkey
+      normalizedCurrentAgentId &&
+      normalizedPubkey === normalizedCurrentAgentId
     ) {
       return false;
     }
@@ -35,20 +35,20 @@ export function getDmHuddleMemberPubkeys(
 
 export function hasOtherDmParticipant(
   channel: Channel | null,
-  currentPubkey: string | undefined,
+  currentAgentId: string | undefined,
 ) {
   if (channel?.channelType !== "dm") {
     return false;
   }
 
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
 
   return channel.participantPubkeys.some((pubkey) => {
     const normalizedPubkey = normalizePubkey(pubkey);
     return (
-      !normalizedCurrentPubkey || normalizedPubkey !== normalizedCurrentPubkey
+      !normalizedCurrentAgentId || normalizedPubkey !== normalizedCurrentAgentId
     );
   });
 }

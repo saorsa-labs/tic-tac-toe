@@ -14,7 +14,7 @@ import {
 // availableRuntimesForStart. These tests pin the decided rows:
 //   row 1: refuse (actionable error) when the configured runtime is missing
 //   row 2: harnessOverride = !persona.runtime || persona.runtime === runtime.id
-//   row 3: avatar through resolveManagedAgentAvatarUrl (injectable upload)
+//   row 3: avatar URL passes through resolveManagedAgentAvatarUrl (no upload transport)
 //   row 4: create input NEVER contains definition env vars
 //   row 6: runtime list acquisition is refetch-aware
 
@@ -97,44 +97,15 @@ test("row 2: harnessOverride follows the backend-aligned formula", async () => {
   );
 });
 
-test("row 3: plain avatar URLs pass through; base64 data URIs upload via the injectable", async () => {
+test("row 3: avatar URL passes through resolveManagedAgentAvatarUrl unchanged", async () => {
   const plain = await buildInstanceInputForDefinition(persona(), gooseRuntime);
   assert.equal(plain.avatarUrl, "https://example.com/a.png");
 
-  const uploads = [];
-  const uploaded = await buildInstanceInputForDefinition(
+  const dataUri = await buildInstanceInputForDefinition(
     persona({ avatarUrl: "data:image/png;base64,aGk=" }),
     gooseRuntime,
-    async (bytes) => {
-      uploads.push(bytes);
-      return {
-        url: "https://cdn/blob.png",
-        sha256: "x",
-        size: 2,
-        type: "image/png",
-        uploaded: 0,
-      };
-    },
   );
-  assert.equal(uploaded.avatarUrl, "https://cdn/blob.png");
-  assert.equal(uploads.length, 1, "upload must go through the injected fn");
-});
-
-test("row 3: failed persona avatar upload never substitutes the runtime avatar", async () => {
-  const input = await buildInstanceInputForDefinition(
-    persona({
-      id: "builtin:fizz",
-      displayName: "Fizz",
-      avatarUrl: "data:image/png;base64,aGk=",
-    }),
-    claudeRuntime,
-    async () => {
-      throw new Error("upload failed");
-    },
-  );
-
-  assert.equal(input.avatarUrl, undefined);
-  assert.notEqual(input.avatarUrl, claudeRuntime.avatarUrl);
+  assert.equal(dataUri.avatarUrl, "data:image/png;base64,aGk=");
 });
 
 test("mapping carries the runtime and definition fields", async () => {
@@ -179,25 +150,24 @@ test("Buzz shared compute definition carries native provider and auto model", as
   const input = await buildInstanceInputForDefinition(
     persona({
       runtime: "buzz-agent",
-      provider: "relay-mesh",
+      provider: "shared-compute",
       model: "auto",
     }),
     { ...gooseRuntime, id: "buzz-agent", command: "buzz-agent" },
   );
   assert.equal(input.agentCommand, "buzz-agent");
-  assert.equal(input.provider, "relay-mesh");
+  assert.equal(input.provider, "shared-compute");
   assert.equal(input.model, "auto");
   assert.equal(input.spawnAfterCreate, true);
   assert.equal(input.startOnAppLaunch, true);
 });
 
 test("provider intent forces startOnAppLaunch off and omits local commands", async () => {
-  const input = await buildInstanceInputForDefinition(
-    persona(),
-    gooseRuntime,
-    undefined,
-    { type: "provider", id: "blox", config: { region: "us" } },
-  );
+  const input = await buildInstanceInputForDefinition(persona(), gooseRuntime, {
+    type: "provider",
+    id: "blox",
+    config: { region: "us" },
+  });
   assert.deepEqual(input.backend, {
     type: "provider",
     id: "blox",
@@ -216,7 +186,6 @@ test("provider intent forces startOnAppLaunch off and omits local commands", asy
     "model",
     "provider",
     "envVars",
-    "relayMesh",
   ]) {
     assert.equal(key in input, false, `provider intent must omit ${key}`);
   }

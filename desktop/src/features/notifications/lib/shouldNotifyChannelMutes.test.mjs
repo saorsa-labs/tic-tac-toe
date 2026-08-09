@@ -31,7 +31,7 @@ const pTag = (pubkey) => ["p", pubkey];
 const broadcastTag = () => ["broadcast", "1"];
 const hTag = (channelId) => ["h", channelId];
 
-test("hasMentionForEvent: p-tag matching currentPubkey returns true", () => {
+test("hasMentionForEvent: p-tag matching currentAgentId returns true", () => {
   const event = makeEvent([pTag(PUBKEY)]);
   assert.equal(hasMentionForEvent(event, PUBKEY), true);
 });
@@ -41,7 +41,7 @@ test("hasMentionForEvent: p-tag case-insensitive match returns true", () => {
   assert.equal(hasMentionForEvent(event, PUBKEY), true);
 });
 
-test("hasMentionForEvent: p-tag not matching currentPubkey returns false", () => {
+test("hasMentionForEvent: p-tag not matching currentAgentId returns false", () => {
   const event = makeEvent([pTag(OTHER_PUBKEY)]);
   assert.equal(hasMentionForEvent(event, PUBKEY), false);
 });
@@ -51,7 +51,7 @@ test("hasMentionForEvent: no p-tags returns false", () => {
   assert.equal(hasMentionForEvent(event, PUBKEY), false);
 });
 
-test("hasMentionForEvent: empty currentPubkey returns false", () => {
+test("hasMentionForEvent: empty currentAgentId returns false", () => {
   const event = makeEvent([pTag(PUBKEY)]);
   assert.equal(hasMentionForEvent(event, ""), false);
 });

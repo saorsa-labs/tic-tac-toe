@@ -5,7 +5,8 @@ import {
   consumePendingWelcomeChannel,
   ensureStarterChannels,
   ensureWelcomeChannel,
-  findPrivateWelcomeChannel,
+  findPersonalWelcomeChannel,
+  isPersonalWelcomeChannel,
   hasEnsuredWelcomeChannel,
   isWelcomeExperienceChannel,
   markWelcomeChannelEnsured,
@@ -19,7 +20,7 @@ function makeChannel(overrides = {}) {
     id: "welcome-channel",
     name: WELCOME_CHANNEL_NAME,
     channelType: "stream",
-    visibility: "private",
+    visibility: "open",
     description: WELCOME_CHANNEL_DESCRIPTION,
     topic: null,
     purpose: null,
@@ -73,7 +74,7 @@ function installWindowSessionStorage() {
   };
 }
 
-test("ensureWelcomeChannel creates a private Welcome channel when one is missing", async () => {
+test("ensureWelcomeChannel creates a personal open Welcome channel when one is missing", async () => {
   const createdChannel = makeChannel();
   const createInputs = [];
 
@@ -90,7 +91,7 @@ test("ensureWelcomeChannel creates a private Welcome channel when one is missing
     {
       name: WELCOME_CHANNEL_NAME,
       channelType: "stream",
-      visibility: "private",
+      visibility: "open",
       description: WELCOME_CHANNEL_DESCRIPTION,
     },
   ]);
@@ -121,7 +122,7 @@ test("ensureWelcomeChannel replaces existing Welcome in forced-fresh development
 test("ensureWelcomeChannel clears ttl on an existing ephemeral Welcome channel", async () => {
   const existingChannel = makeChannel({
     description:
-      "A private ephemeral channel for getting oriented in this community.",
+      "An open ephemeral channel for getting oriented in this community.",
     id: "existing-welcome",
     ttlDeadline: "2026-06-11T00:00:00.000Z",
     ttlSeconds: 86400,
@@ -153,7 +154,7 @@ test("ensureWelcomeChannel clears ttl on an existing ephemeral Welcome channel",
   ]);
 });
 
-test("ensureWelcomeChannel reuses an existing private solo-member Welcome channel", async () => {
+test("ensureWelcomeChannel reuses an existing personal open solo-member Welcome channel", async () => {
   const existingChannel = makeChannel({ id: "existing-welcome" });
   let createCalls = 0;
 
@@ -218,18 +219,66 @@ test("ensureWelcomeChannel uses member details to allow bot-only extras", async 
   assert.equal(createCalls, 0);
 });
 
-test("findPrivateWelcomeChannel ignores open or shared Welcome channels", () => {
-  assert.equal(
-    findPrivateWelcomeChannel([
-      makeChannel({ id: "open-welcome", visibility: "open" }),
-      makeChannel({
-        id: "shared-private-welcome",
-        memberCount: 2,
-        memberPubkeys: ["current-user", "other-user"],
-      }),
-    ]),
-    null,
-  );
+test("findPersonalWelcomeChannel selects a solo open Welcome channel and ignores shared ones", () => {
+  const solo = makeChannel({ id: "solo-welcome" });
+  const shared = makeChannel({
+    id: "shared-welcome",
+    memberCount: 2,
+    memberPubkeys: ["current-user", "other-user"],
+  });
+
+  // A solo-member open Welcome channel is the personal orientation channel.
+  assert.equal(isPersonalWelcomeChannel(solo), true);
+  assert.equal(findPersonalWelcomeChannel([solo]).id, "solo-welcome");
+
+  // An open Welcome channel shared with a foreign member is not personal.
+  assert.equal(isPersonalWelcomeChannel(shared), false);
+  assert.equal(findPersonalWelcomeChannel([shared]), null);
+});
+
+test("ensureWelcomeChannel creates an open Welcome channel that survives a list/reload as personal", async () => {
+  // welcomeChannelInput is module-private; prove its shape and the list/reload
+  // classification consistency end-to-end through ensureWelcomeChannel.
+  const createdInputs = [];
+
+  // First pass: no existing channel → create from welcomeChannelInput.
+  const first = await ensureWelcomeChannel({
+    getChannels: async () => [],
+    createChannel: async (input) => {
+      createdInputs.push(input);
+      // Build the resulting channel from the SAME input ensureWelcomeChannel
+      // produced, so the reload path classifies exactly what the create path
+      // emits — no independent hardcoding of visibility.
+      return makeChannel({
+        id: "welcome-channel",
+        visibility: input.visibility,
+      });
+    },
+  });
+
+  // The created channel is built from welcomeChannelInput, which MUST be open;
+  // the pre-containment `private` label would no longer classify as personal.
+  assert.equal(createdInputs.length, 1);
+  assert.equal(createdInputs[0].visibility, "open");
+  assert.equal(first.visibility, "open");
+
+  // Reload: the created channel now appears in the list (built from the same
+  // captured input) and MUST classify as the personal Welcome channel again —
+  // reused, never re-created/orphaned. A non-open welcomeChannelInput would
+  // fail to reclassify here and trigger a second create.
+  let reloadCreateCalls = 0;
+  const reloaded = await ensureWelcomeChannel({
+    getChannels: async () => [
+      makeChannel({ id: first.id, visibility: createdInputs[0].visibility }),
+    ],
+    createChannel: async () => {
+      reloadCreateCalls += 1;
+      return makeChannel({ id: "should-not-create" });
+    },
+  });
+
+  assert.equal(reloaded.id, first.id);
+  assert.equal(reloadCreateCalls, 0);
 });
 
 test("pending Welcome channel is consumed only after it appears in the channel list", () => {

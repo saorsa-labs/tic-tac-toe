@@ -1,23 +1,19 @@
 use std::collections::{BTreeMap, HashSet};
 
-use nostr::Keys;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
-use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
         find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
-        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
-        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
-        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
-        DEFAULT_ACP_COMMAND,
+        missing_command_message, normalize_agent_args, resolve_command, save_managed_agents,
+        sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo, AgentModelsResponse,
+        UpdateManagedAgentRequest, UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
-    relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
 
@@ -220,51 +216,6 @@ pub async fn discover_agent_models(
     }
     let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
     let merged_env = discovery_env_with_baked_floor(merged_env);
-
-    // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
-    // client endpoint is started only after a live target is selected.
-    #[cfg(feature = "mesh-llm")]
-    if input.provider.as_deref().map(str::trim)
-        == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
-    {
-        let events = crate::relay::query_relay(
-            &state,
-            &[
-                crate::mesh_llm::mesh_status_filter(),
-                crate::mesh_llm::relay_membership_filter(),
-            ],
-        )
-        .await
-        .map_err(|error| format!("Buzz shared compute model discovery failed: {error}"))?;
-        let availability = crate::mesh_llm::availability_from_events(events);
-        if availability.models.is_empty() {
-            return Err(availability.reason.unwrap_or_else(|| {
-                "No live Buzz shared compute models are available".to_string()
-            }));
-        }
-        return Ok(AgentModelsResponse {
-            agent_name: crate::managed_agents::RELAY_MESH_PROVIDER_ID.to_string(),
-            agent_version: "relay-availability".to_string(),
-            models: availability
-                .models
-                .into_iter()
-                .map(|model| AgentModelInfo {
-                    id: model.id,
-                    name: model.name,
-                    description: None,
-                })
-                .collect(),
-            agent_default_model: None,
-            selected_model: None,
-            supports_switching: true,
-        });
-    }
-    #[cfg(not(feature = "mesh-llm"))]
-    if input.provider.as_deref().map(str::trim)
-        == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
-    {
-        return Err("Buzz shared compute is not available in this build".to_string());
-    }
 
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
@@ -486,20 +437,24 @@ async fn discover_openai_compatible_models(
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
 ) -> Result<Option<AgentModelsResponse>, String> {
-    let relay_mesh = provider.map(str::trim) == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID);
-    if !relay_mesh && !is_openai_compatible_provider(provider) {
+    let shared_compute =
+        provider.map(str::trim) == Some(crate::managed_agents::SHARED_COMPUTE_PROVIDER_ID);
+    if !shared_compute && !is_openai_compatible_provider(provider) {
         return Ok(None);
     }
 
-    let api_key = if relay_mesh {
-        crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
+    let api_key = if shared_compute {
+        crate::managed_agents::SHARED_COMPUTE_API_KEY_PLACEHOLDER.to_string()
     } else {
         env_or_process_value(env, "OPENAI_COMPAT_API_KEY")
             .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?
     };
     let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
-    let url = if relay_mesh {
-        format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
+    let url = if shared_compute {
+        format!(
+            "{}/models",
+            crate::managed_agents::SHARED_COMPUTE_API_BASE_URL
+        )
     } else {
         openai_compatible_models_url_for_discovery(env)
     };
@@ -779,7 +734,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params, rollback) = {
+    let summary = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -796,14 +751,10 @@ pub async fn update_managed_agent(
         }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
-        let previous_record = record.clone();
-
-        let mut name_changed = false;
         if let Some(name_update) = input.name {
             let trimmed = name_update.trim().to_string();
             if !trimmed.is_empty() && trimmed != record.name {
                 record.name = trimmed;
-                name_changed = true;
             }
         }
         if let Some(model_update) = input.model {
@@ -821,12 +772,6 @@ pub async fn update_managed_agent(
         // turn_timeout_seconds is intentionally not applied here —
         // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness.
         // Use idle_timeout_seconds or max_turn_duration_seconds instead.
-        // Store the relay override exactly as supplied (trimmed). An explicit
-        // value pins the agent; empty falls back to the workspace relay at
-        // read-time. A name-only edit (relay_url == None) leaves the pin intact.
-        if let Some(relay_url) = input.relay_url {
-            record.relay_url = relay_url.trim().to_string();
-        }
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
         }
@@ -859,19 +804,16 @@ pub async fn update_managed_agent(
             record.env_vars = env_vars;
         }
 
-        // Native provider/model fields are authoritative. Keep the typed marker
-        // derived for new records while retaining legacy typed records for
-        // non-native providers.
-        if record.provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID) {
+        // Shared compute uses automatic routing when no explicit model is set.
+        if record.provider.as_deref() == Some(crate::managed_agents::SHARED_COMPUTE_PROVIDER_ID) {
             let model_ref = record
                 .model
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .unwrap_or(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID)
+                .unwrap_or(crate::managed_agents::SHARED_COMPUTE_AUTO_MODEL_ID)
                 .to_string();
-            record.model = Some(model_ref.clone());
-            record.relay_mesh = Some(crate::managed_agents::RelayMeshConfig { model_ref });
+            record.model = Some(model_ref);
         }
 
         // Inbound author gate: merge patch onto current values, then validate
@@ -906,69 +848,11 @@ pub async fn update_managed_agent(
             .find(|r| r.pubkey == input.pubkey)
             .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
 
-        // Publish the edit to the relay. After-save, inside the lock, before
-        // any .await. The retention upsert hashes the opt-IN projection, so an
-        // update that touched only runtime/local fields is a no-op publish.
-        super::agents::retain_managed_agent_pending(&app, &state, record);
-
-        let sync_params = if name_changed {
-            let agent_keys = Keys::parse(&record.private_key_nsec)
-                .map_err(|e| format!("failed to parse agent keys: {e}"))?;
-            // Re-publish the renamed profile to the agent's effective relay:
-            // an explicit per-agent relay wins; empty falls back to workspace.
-            let relay_url = crate::relay::effective_agent_relay_url(
-                &record.relay_url,
-                &relay_ws_url_with_override(&state),
-            );
-            let display_name = record.name.clone();
-            // Avatar fallback derives from the EFFECTIVE harness (persona-wins),
-            // not the frozen snapshot, so an inherited harness picks the right
-            // default avatar.
-            let personas = load_personas(&app).unwrap_or_default();
-            let effective_command = crate::managed_agents::record_agent_command(record, &personas);
-            let avatar_url = record
-                .avatar_url
-                .clone()
-                .or_else(|| managed_agent_avatar_url(&effective_command));
-            let auth_tag = record.auth_tag.clone();
-            Some((agent_keys, relay_url, display_name, avatar_url, auth_tag))
-        } else {
-            None
-        };
-
-        let summary = {
-            let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(&app, record, &runtimes, &personas)?
-        };
-        let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
-        (summary, sync_params, rollback)
+        let personas = load_personas(&app).unwrap_or_default();
+        build_managed_agent_summary(&app, record, &runtimes, &personas)?
     }; // lock dropped here
 
     try_regenerate_nest(&app);
-
-    // Phase 2: relay profile sync (async, outside lock). A rename is committed
-    // only when this succeeds; otherwise restore the complete pre-edit record
-    // so Desktop and the relay keep one authoritative name.
-    if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
-        if let Err(sync_error) = sync_managed_agent_profile(
-            &state,
-            &relay_url,
-            &agent_keys,
-            &display_name,
-            avatar_url.as_deref(),
-            auth_tag.as_deref(),
-        )
-        .await
-        {
-            let rollback = rollback.ok_or_else(|| {
-                "missing local rollback state after relay profile sync failure".to_string()
-            })?;
-            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
-            return Err(format!(
-                "Agent rename failed because its relay profile could not be updated. No changes were saved: {sync_error}"
-            ));
-        }
-    }
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,

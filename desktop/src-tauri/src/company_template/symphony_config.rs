@@ -3,7 +3,7 @@
 //! The generated frontmatter binds Symphony directly to the native x0xd task
 //! list and signing endpoint. It contains no relay configuration or fallback.
 
-use crate::company_template::plan::{instance_slug, task_list_topic};
+use crate::company_template::plan::{instance_topic_fragment, task_list_topic};
 use crate::company_template::spec::CompanyTemplate;
 
 /// Generate a deterministic workflow using the daemon's conventional loopback
@@ -23,19 +23,28 @@ pub fn generate_symphony_config_for_x0xd(
     instance_id: &str,
     x0xd_url: &str,
 ) -> String {
-    let slug = instance_slug(instance_id);
+    let fragment = instance_topic_fragment(instance_id);
+    // Single consumed backlog: Symphony binds exactly ONE task list
+    // (`tracker.list_id`). `validate_supported_contract` guarantees the first
+    // task list is the company-shared (primary) one, so `task_lists.first()`
+    // is the Symphony backlog; any other task lists are auxiliary x0xd
+    // resources the UI may surface independently.
     let task_list_id = template
         .task_lists
         .first()
-        .map(|task_list| task_list_topic(&slug, &task_list.id))
-        .unwrap_or_else(|| task_list_topic(&slug, "company-tasks"));
-    let workspace_root = format!("~/.x0x-company/{slug}/workspaces");
+        .map(|task_list| task_list_topic(&fragment, &task_list.id))
+        .unwrap_or_else(|| task_list_topic(&fragment, "company-tasks"));
+    let workspace_root = format!("~/.x0x-company/{fragment}/workspaces");
+    // Single uniform runner: one supervised daemon resolves one RunnerSpec and
+    // routes every issue through it (no per-role routing). Every role shares
+    // one harness (enforced by `validate_supported_contract`), so
+    // `roles.first()` is the whole roster's preset — never a silent
+    // first-role-wins collapse.
     let runner_preset = template
         .roles
         .first()
-        .map(|role| runner_preset(&role.harness))
+        .map(|role| crate::company_template::spec::runner_preset(&role.harness))
         .unwrap_or("pi");
-
     let mut out = String::new();
     out.push_str("---\n");
     out.push_str("tracker:\n  kind: x0x_crdt\n");
@@ -71,17 +80,6 @@ pub fn generate_symphony_config_for_x0xd(
     out
 }
 
-fn runner_preset(harness: &str) -> &'static str {
-    match harness.trim().to_ascii_lowercase().as_str() {
-        "claude" | "claude-code" | "claude_code" => "claude_code",
-        "codex" => "codex",
-        "kimi" => "kimi",
-        "glm" => "glm",
-        "minimax" => "minimax",
-        _ => "pi",
-    }
-}
-
 /// JSON string syntax is a valid YAML quoted scalar and gives deterministic,
 /// injection-safe escaping without a second serializer dependency.
 fn yaml_scalar(value: &str) -> String {
@@ -99,7 +97,10 @@ mod tests {
         let b = generate_symphony_config_for_x0xd(&template, "acme-2026", "http://127.0.0.1:49152");
         assert_eq!(a, b);
         assert!(a.starts_with("---\ntracker:\n"));
-        assert!(a.contains("list_id: \"ttt.acme-2026.tasklist.company-tasks\""));
+        assert!(
+            a.contains("list_id: \"ttt.acme-2026-") && a.contains(".tasklist.company-tasks\""),
+            "list_id must use instance-scoped fragment: {a}"
+        );
         assert!(a.contains("x0xd_url: \"http://127.0.0.1:49152\""));
         assert!(!a.contains("relay"));
     }

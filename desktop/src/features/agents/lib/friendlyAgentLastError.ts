@@ -32,11 +32,8 @@ export type FriendlyAgentLastError =
   | { severity: "denied"; copy: string }
   | { severity: "generic"; copy: string };
 
-/**
- * The exact copy for the relay-mesh denial. Centralized as a constant so the
- * test asserts the user-facing string verbatim rather than a fuzzy pattern.
- */
-export const RELAY_MESH_DENIED_COPY =
+/** Stable copy for a shared-compute access denial. */
+export const COMPUTE_ACCESS_DENIED_COPY =
   "Community access denied this agent — check its community membership.";
 
 export const MODEL_NOT_FOUND_COPY =
@@ -78,7 +75,7 @@ export function friendlyAgentLastError(
   if (effectiveCode != null) {
     switch (effectiveCode) {
       case -32001:
-        return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+        return { severity: "denied", copy: COMPUTE_ACCESS_DENIED_COPY };
       case -32002:
         return { severity: "denied", copy: MODEL_NOT_FOUND_COPY };
       case -32603: {
@@ -110,7 +107,7 @@ export function friendlyAgentLastError(
     trimmed.startsWith("Agent reported error: llm auth:") ||
     trimmed.startsWith("llm auth:")
   ) {
-    return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+    return { severity: "denied", copy: COMPUTE_ACCESS_DENIED_COPY };
   }
 
   return { severity: "generic", copy: trimmed };

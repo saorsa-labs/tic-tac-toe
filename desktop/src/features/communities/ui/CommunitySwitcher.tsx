@@ -4,7 +4,6 @@ import {
   ChevronRight,
   MoreHorizontal,
   Plus,
-  WifiOff,
 } from "lucide-react";
 import * as React from "react";
 
@@ -22,24 +21,9 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { cn } from "@/shared/lib/cn";
-import type { ConnectionState } from "@/shared/api/relayClientShared";
-import {
-  isRelayConnectionDegraded,
-  useRelayConnection,
-} from "@/shared/api/useRelayConnection";
 import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import { EditCommunityDialog } from "./EditCommunityDialog";
-
-const CONNECTION_STATE_LABEL: Record<ConnectionState, string> = {
-  idle: "Not connected",
-  connecting: "Connecting…",
-  connected: "Connected",
-  reconnecting: "Reconnecting to relay…",
-  stalled: "Connection lost — relay is not responding",
-  disconnected: "Disconnected from relay",
-};
 
 type CommunitySwitcherProps = {
   activeCommunity: Community | null;
@@ -49,7 +33,7 @@ type CommunitySwitcherProps = {
   onAddCommunity: () => void;
   onUpdateCommunity: (
     id: string,
-    updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
+    updates: Partial<Pick<Community, "name" | "reposDir">>,
   ) => void;
   onRemoveCommunity: (id: string) => void;
 };
@@ -96,10 +80,7 @@ export function CommunitySwitcher({
     React.useState<Community | null>(null);
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
   const profileMenuHoverTimer = React.useRef<number | null>(null);
-  const connectionState = useRelayConnection();
-  const degraded = isRelayConnectionDegraded(connectionState);
-  const connectionLabel = CONNECTION_STATE_LABEL[connectionState];
-  const activeIconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
+  const activeIconQuery = useActiveCommunityIcon(activeCommunity?.groupId);
   const activeIcon = activeIconQuery.data ?? null;
   const isProfileVariant = variant === "profile";
 
@@ -141,43 +122,15 @@ export function CommunitySwitcher({
 
   const triggerContent = (
     <>
-      {degraded ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span
-              aria-hidden="false"
-              className={
-                isProfileVariant
-                  ? "flex h-5 w-5 shrink-0 animate-pulse items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-destructive"
-                  : "flex h-5 w-5 shrink-0 animate-pulse items-center justify-center text-destructive"
-              }
-              data-testid="relay-connection-warning"
-              role="img"
-            >
-              <WifiOff className={isProfileVariant ? "h-4 w-4" : "h-4 w-4"} />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side={isProfileVariant ? "top" : "bottom"}>
-            {connectionLabel}
-          </TooltipContent>
-        </Tooltip>
-      ) : (
-        <CommunityEmojiIcon
-          className={
-            isProfileVariant
-              ? "flex w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs"
-              : "flex w-5 shrink-0 items-center justify-center text-xs"
-          }
-          iconUrl={activeIcon}
-        />
-      )}
-      <span
+      <CommunityEmojiIcon
         className={
-          degraded
-            ? "min-w-0 flex-1 truncate font-medium text-destructive animate-pulse"
-            : "min-w-0 flex-1 truncate font-medium"
+          isProfileVariant
+            ? "flex w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs"
+            : "flex w-5 shrink-0 items-center justify-center text-xs"
         }
-      >
+        iconUrl={activeIcon}
+      />
+      <span className="min-w-0 flex-1 truncate font-medium">
         {activeCommunity?.name ?? "No community"}
       </span>
       {variant === "profile-menu" ? (
@@ -201,11 +154,7 @@ export function CommunitySwitcher({
           <button
             aria-expanded={dropdownOpen}
             aria-haspopup="menu"
-            aria-label={
-              degraded
-                ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : "Switch community"
-            }
+            aria-label="Switch community"
             className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none data-[state=open]:bg-muted/50 data-[state=open]:text-popover-foreground"
             data-testid="community-switcher"
             onMouseEnter={() => scheduleProfileMenu(true)}
@@ -289,11 +238,7 @@ export function CommunitySwitcher({
       <DropdownMenuTrigger asChild>
         {variant === "profile" ? (
           <button
-            aria-label={
-              degraded
-                ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : "Switch community"
-            }
+            aria-label="Switch community"
             className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md py-0.5 text-left text-xs text-sidebar-foreground/50 outline-hidden transition-colors hover:text-sidebar-foreground focus:outline-none focus-visible:outline-none data-[state=open]:text-sidebar-foreground"
             data-testid="community-switcher"
             type="button"
@@ -302,11 +247,6 @@ export function CommunitySwitcher({
           </button>
         ) : (
           <SidebarMenuButton
-            aria-label={
-              degraded
-                ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : undefined
-            }
             className="h-auto gap-2 rounded-xl px-2.5 py-2 data-[state=open]:bg-sidebar-accent"
             data-testid="community-switcher"
             type="button"

@@ -1,3 +1,4 @@
+// Modified from block/buzz @ 710ed9ff — see FORK.md (Stage 1: pub(crate) for local-stack sidecar Job Objects)
 //! Windows process-tree lifecycle primitives for managed agents.
 //!
 //! The Unix teardown uses `process_group(0)` + group signals (in `runtime.rs`).
@@ -58,7 +59,7 @@ impl Drop for JobHandle {
 /// regardless of child timing, but it requires raw `CreateProcessW`/`ResumeThread`
 /// (materially more unsafe Win32) to close a microsecond race, so it is
 /// deliberately not used here.
-fn create_job_for_child(pid: u32) -> Option<JobHandle> {
+pub(crate) fn create_job_for_child(pid: u32) -> Option<JobHandle> {
     use std::ptr::null;
     use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
     use windows_sys::Win32::System::JobObjects::{

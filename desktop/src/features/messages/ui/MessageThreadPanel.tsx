@@ -16,6 +16,7 @@ import {
 } from "@/features/messages/lib/messageGrouping";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import { nativeMessageCapabilities } from "@/features/messages/lib/nativeMessaging";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -52,7 +53,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channel: Channel | null;
   channelId: string | null;
   channelName: string;
-  currentPubkey?: string;
+  currentAgentId?: string;
   disabled?: boolean;
   firstUnreadReplyId?: string | null;
   huddleMemberPubkeys?: readonly string[];
@@ -182,7 +183,7 @@ export function MessageThreadPanel({
   channelId,
   channelName,
   columnMaxWidthPx,
-  currentPubkey,
+  currentAgentId,
   disabled = false,
   firstUnreadReplyId,
   huddleMemberPubkeys,
@@ -496,9 +497,9 @@ export function MessageThreadPanel({
   const initialAgentPubkeys = React.useMemo(() => {
     if (
       !threadHead ||
-      !currentPubkey ||
+      !currentAgentId ||
       normalizePubkey(threadHead.signerPubkey ?? threadHead.pubkey ?? "") !==
-        normalizePubkey(currentPubkey)
+        normalizePubkey(currentAgentId)
     ) {
       return [];
     }
@@ -514,7 +515,7 @@ export function MessageThreadPanel({
       (pubkey) =>
         knownAgentPubkeys.has(pubkey) || profiles?.[pubkey]?.isAgent === true,
     );
-  }, [currentPubkey, knownAgentPubkeys, profiles, threadHead]);
+  }, [currentAgentId, knownAgentPubkeys, profiles, threadHead]);
 
   if (!threadHead) {
     return null;
@@ -553,9 +554,10 @@ export function MessageThreadPanel({
                 onDelete &&
                 canManageMessageForCurrentUser(
                   threadHead,
-                  currentPubkey,
+                  currentAgentId,
                   profiles,
-                )
+                ) &&
+                nativeMessageCapabilities.canDeleteMessage
                   ? onDelete
                   : undefined
               }
@@ -563,9 +565,10 @@ export function MessageThreadPanel({
                 onEdit &&
                 canManageMessageForCurrentUser(
                   threadHead,
-                  currentPubkey,
+                  currentAgentId,
                   profiles,
-                )
+                ) &&
+                nativeMessageCapabilities.canEditMessage
                   ? onEdit
                   : undefined
               }
@@ -574,7 +577,11 @@ export function MessageThreadPanel({
               }
               onMarkUnread={onMarkUnread}
               onMarkRead={onMarkRead}
-              onToggleReaction={onToggleReaction}
+              onToggleReaction={
+                nativeMessageCapabilities.canToggleReaction
+                  ? onToggleReaction
+                  : undefined
+              }
               onUnfollowThread={
                 onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
               }
@@ -714,9 +721,10 @@ export function MessageThreadPanel({
                           onDelete &&
                           canManageMessageForCurrentUser(
                             entry.message,
-                            currentPubkey,
+                            currentAgentId,
                             profiles,
-                          )
+                          ) &&
+                          nativeMessageCapabilities.canDeleteMessage
                             ? onDelete
                             : undefined
                         }
@@ -724,16 +732,21 @@ export function MessageThreadPanel({
                           onEdit &&
                           canManageMessageForCurrentUser(
                             entry.message,
-                            currentPubkey,
+                            currentAgentId,
                             profiles,
-                          )
+                          ) &&
+                          nativeMessageCapabilities.canEditMessage
                             ? onEdit
                             : undefined
                         }
                         onMarkUnread={onMarkUnread}
                         onMarkRead={onMarkRead}
                         onReply={onSelectReplyTarget}
-                        onToggleReaction={onToggleReaction}
+                        onToggleReaction={
+                          nativeMessageCapabilities.canToggleReaction
+                            ? onToggleReaction
+                            : undefined
+                        }
                         profiles={profiles}
                         showDepthGuides={shouldShowThreadBranchGuides}
                       />
@@ -833,7 +846,12 @@ export function MessageThreadPanel({
             channelName={channelName}
             channelType={channel?.channelType ?? null}
             containerClassName={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
-            disabled={disabled || isSending || !channelId}
+            disabled={
+              disabled ||
+              isSending ||
+              !channelId ||
+              !nativeMessageCapabilities.canReplyInThread
+            }
             draftKey={`thread:${threadHead.id}`}
             autoSubmitDraftKey={autoSendDraftKey}
             onAutoSubmitComplete={onAutoSubmitComplete}
@@ -867,7 +885,7 @@ export function MessageThreadPanel({
                 <TypingIndicatorRow
                   channel={channel}
                   className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
-                  currentPubkey={currentPubkey}
+                  currentAgentId={currentAgentId}
                   profiles={profiles}
                   typingPubkeys={threadTypingPubkeys}
                   variant="activity"

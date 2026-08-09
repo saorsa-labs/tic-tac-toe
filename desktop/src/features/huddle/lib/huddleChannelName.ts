@@ -3,7 +3,7 @@ import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 type BuildHuddleChannelNameInput = {
   channel: Channel;
-  currentPubkey?: string;
+  currentAgentId?: string;
   members?: readonly ChannelMember[];
 };
 
@@ -38,7 +38,7 @@ function channelParticipantLabel(
 
 export function buildHuddleChannelName({
   channel,
-  currentPubkey,
+  currentAgentId,
   members = [],
 }: BuildHuddleChannelNameInput): string {
   if (channel.channelType !== "dm") {
@@ -49,19 +49,19 @@ export function buildHuddleChannelName({
   const membersByPubkey = new Map(
     members.map((member) => [normalizePubkey(member.pubkey), member]),
   );
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const normalizedCurrentAgentId = currentAgentId
+    ? normalizePubkey(currentAgentId)
     : null;
   const participantPubkeys = channel.participantPubkeys;
   const orderedPubkeys =
-    normalizedCurrentPubkey &&
+    normalizedCurrentAgentId &&
     participantPubkeys.some(
-      (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+      (pubkey) => normalizePubkey(pubkey) === normalizedCurrentAgentId,
     )
       ? [
-          currentPubkey ?? "",
+          currentAgentId ?? "",
           ...participantPubkeys.filter(
-            (pubkey) => normalizePubkey(pubkey) !== normalizedCurrentPubkey,
+            (pubkey) => normalizePubkey(pubkey) !== normalizedCurrentAgentId,
           ),
         ]
       : participantPubkeys;

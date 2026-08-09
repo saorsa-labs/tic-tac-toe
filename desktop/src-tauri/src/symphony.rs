@@ -44,6 +44,11 @@ use crate::local_stack::{
 const SYMPHONY_DIR_NAME: &str = "x0x-symphony-ttt";
 /// File the daemon writes the resolved ephemeral loopback port into (bare u16).
 const PORT_FILE: &str = "daemon.port";
+/// Durable record of the WORKFLOW.md config path an OWNED daemon was spawned
+/// against, written so a later attach can PROVE the running daemon's config
+/// matches the requested one (defending rebind/reconcile against silently
+/// re-claiming a warm daemon started under a different config).
+const CONFIG_PATH_FILE: &str = "config.path";
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const DEFAULT_SYMPHONY_TIMEOUT: Duration = Duration::from_secs(12);
@@ -67,6 +72,47 @@ pub(crate) fn read_symphony_port(data_dir: &Path) -> Option<u16> {
     let raw = std::fs::read_to_string(data_dir.join(PORT_FILE)).ok()?;
     let port = raw.trim().parse::<u16>().ok()?;
     (port != 0).then_some(port)
+}
+
+/// Read the durable config-path artifact the spawner wrote when it last spawned
+/// an owned daemon against this data dir. `None` if missing/unreadable/empty.
+fn read_config_path_artifact(data_dir: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(data_dir.join(CONFIG_PATH_FILE)).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+/// Whether two paths refer to the same file. Canonicalizes both (so symlinks /
+/// relative paths don't cause false mismatches); falls back to a raw compare
+/// when canonicalization is unavailable.
+fn paths_match(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+/// Whether the running daemon's RECORDED config matches the requested one.
+/// `false` when no artifact exists (attach is then UNPROVEN — the caller must
+/// fail closed or spawn, never silently re-claim the daemon).
+fn config_path_proven(data_dir: &Path, requested: &Path) -> bool {
+    read_config_path_artifact(data_dir)
+        .map(|recorded| paths_match(&recorded, requested))
+        .unwrap_or(false)
+}
+
+/// Record the config path an owned daemon was spawned against, so a later
+/// attach can prove the running daemon's config. Best-effort: a missing
+/// artifact simply makes a future attach unproven (→ spawn or fail closed).
+fn write_config_path_artifact(data_dir: &Path, config_path: &Path) {
+    let _ = std::fs::write(
+        data_dir.join(CONFIG_PATH_FILE),
+        config_path.to_string_lossy().as_bytes(),
+    );
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -94,6 +140,15 @@ pub(crate) enum SymphonyError {
     InvalidOverride {
         which: &'static str,
         reason: String,
+    },
+    /// A healthy daemon is attached but provably running a DIFFERENT config than
+    /// requested. We do not own it (cannot rebind or respawn on the shared data
+    /// dir), so the bind fails closed rather than mislabeling an incompatible
+    /// daemon. `running` is the recorded config (if any); `requested` is what
+    /// the caller asked to bind.
+    IncompatibleAttachedConfig {
+        running: Option<PathBuf>,
+        requested: PathBuf,
     },
 }
 
@@ -135,6 +190,18 @@ impl fmt::Display for SymphonyError {
             Self::InvalidOverride { which, reason } => {
                 write!(f, "invalid {which} binary override: {reason}")
             }
+            Self::IncompatibleAttachedConfig { running, requested } => {
+                let running_disp = running
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                write!(
+                    f,
+                    "a healthy symphony daemon is already running an incompatible config; requested `{}` but the running daemon was started against `{}` (stop the other daemon or let its owner rebind)",
+                    requested.display(),
+                    running_disp
+                )
+            }
         }
     }
 }
@@ -148,6 +215,10 @@ pub(crate) struct SymphonyHandle {
     pub(crate) child: Option<OwnedChild>,
     pub(crate) base_url: String,
     pub(crate) data_dir: PathBuf,
+    /// The WORKFLOW.md config path this daemon was brought up against. Used to
+    /// detect that a second Company instance needs a rebind (different config
+    /// → shut down the owned child and re-bring-up against the new config).
+    pub(crate) config_path: PathBuf,
 }
 
 impl SymphonyHandle {
@@ -170,6 +241,7 @@ impl fmt::Debug for SymphonyHandle {
         f.debug_struct("SymphonyHandle")
             .field("base_url", &self.base_url)
             .field("data_dir", &self.data_dir)
+            .field("config_path", &self.config_path)
             .field("owned", &self.owns_child())
             .finish()
     }
@@ -239,12 +311,16 @@ impl<P: DaemonProbe, S: SidecarSpawner, T: TimeSource> SymphonySupervisor<P, S, 
     pub(crate) fn bring_up(&self, config_path: &Path) -> Result<SymphonyHandle, SymphonyError> {
         let data_dir = self.cfg.data_dir.clone();
 
-        // 1. Attach to a healthy named daemon, else spawn and own one.
-        let (child, base_url) = match self.try_attach(&data_dir)? {
+        // 1. Attach to a healthy named daemon ONLY if its config is proven to
+        //    match `config_path`; otherwise spawn and own one.
+        let (child, base_url) = match self.try_attach(&data_dir, config_path)? {
             Some(base_url) => (None, base_url),
             None => {
                 let child = self.spawn_daemon(config_path)?;
                 let base_url = self.wait_ready(&data_dir)?;
+                // Record the durable config proof so a later attach (e.g. a
+                // restart reconcile) can verify the running daemon's config.
+                write_config_path_artifact(&data_dir, config_path);
                 (Some(child), base_url)
             }
         };
@@ -253,12 +329,21 @@ impl<P: DaemonProbe, S: SidecarSpawner, T: TimeSource> SymphonySupervisor<P, S, 
             child,
             base_url,
             data_dir,
+            config_path: config_path.to_path_buf(),
         })
     }
 
     /// Attach when `daemon.port` + `api-token` are present and bearer `/health`
-    /// is OK. Returns the base URL, or `None` to spawn instead.
-    fn try_attach(&self, data_dir: &Path) -> Result<Option<String>, SymphonyError> {
+    /// is OK, AND the running daemon's config is PROVEN to match `config_path`.
+    /// Returns the base URL (`Some`), `None` to spawn instead, or `Err` when a
+    /// healthy daemon is provably running a different config (fail closed: we
+    /// do not own it, so we can neither rebind nor respawn on the shared data
+    /// dir — preserving attached-process ownership safety).
+    fn try_attach(
+        &self,
+        data_dir: &Path,
+        config_path: &Path,
+    ) -> Result<Option<String>, SymphonyError> {
         let Some(port) = read_symphony_port(data_dir) else {
             return Ok(None);
         };
@@ -267,7 +352,16 @@ impl<P: DaemonProbe, S: SidecarSpawner, T: TimeSource> SymphonySupervisor<P, S, 
         };
         let base_url = loopback_api_base(port);
         match self.probe.health(&base_url, &token) {
-            Ok(()) => Ok(Some(base_url)),
+            Ok(()) => {
+                if config_path_proven(data_dir, config_path) {
+                    Ok(Some(base_url))
+                } else {
+                    Err(SymphonyError::IncompatibleAttachedConfig {
+                        running: read_config_path_artifact(data_dir),
+                        requested: config_path.to_path_buf(),
+                    })
+                }
+            }
             Err(_) => Ok(None),
         }
     }
@@ -340,21 +434,34 @@ impl DaemonProbe for LoopbackSymphonyProbe {
 
 /// Bring up the supervised symphony daemon during/after app setup, bound to the
 /// supplied `WORKFLOW.md` config path. Best-effort and synchronous: on success
-/// stores the handle in [`AppState`]; on failure captures the typed error. No-op
-/// if a daemon is already supervised. The token never reaches `AppState`.
+/// stores the handle in [`AppState`]; on failure captures the typed error.
+///
+/// If a daemon is already supervised against the SAME config path, this is a
+/// no-op (idempotent resume). If supervised against a DIFFERENT config path
+/// (a second Company instance), the owned child is shut down and re-bound to
+/// the new config. An attached (not-owned) daemon cannot be rebound and is
+/// left as-is. The token never reaches `AppState`.
 pub(crate) fn bring_up_symphony(app: &tauri::AppHandle, config_path: &Path) {
     use tauri::Manager;
     let state = app.state::<crate::app_state::AppState>();
 
-    // Already supervised — never clobber an owned child.
-    if state
+    // Same config → idempotent resume. Different config → rebind.
+    let needs_rebind = state
         .local_symphony
         .lock()
-        .map(|g| g.is_some())
-        .unwrap_or(false)
-    {
+        .map(|guard| {
+            guard
+                .as_ref()
+                .is_none_or(|handle| handle.config_path != config_path)
+        })
+        .unwrap_or(true);
+
+    if !needs_rebind {
         return;
     }
+
+    // Different config or no handle: shut down any existing owned child first.
+    shutdown_symphony_state(&state);
 
     if !config_path.is_file() {
         record_error(&state, SymphonyError::NoConfig.to_string());

@@ -105,6 +105,29 @@ impl std::fmt::Display for StorePolicy {
     }
 }
 
+/// The single supported Symphony runner preset a role `harness` maps to.
+///
+/// One supervised `x0x-symphonyd` resolves exactly ONE `RunnerSpec` (one
+/// command/args/env preset) and runs every claimed issue through it — there is
+/// no per-role or per-agent routing. Company therefore supports a single
+/// uniform runner across its role roster; `validate_supported_contract`
+/// enforces that every role normalizes to the same preset, replacing the old
+/// silent first-role-wins collapse with a visible, fail-closed invariant.
+///
+/// This is the canonical mapping (also used by Symphony config generation); it
+/// lives in the lowest template module so both validation and config
+/// generation agree on one notion of "supported runner".
+pub(crate) fn runner_preset(harness: &str) -> &'static str {
+    match harness.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" | "claude_code" => "claude_code",
+        "codex" => "codex",
+        "kimi" => "kimi",
+        "glm" => "glm",
+        "minimax" => "minimax",
+        _ => "pi",
+    }
+}
+
 fn default_version() -> String {
     "1".to_string()
 }
@@ -206,7 +229,6 @@ pub struct CompanyTemplate {
 
 impl CompanyTemplate {
     /// Find a group by local id.
-    #[cfg(test)]
     pub fn group(&self, id: &str) -> Option<&GroupSpec> {
         self.groups.iter().find(|g| g.id == id)
     }

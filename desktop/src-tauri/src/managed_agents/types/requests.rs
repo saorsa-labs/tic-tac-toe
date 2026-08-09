@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    RelayMeshConfig, RespondTo,
+    RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -132,7 +132,6 @@ pub struct CreateManagedAgentRequest {
     /// Optional deployment-time team binding for runtime instruction layering.
     #[serde(default)]
     pub team_id: Option<String>,
-    pub relay_url: Option<String>,
     pub acp_command: Option<String>,
     pub agent_command: Option<String>,
     /// True when `agent_command` is a runtime command the user deliberately
@@ -182,8 +181,6 @@ pub struct CreateManagedAgentRequest {
     /// before being written to the record.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
-    #[serde(default)]
-    pub relay_mesh: Option<RelayMeshConfig>,
 }
 
 /// Patch request for updating a managed agent's mutable fields.
@@ -216,8 +213,6 @@ pub struct UpdateManagedAgentRequest {
     #[allow(dead_code)]
     #[serde(default)]
     pub turn_timeout_seconds: Option<u64>,
-    #[serde(default)]
-    pub relay_url: Option<String>,
     #[serde(default)]
     pub acp_command: Option<String>,
     #[serde(default)]

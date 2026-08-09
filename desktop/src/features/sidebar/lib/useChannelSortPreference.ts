@@ -1,6 +1,5 @@
 import * as React from "react";
 
-import { relayClient } from "@/shared/api/relayClient";
 import {
   DEFAULT_STORE,
   readChannelSortStore,
@@ -12,8 +11,6 @@ import {
   type ChannelSortMode,
   type ChannelSortStore,
 } from "./channelSortPreference";
-import { ChannelSortSyncManager } from "./channelSortSync";
-import type { RemoteSortPrefs } from "./channelSortSync";
 
 /**
  * Persistent per-group sidebar sort preferences, scoped by pubkey + relay so
@@ -22,10 +19,8 @@ import type { RemoteSortPrefs } from "./channelSortSync";
  * custom section) carries its own saved Recent/A–Z mode; unset groups default
  * to A–Z. Mirrors changes made in other windows via the storage event.
  *
- * Preferences sync across clients via encrypted NIP-78 app data (kind 30078,
- * d-tag `channel-sort`), following the channel-sections pattern: localStorage
- * stays the instant/offline cache, the relay blob is the cross-client source
- * of truth, and conflicts resolve with whole-blob last-write-wins.
+ * The packaged app has no relay transport, so sort preferences are local-only
+ * — there is no cross-device sync.
  *
  * When `liveSectionIds` is provided, writes also prune `section:<id>` entries
  * whose custom section no longer exists, so deleted sections don't leave
@@ -44,27 +39,16 @@ export function useChannelSortPreference(
     return readChannelSortStore(pubkey, relayUrl);
   });
 
-  const managerRef = React.useRef<ChannelSortSyncManager | null>(null);
-  const lastAppliedRemoteTs = React.useRef(0);
-  const lastAppliedEventId = React.useRef("");
-
+  // Reload from storage when the active identity/community changes.
   React.useEffect(() => {
     if (!pubkey) {
       setStore(DEFAULT_STORE);
-      lastAppliedRemoteTs.current = 0;
-      lastAppliedEventId.current = "";
       return;
     }
     setStore(readChannelSortStore(pubkey, relayUrl));
-    lastAppliedRemoteTs.current = 0;
-    lastAppliedEventId.current = "";
-    managerRef.current = new ChannelSortSyncManager(pubkey);
-    return () => {
-      managerRef.current?.destroy();
-      managerRef.current = null;
-    };
   }, [pubkey, relayUrl]);
 
+  // Mirror changes made in other tabs/windows via the storage event.
   React.useEffect(() => {
     if (!pubkey) return;
     const key = storageKey(pubkey, relayUrl);
@@ -77,90 +61,6 @@ export function useChannelSortPreference(
       window.removeEventListener("storage", handler);
     };
   }, [pubkey, relayUrl]);
-
-  const applyRemote = React.useCallback(
-    (
-      remote: RemoteSortPrefs,
-    ): ((prev: ChannelSortStore) => ChannelSortStore) => {
-      return (prev) => {
-        if (!pubkey) return prev;
-        if (remote.createdAt < lastAppliedRemoteTs.current) return prev;
-        if (
-          remote.createdAt === lastAppliedRemoteTs.current &&
-          remote.eventId <= lastAppliedEventId.current
-        )
-          return prev;
-        lastAppliedRemoteTs.current = remote.createdAt;
-        lastAppliedEventId.current = remote.eventId;
-        managerRef.current?.cancelPendingPublish();
-        if (!writeChannelSortStore(pubkey, remote.store, relayUrl)) return prev;
-        return remote.store;
-      };
-    },
-    [pubkey, relayUrl],
-  );
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let cancelled = false;
-    void managerRef.current?.fetchRemoteSortPrefs().then((remote) => {
-      if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelSortStore(pubkey, relayUrl);
-        if (Object.keys(local.groups).length > 0) {
-          managerRef.current?.publishSortPrefs(local);
-        }
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [pubkey, relayUrl, applyRemote]);
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let unsub: (() => Promise<void>) | null = null;
-    let cancelled = false;
-    void managerRef.current
-      ?.subscribeToSortPrefs((remote) => {
-        if (cancelled) return;
-        setStore(applyRemote(remote));
-      })
-      .then((dispose) => {
-        if (cancelled) {
-          void dispose();
-        } else {
-          unsub = dispose;
-        }
-      });
-    return () => {
-      cancelled = true;
-      if (unsub) void unsub();
-    };
-  }, [pubkey, applyRemote]);
-
-  React.useEffect(() => {
-    if (!pubkey) return;
-    let cancelled = false;
-    const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteSortPrefs().then((remote) => {
-        if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
-        }
-        const pending = managerRef.current?.getPendingStore();
-        if (pending) {
-          managerRef.current?.publishSortPrefs(pending);
-        }
-      });
-    });
-    return () => {
-      cancelled = true;
-      unsub();
-    };
-  }, [pubkey, applyRemote]);
 
   const sortModeFor = React.useCallback(
     (group: ChannelSortGroupKey) => sortModeForGroup(store, group),
@@ -181,7 +81,6 @@ export function useChannelSortPreference(
           ? stripOrphanedSectionModes(withUpdate, liveSectionIds)
           : withUpdate;
         if (!writeChannelSortStore(pubkey, next, relayUrl)) return prev;
-        managerRef.current?.publishSortPrefs(next);
         return next;
       });
     },

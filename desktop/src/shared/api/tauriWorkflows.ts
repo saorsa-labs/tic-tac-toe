@@ -188,7 +188,6 @@ export async function createWorkflow(
   });
   return {
     workflow: { ...projected, ownerPubkey: store.owner ?? "" },
-    webhookSecret: null,
   };
 }
 
@@ -213,7 +212,6 @@ export async function updateWorkflow(
   });
   return {
     workflow: { ...projected, ownerPubkey: store.owner ?? "" },
-    webhookSecret: null,
   };
 }
 

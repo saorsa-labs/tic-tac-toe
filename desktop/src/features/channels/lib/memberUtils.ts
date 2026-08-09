@@ -11,9 +11,9 @@ export const roleOrder: Record<ChannelMember["role"], number> = {
 
 export function formatMemberName(
   member: ChannelMember,
-  currentPubkey?: string,
+  currentAgentId?: string,
 ) {
-  if (currentPubkey && member.pubkey === currentPubkey) {
+  if (currentAgentId && member.pubkey === currentAgentId) {
     return "You";
   }
 
@@ -23,12 +23,12 @@ export function formatMemberName(
 export function compareMembersByRole(
   left: ChannelMember,
   right: ChannelMember,
-  currentPubkey?: string,
+  currentAgentId?: string,
 ): number {
-  if (currentPubkey && left.pubkey === currentPubkey) {
+  if (currentAgentId && left.pubkey === currentAgentId) {
     return -1;
   }
-  if (currentPubkey && right.pubkey === currentPubkey) {
+  if (currentAgentId && right.pubkey === currentAgentId) {
     return 1;
   }
   const roleDelta = roleOrder[left.role] - roleOrder[right.role];

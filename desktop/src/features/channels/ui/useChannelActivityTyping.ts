@@ -133,7 +133,7 @@ export function mergeAgentNamesIntoProfiles(
   profiles: UserProfileLookup,
   managedAgents: ManagedAgent[],
   relayAgents: RelayAgent[],
-  currentPubkey?: string | null,
+  currentAgentId?: string | null,
 ): UserProfileLookup {
   const merged = { ...profiles };
   for (const agent of relayAgents) {
@@ -153,7 +153,7 @@ export function mergeAgentNamesIntoProfiles(
       displayName: merged[key]?.displayName || agent.name,
       avatarUrl: merged[key]?.avatarUrl ?? agent.avatarUrl,
       nip05Handle: merged[key]?.nip05Handle ?? null,
-      ownerPubkey: merged[key]?.ownerPubkey ?? currentPubkey ?? null,
+      ownerPubkey: merged[key]?.ownerPubkey ?? currentAgentId ?? null,
       isAgent: true,
     };
   }

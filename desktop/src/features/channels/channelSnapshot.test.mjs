@@ -4,19 +4,26 @@ import test from "node:test";
 import {
   channelSnapshotKey,
   readChannelSnapshot,
-  removeChannelSnapshotForRelay,
+  removeChannelSnapshotForGroup,
   writeChannelSnapshot,
 } from "./channelSnapshot.ts";
 
-if (typeof globalThis.window === "undefined") {
-  const storage = new Map();
-  globalThis.window = {
-    localStorage: {
-      getItem: (key) => storage.get(key) ?? null,
-      setItem: (key, value) => storage.set(key, value),
-      removeItem: (key) => storage.delete(key),
-    },
-  };
+// Per-test hermetic localStorage. Each test starts from an empty store so
+// assertions never depend on ordering or leftover state from a sibling test.
+const store = new Map();
+globalThis.window = globalThis.window ?? {};
+globalThis.window.localStorage = {
+  getItem: (key) => store.get(key) ?? null,
+  setItem: (key, value) => {
+    store.set(key, value);
+  },
+  removeItem: (key) => {
+    store.delete(key);
+  },
+};
+
+function resetStorage() {
+  store.clear();
 }
 
 function makeChannel(overrides = {}) {
@@ -41,59 +48,91 @@ function makeChannel(overrides = {}) {
   };
 }
 
-const RELAY = "wss://relay.example.com";
+const GROUP_ID = "group-abc";
 
-test("channelSnapshotKey: normalizes trailing slash and case", () => {
-  assert.equal(
-    channelSnapshotKey("WSS://Relay.Example.com/"),
-    channelSnapshotKey("wss://relay.example.com"),
+test("channelSnapshotKey embeds the opaque groupId verbatim", () => {
+  // A group id is a stable x0x identifier, not a URL — it is NEVER normalized.
+  assert.equal(channelSnapshotKey(GROUP_ID), "buzz-channels.v1:group-abc");
+  assert.notEqual(
+    channelSnapshotKey("group-abc"),
+    channelSnapshotKey("group-xyz"),
   );
 });
 
 test("read after write returns the persisted channels", () => {
+  resetStorage();
   const channels = [makeChannel(), makeChannel({ id: "chan-2", name: "Dev" })];
-  writeChannelSnapshot(RELAY, channels);
-  assert.deepEqual(readChannelSnapshot(RELAY), channels);
+  writeChannelSnapshot(GROUP_ID, channels);
+  assert.deepEqual(readChannelSnapshot(GROUP_ID), channels);
 });
 
-test("read for an unknown relay returns null", () => {
-  assert.equal(readChannelSnapshot("wss://never-written.example.com"), null);
+test("read for an unknown group returns null", () => {
+  resetStorage();
+  assert.equal(readChannelSnapshot("never-written"), null);
 });
 
 test("read returns null for malformed JSON", () => {
-  window.localStorage.setItem(channelSnapshotKey(RELAY), "not-json{{{");
-  assert.equal(readChannelSnapshot(RELAY), null);
+  resetStorage();
+  window.localStorage.setItem(channelSnapshotKey(GROUP_ID), "not-json{{{");
+  assert.equal(readChannelSnapshot(GROUP_ID), null);
 });
 
 test("read returns null for a wrong-version payload", () => {
+  resetStorage();
   window.localStorage.setItem(
-    channelSnapshotKey(RELAY),
+    channelSnapshotKey(GROUP_ID),
     JSON.stringify({ version: 2, channels: [makeChannel()] }),
   );
-  assert.equal(readChannelSnapshot(RELAY), null);
+  assert.equal(readChannelSnapshot(GROUP_ID), null);
 });
 
 test("read returns null when channels is not an array", () => {
+  resetStorage();
   window.localStorage.setItem(
-    channelSnapshotKey(RELAY),
+    channelSnapshotKey(GROUP_ID),
     JSON.stringify({ version: 1, channels: "nope" }),
   );
-  assert.equal(readChannelSnapshot(RELAY), null);
+  assert.equal(readChannelSnapshot(GROUP_ID), null);
 });
 
-test("remove clears the snapshot for that relay", () => {
-  writeChannelSnapshot(RELAY, [makeChannel()]);
-  removeChannelSnapshotForRelay(RELAY);
-  assert.equal(readChannelSnapshot(RELAY), null);
+test("removeChannelSnapshotForGroup clears only that group's snapshot", () => {
+  resetStorage();
+  writeChannelSnapshot(GROUP_ID, [makeChannel()]);
+  writeChannelSnapshot("group-other", [makeChannel({ id: "chan-9" })]);
+
+  removeChannelSnapshotForGroup(GROUP_ID);
+
+  assert.equal(readChannelSnapshot(GROUP_ID), null);
+  assert.notEqual(readChannelSnapshot("group-other"), null);
 });
 
 test("write is tolerant of storage failures", () => {
+  resetStorage();
   const original = window.localStorage.setItem;
   window.localStorage.setItem = () => {
     throw new Error("quota exceeded");
   };
   try {
-    assert.doesNotThrow(() => writeChannelSnapshot(RELAY, [makeChannel()]));
+    assert.doesNotThrow(() => writeChannelSnapshot(GROUP_ID, [makeChannel()]));
+  } finally {
+    window.localStorage.setItem = original;
+  }
+});
+
+test("write skips re-serializing an unchanged list", () => {
+  resetStorage();
+  const channels = [makeChannel()];
+  writeChannelSnapshot(GROUP_ID, channels);
+
+  let setCalls = 0;
+  const original = window.localStorage.setItem;
+  window.localStorage.setItem = () => {
+    setCalls++;
+  };
+  try {
+    // Same channels, same order → already-serialized, no setItem.
+    writeChannelSnapshot(GROUP_ID, channels);
+    assert.equal(setCalls, 0);
   } finally {
     window.localStorage.setItem = original;
   }

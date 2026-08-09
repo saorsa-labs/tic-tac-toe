@@ -7,6 +7,7 @@ import type {
   PresenceLookup,
   PresenceStatus,
   Profile,
+  RelayAgent,
   UpdateProfileInput,
   UserSearchResult,
   UsersBatchResponse,
@@ -22,6 +23,31 @@ export type NativeContact = {
 
 export async function listNativeContacts(): Promise<NativeContact[]> {
   return invokeTauri<NativeContact[]>("x0x_list_contacts");
+}
+
+/** Project the active x0x group's roster into the shared agent directory. */
+export async function listNativeAgents(): Promise<RelayAgent[]> {
+  const groupId = await getActiveNativeGroupId();
+  const members = (await x0xGetGroupMembers(groupId)).filter(
+    (member) => member.state === "active",
+  );
+  const presence = await getNativePresence(
+    members.map((member) => member.agentId),
+  );
+  return members.map((member) => ({
+    pubkey: member.agentId,
+    name: member.displayName?.trim() || member.agentId,
+    agentType: "x0x-agent",
+    channels: [groupId],
+    channelIds: [groupId],
+    capabilities: [],
+    status: presence[member.agentId] ?? "offline",
+    // Active x0x community members are valid native DM recipients. Project
+    // them as shared "anyone" agents so the recipient picker does not discard
+    // the very roster returned by x0xd.
+    respondTo: "anyone",
+    respondToAllowlist: [],
+  }));
 }
 
 export async function addNativeContact(

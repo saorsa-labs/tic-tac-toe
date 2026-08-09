@@ -65,9 +65,7 @@ function ChannelRouteComponent() {
       <ChannelRouteScreen
         autoSendDraftKey={search.autoSend ?? null}
         channelId={channelId}
-        selectedPostId={null}
         targetMessageId={search.messageId ?? null}
-        targetReplyId={null}
         targetThreadRootId={search.threadRootId ?? search.thread ?? null}
       />
     </React.Suspense>

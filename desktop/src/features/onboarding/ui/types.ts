@@ -1,10 +1,6 @@
 import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
 
-export type OnboardingPage =
-  | "profile"
-  | "key-import"
-  | "avatar"
-  | "membership-denied";
+export type OnboardingPage = "profile" | "avatar" | "membership-denied";
 
 export type OnboardingActions = {
   complete: () => void;
@@ -38,7 +34,6 @@ export type ProfileStepAvatarState = {
 
 export type ProfileStepState = {
   avatar: ProfileStepAvatarState;
-  isUploadingAvatar: boolean;
   isSaving: boolean;
   name: ProfileStepNameState;
   saveRecovery: ProfileStepSaveRecovery;
@@ -47,9 +42,7 @@ export type ProfileStepState = {
 export type ProfileStepActions = {
   advanceWithoutSaving: () => void;
   back?: () => void;
-  importExistingKey: () => void;
   clearAvatarDraft: () => void;
-  onUploadingChange: (isUploading: boolean) => void;
   skipForNow: () => void;
   submit: () => void;
   updateAvatarUrl: (value: string) => void;

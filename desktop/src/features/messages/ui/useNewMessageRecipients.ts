@@ -22,8 +22,12 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent, UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
-/** Maximum recipients (excluding the current user) a DM can address. */
-export const NEW_MESSAGE_RECIPIENT_LIMIT = 8;
+/**
+ * Maximum recipients (excluding the current user) a DM can address. Native
+ * direct messaging is one-to-one only (x0xd POST /direct/send addresses a
+ * single AgentId); group-DMs have no native contract, so the picker caps at 1.
+ */
+export const NEW_MESSAGE_RECIPIENT_LIMIT = 1;
 
 const DIRECTORY_PAGE_SIZE = 50;
 
@@ -62,11 +66,11 @@ function candidateWithAgentMetadata(
  */
 export function useNewMessageRecipients({
   active,
-  currentPubkey,
+  currentAgentId,
 }: {
   /** When false, the directory/agent queries stay idle. */
   active: boolean;
-  currentPubkey?: string;
+  currentAgentId?: string;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [directoryIdentityQuery, setDirectoryIdentityQuery] = React.useState<
@@ -106,11 +110,11 @@ export function useNewMessageRecipients({
         agent,
       ]),
     );
-    const currentPubkeyNormalized = currentPubkey
-      ? normalizePubkey(currentPubkey)
+    const currentAgentIdNormalized = currentAgentId
+      ? normalizePubkey(currentAgentId)
       : null;
     const eligibleAgentPubkeys = getMentionableAgentPubkeys({
-      currentPubkey,
+      currentAgentId,
       managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
         (agent) => agent.pubkey,
       ),
@@ -125,7 +129,7 @@ export function useNewMessageRecipients({
       const pubkey = normalizePubkey(candidate.pubkey);
 
       if (
-        pubkey === currentPubkeyNormalized ||
+        pubkey === currentAgentIdNormalized ||
         (!options.includeSelected && selectedPubkeys.has(pubkey)) ||
         isArchivedDiscovery(pubkey) ||
         (candidate.isAgent && !eligibleAgentPubkeys.has(pubkey))
@@ -191,7 +195,7 @@ export function useNewMessageRecipients({
           displayName: agent.name,
           avatarUrl: null,
           nip05Handle: null,
-          ownerPubkey: currentPubkey ?? null,
+          ownerPubkey: currentAgentId ?? null,
           isAgent: true,
           isManagedAgent: true,
           personaId: agent.personaId,
@@ -203,7 +207,7 @@ export function useNewMessageRecipients({
     const coalescedCandidates = coalesceAgentAutocompleteCandidates(
       [...candidatesByPubkey.values()],
       {
-        currentPubkey,
+        currentAgentId,
         getLabel: formatRecipientName,
       },
     );
@@ -217,7 +221,7 @@ export function useNewMessageRecipients({
     });
   }, [
     channelsQuery.data,
-    currentPubkey,
+    currentAgentId,
     deferredSearchQuery,
     isArchivedDiscovery,
     managedAgentsQuery.data,
@@ -254,12 +258,12 @@ export function useNewMessageRecipients({
             Boolean(
               pubkey &&
                 pubkey.toLowerCase() !==
-                  identityQuery.data?.pubkey?.toLowerCase(),
+                  identityQuery.data?.agentId?.toLowerCase(),
             ),
           ),
       ),
     ],
-    [identityQuery.data?.pubkey, searchResults],
+    [identityQuery.data?.agentId, searchResults],
   );
   const ownerProfilesQuery = useUsersBatchQuery(searchOwnerPubkeys, {
     enabled: active && searchOwnerPubkeys.length > 0,
@@ -310,7 +314,7 @@ export function useNewMessageRecipients({
   }, []);
 
   return {
-    currentPubkey: currentPubkey ?? identityQuery.data?.pubkey,
+    currentAgentId: currentAgentId ?? identityQuery.data?.agentId,
     deferredSearchQuery,
     handleDirectoryScroll,
     hasReachedRecipientLimit,

@@ -1,6 +1,8 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import type {
   CompanyInstantiationResult,
+  CompanyInstanceStatus,
+  CompanyInstanceSummary,
   CompanyTemplate,
   InstantiateCompanyTemplateInput,
   SymphonyAgentCard,
@@ -15,6 +17,8 @@ type RawSupervisionStatus = {
   running: boolean;
   base_url: string | null;
   owned: boolean;
+  active_instance_id: string | null;
+  error: string | null;
 };
 
 type RawTask = {
@@ -68,6 +72,9 @@ type RawCompanyTemplate = {
 type RawCompanyInstantiationResult = {
   instance_id: string;
   run_id: string | null;
+  // Provisioning outcome (ManifestStatus serde snake_case). Absent on the
+  // pre-cutover fixture; a present run implies "complete".
+  status?: string;
   groups: CompanyInstantiationResult["groups"];
   agents: { agent_id: string; role: string; group_id: string }[];
   workflow_md: string | null;
@@ -124,6 +131,15 @@ export function fromRawTemplate(raw: RawCompanyTemplate): CompanyTemplate {
 export function fromRawInstantiationResult(
   raw: RawCompanyInstantiationResult,
 ): CompanyInstantiationResult {
+  // ManifestStatus serializes snake_case. The attempt is terminal in one of:
+  // complete, resumable (durable, retryable), or cancelled (terminal). An
+  // unexpected/in_progress token is treated as resumable (never "complete").
+  const status: CompanyInstantiationResult["status"] =
+    raw.status === "complete"
+      ? "complete"
+      : raw.status === "cancelled"
+        ? "cancelled"
+        : "resumable";
   return {
     instanceId: raw.instance_id,
     runId: raw.run_id,
@@ -135,6 +151,7 @@ export function fromRawInstantiationResult(
     })),
     workflowMd: raw.workflow_md,
     errors: raw.errors,
+    status,
   };
 }
 
@@ -146,7 +163,10 @@ export async function getSymphonyDaemonStatus(): Promise<SymphonyDaemonStatus> {
     available: raw.running,
     baseUrl: raw.base_url,
     owned: raw.owned,
-    error: raw.running ? null : "x0x-symphonyd is not running",
+    activeInstanceId: raw.active_instance_id ?? null,
+    // Prefer the backend's captured bring-up error; synthesize a label only
+    // when the daemon is down and the backend supplied no detail.
+    error: raw.error ?? (raw.running ? null : "x0x-symphonyd is not running"),
   };
 }
 
@@ -258,10 +278,61 @@ export async function instantiateCompanyTemplate(
   );
 }
 
+/** Resume an existing in_progress/resumable Company instance by its exact id.
+ * Never mints a new id: provisioning skips completed steps and the post-phases
+ * advance idempotently to complete, or remain honestly resumable. */
+export async function resumeCompanyInstance(
+  instanceId: string,
+): Promise<CompanyInstantiationResult> {
+  return fromRawInstantiationResult(
+    await invokeTauri<RawCompanyInstantiationResult>(
+      "resume_company_instance",
+      {
+        instanceId,
+      },
+    ),
+  );
+}
+
 export async function subscribeSymphonyEvents(): Promise<void> {
   await invokeTauri("symphony_subscribe_events");
 }
 
 export async function cancelCompanyRun(instanceId: string): Promise<void> {
   await invokeTauri("cancel_company_run", { instanceId });
+}
+
+export async function listCompanyInstances(): Promise<
+  CompanyInstanceSummary[]
+> {
+  // Wire is camelCase (Rust CompanyInstanceSummary has rename_all="camelCase");
+  // reading snake_case here previously yielded undefined instance ids. The
+  // status/active fields are additive and may be absent pre-cutover, so they
+  // are defaulted rather than required.
+  const raw = await invokeTauri<
+    {
+      instanceId: string;
+      runId: string | null;
+      status?: string;
+      active?: boolean;
+    }[]
+  >("list_company_instances");
+  return raw.map((r) => {
+    // Known statuses pass through; an UNKNOWN wire status must never default
+    // to "complete" (complete is a lifecycle-proven claim owned by the
+    // backend). Default to the safe, cancellable/resumable state instead.
+    const status: CompanyInstanceStatus =
+      r.status === "complete" ||
+      r.status === "resumable" ||
+      r.status === "in_progress" ||
+      r.status === "cancelled"
+        ? r.status
+        : "resumable";
+    return {
+      instanceId: r.instanceId,
+      runId: r.runId,
+      status,
+      active: r.active ?? false,
+    };
+  });
 }

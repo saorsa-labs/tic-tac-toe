@@ -5,7 +5,7 @@ const { nativeGroupToCommunity, requireAgentId } = await import(
   "./nativeCommunityApi.ts"
 );
 
-test("native community adapter preserves Buzz shape with daemon group id", () => {
+test("native community adapter preserves the daemon group id", () => {
   const community = nativeGroupToCommunity({
     groupId: "group:opaque/7",
     name: "Research",
@@ -14,14 +14,17 @@ test("native community adapter preserves Buzz shape with daemon group id", () =>
   });
   assert.equal(community.id, "group:opaque/7");
   assert.equal(community.groupId, "group:opaque/7");
-  assert.equal(community.relayUrl, "x0x://group/group%3Aopaque%2F7");
-  assert.equal("token" in community, false);
-  assert.equal("pubkey" in community, false);
+  assert.deepEqual(Object.keys(community).sort(), [
+    "addedAt",
+    "groupId",
+    "id",
+    "name",
+  ]);
 });
 
-test("AgentId validation fails closed on Nostr and malformed identifiers", () => {
+test("AgentId validation fails closed on malformed identifiers", () => {
   const agentId = "AB".repeat(32);
   assert.equal(requireAgentId(agentId), agentId.toLowerCase());
-  assert.throws(() => requireAgentId(`npub1${"q".repeat(59)}`), /x0x Agent ID/);
+  assert.throws(() => requireAgentId("q".repeat(63)), /x0x Agent ID/);
   assert.throws(() => requireAgentId("deadbeef"), /x0x Agent ID/);
 });

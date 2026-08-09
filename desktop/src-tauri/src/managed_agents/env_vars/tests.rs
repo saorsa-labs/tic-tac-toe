@@ -90,11 +90,11 @@ fn merged_env_strips_reserved_keys_from_persona() {
     // persona data (e.g. older record from before validation existed),
     // it must be stripped before reaching the child process.
     let persona = map(&[
-        ("BUZZ_PRIVATE_KEY", "nsec1evil"),
+        ("X0X_DATA_DIR", "/tmp/attacker-owned"),
         ("ANTHROPIC_API_KEY", "ok"),
     ]);
     let merged = merged_user_env(&persona, &BTreeMap::new());
-    assert!(!merged.contains_key("BUZZ_PRIVATE_KEY"));
+    assert!(!merged.contains_key("X0X_DATA_DIR"));
     assert_eq!(
         merged.get("ANTHROPIC_API_KEY").map(String::as_str),
         Some("ok")
@@ -104,13 +104,13 @@ fn merged_env_strips_reserved_keys_from_persona() {
 #[test]
 fn merged_env_strips_reserved_keys_from_agent() {
     let agent = map(&[
-        ("NOSTR_PRIVATE_KEY", "nsec1evil"),
-        ("BUZZ_AUTH_TAG", "{}"),
+        ("X0X_AGENT_ID", "attacker-agent"),
+        ("X0X_OWNER_AGENT_ID", "attacker-owner"),
         ("FOO", "1"),
     ]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
-    assert!(!merged.contains_key("NOSTR_PRIVATE_KEY"));
-    assert!(!merged.contains_key("BUZZ_AUTH_TAG"));
+    assert!(!merged.contains_key("X0X_AGENT_ID"));
+    assert!(!merged.contains_key("X0X_OWNER_AGENT_ID"));
     assert_eq!(merged.get("FOO").map(String::as_str), Some("1"));
     assert_eq!(merged.len(), 1);
 }
@@ -118,9 +118,9 @@ fn merged_env_strips_reserved_keys_from_agent() {
 #[test]
 fn merged_env_strips_reserved_case_insensitive() {
     // Unix env vars are case-sensitive at the syscall level, but we
-    // refuse close-typo variants too — a lowercase `buzz_private_key`
-    // is almost certainly a footgun, not a legitimate use.
-    let agent = map(&[("buzz_private_key", "x"), ("Buzz_Auth_Tag", "y")]);
+    // refuse close-typo variants too — lowercase native identity keys are
+    // almost certainly footguns, not legitimate settings.
+    let agent = map(&[("x0x_agent_id", "x"), ("X0x_Owner_Agent_Id", "y")]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
 }
@@ -136,11 +136,11 @@ fn is_reserved_recognises_full_list() {
 }
 
 #[test]
-fn reserved_keys_include_agent_owner_for_legacy_records() {
-    // Legacy records without auth_tag fall back to BUZZ_ACP_AGENT_OWNER
-    // to enforce the respond-to gate. Must not be user-overridable.
-    assert!(is_reserved_env_key("BUZZ_ACP_AGENT_OWNER"));
-    let agent = map(&[("BUZZ_ACP_AGENT_OWNER", "imposter")]);
+fn reserved_keys_include_native_owner_identity() {
+    // The owner identity scopes managed-agent authorization. It must not be
+    // user-overridable through inherited environment settings.
+    assert!(is_reserved_env_key("X0X_OWNER_AGENT_ID"));
+    let agent = map(&[("X0X_OWNER_AGENT_ID", "imposter")]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
 }
@@ -172,11 +172,11 @@ fn reserved_keys_include_code_execution_surface() {
 }
 
 #[test]
-fn reserved_keys_include_relay_url() {
-    // Overriding the relay URL could redirect the agent to an
-    // attacker-controlled relay.
-    assert!(is_reserved_env_key("BUZZ_RELAY_URL"));
-    let agent = map(&[("BUZZ_RELAY_URL", "ws://attacker.example")]);
+fn reserved_keys_include_api_token() {
+    // The desktop owns the local daemon credential. User overrides could
+    // redirect or impersonate authenticated control-plane requests.
+    assert!(is_reserved_env_key("BUZZ_API_TOKEN"));
+    let agent = map(&[("BUZZ_API_TOKEN", "attacker-token")]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
 }
@@ -191,22 +191,22 @@ fn validate_keys_accepts_normal_env() {
 
 #[test]
 fn validate_keys_rejects_reserved() {
-    let env = map(&[("BUZZ_PRIVATE_KEY", "nsec1evil")]);
+    let env = map(&[("X0X_AGENT_ID", "attacker-agent")]);
     let err = validate_user_env_keys(&env).unwrap_err();
-    assert!(err.contains("BUZZ_PRIVATE_KEY"), "got: {err}");
+    assert!(err.contains("X0X_AGENT_ID"), "got: {err}");
     assert!(err.contains("reserved"), "got: {err}");
 }
 
 #[test]
 fn validate_keys_lists_all_reserved_keys_found() {
     let env = map(&[
-        ("BUZZ_PRIVATE_KEY", "x"),
-        ("NOSTR_PRIVATE_KEY", "y"),
+        ("X0X_AGENT_ID", "attacker-agent"),
+        ("X0X_OWNER_AGENT_ID", "attacker-owner"),
         ("ANTHROPIC_API_KEY", "ok"),
     ]);
     let err = validate_user_env_keys(&env).unwrap_err();
-    assert!(err.contains("BUZZ_PRIVATE_KEY"));
-    assert!(err.contains("NOSTR_PRIVATE_KEY"));
+    assert!(err.contains("X0X_AGENT_ID"));
+    assert!(err.contains("X0X_OWNER_AGENT_ID"));
 }
 
 #[test]
@@ -227,8 +227,8 @@ fn validate_keys_accepts_empty_map() {
 // Rust's `Command::env(k, v)` will accept a key containing `=` and
 // pass it straight into the child's environ block, where
 // `getenv("PREFIX")` matches anything after the first `=`. Concretely:
-// `c.env("BUZZ_AUTH_TAG=x", "forged")` results in the child seeing
-// `BUZZ_AUTH_TAG=x=forged` and `getenv("BUZZ_AUTH_TAG") == "x=forged"`.
+// `c.env("X0X_AGENT_ID=x", "forged")` results in the child seeing
+// `X0X_AGENT_ID=x=forged` and `getenv("X0X_AGENT_ID") == "x=forged"`.
 // That bypasses our reserved-key check, which compares strings.
 // These tests pin the fix at the validator boundary.
 
@@ -251,8 +251,8 @@ fn is_well_formed_rejects_malformed_keys() {
     for key in [
         "",                  // empty
         "=",                 // bare equals
-        "BUZZ_AUTH_TAG=x",   // =-in-key bypass
-        "BUZZ_PRIVATE_KEY=", // trailing equals
+        "X0X_AGENT_ID=x",    // =-in-key bypass
+        "BUZZ_API_TOKEN=",   // trailing equals
         "FOO BAR",           // space
         " FOO",              // leading whitespace
         "FOO\nBAR",          // newline
@@ -269,15 +269,14 @@ fn is_well_formed_rejects_malformed_keys() {
 
 #[test]
 fn validate_keys_rejects_equals_in_key_bypass() {
-    // The actual exploit: `BUZZ_AUTH_TAG=x` smuggles a value past
+    // The actual exploit: `X0X_AGENT_ID=x` smuggles a value past
     // the reserved-key string compare and into the child's environ.
-    let env = map(&[("BUZZ_AUTH_TAG=x", "forged")]);
+    let env = map(&[("X0X_AGENT_ID=x", "forged")]);
     let err = validate_user_env_keys(&env).unwrap_err();
     assert!(err.contains("[A-Za-z_]"), "got: {err}");
-    // After P2 fix the key is truncated at `=` in the error to avoid
-    // surfacing pasted secrets — only the prefix should appear, with an
-    // ellipsis marking that we elided trailing content.
-    assert!(err.contains("BUZZ_AUTH_TAG"), "got: {err}");
+    // The key is truncated at `=` in the error to avoid surfacing pasted
+    // secrets — only the prefix appears, with an ellipsis marking elision.
+    assert!(err.contains("X0X_AGENT_ID"), "got: {err}");
     assert!(err.contains('…'), "expected ellipsis marker: {err}");
     assert!(!err.contains("=x"), "leak of value past `=`: {err}");
 }

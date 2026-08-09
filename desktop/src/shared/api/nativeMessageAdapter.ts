@@ -29,7 +29,9 @@ import type { RelayEvent } from "@/shared/api/types";
 import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 import type {
   X0xHistoryRow,
+  X0xLiveDirectMessage,
   X0xLiveMessage,
+  X0xScope,
 } from "@/shared/api/tauriNativeX0x";
 
 // ─── Content envelope ───────────────────────────────────────────────────────
@@ -173,8 +175,19 @@ export function liveMessageToRelayEvent(
     return null;
   }
 
+  // Canonical identity is the daemon-assigned msg_id (BLAKE3). Live frames
+  // carry it as `msgId` once the transport round-trips it; until then fall
+  // back to the sender's clientId so the row still renders. localKey is ALWAYS
+  // the clientId — that is what reconciles an optimistic (clientId-keyed) row
+  // with the canonical (msgId-keyed) live/history row across the window merge.
+  const msgId =
+    "msgId" in msg && typeof msg.msgId === "string" && msg.msgId.length > 0
+      ? msg.msgId
+      : undefined;
+
   return {
-    id: envelope.clientId,
+    id: msgId ?? envelope.clientId,
+    localKey: envelope.clientId,
     pubkey: msg.origin ?? "",
     created_at: Math.floor(envelope.createdAt / 1_000),
     kind: KIND_STREAM_MESSAGE,
@@ -191,6 +204,68 @@ export function liveMessageToRelayEvent(
 }
 
 /**
+ * Map a live `direct_message` frame (from `/ws/direct`) to a `RelayEvent` for
+ * the rendering layer.
+ *
+ * DM frames carry `sender` (the peer AgentId) as the author identity — there
+ * is no `origin` field as on topic frames. Canonical identity is the daemon
+ * `msgId` (BLAKE3) when present, falling back to the sender's `clientId` so the
+ * row still renders. `localKey` is always the envelope `clientId`, which is
+ * what reconciles an optimistic outbound row with this inbound frame/history
+ * row across the window merge.
+ *
+ * Returns `null` for non-message payloads (aux content, malformed JSON) —
+ * callers skip nulls. NOTE: `/ws/direct` delivers **incoming** DMs only; the
+ * sender's own outbound row is not echoed here (it persists optimistically and
+ * reconciles via `/history` cold-load keyed by `clientId`).
+ */
+export function liveDirectMessageToRelayEvent(
+  msg: X0xLiveDirectMessage,
+  channelId: string,
+): RelayEvent | null {
+  const envelope = decodeChannelMessageEnvelope(msg.payload);
+  if (!envelope) {
+    return null;
+  }
+
+  const msgId =
+    typeof msg.msgId === "string" && msg.msgId.length > 0
+      ? msg.msgId
+      : undefined;
+
+  return {
+    id: msgId ?? envelope.clientId,
+    localKey: envelope.clientId,
+    pubkey: msg.sender,
+    created_at: Math.floor(msg.receivedAt / 1_000),
+    kind: KIND_STREAM_MESSAGE,
+    tags: buildAdapterTags({
+      channelId,
+      authorAgentId: msg.sender,
+      mentions: envelope.mentions,
+      threadRoot: msg.threadRoot ?? null,
+      threadParent: msg.threadParent ?? null,
+    }),
+    content: envelope.text,
+    sig: msg.verified ? "verified" : "",
+  };
+}
+
+/**
+ * Derive the rendering-layer channel id from a history row's canonical scope.
+ *
+ * This is the inverse of `nativeScopeForChannel`: `group:<stable_id>` → the
+ * stable group id, `dm:<peer_agent>` → the peer AgentId, `topic:<name>` → the
+ * topic name. Used when a row is fetched by canonical `msgId` with no channel
+ * context (e.g. `getEventById`), since `msg_id` is globally unique in one store
+ * and needs no scope hint to resolve.
+ */
+export function channelIdFromScope(scope: X0xScope): string {
+  const colon = scope.indexOf(":");
+  return colon === -1 ? scope : scope.slice(colon + 1);
+}
+
+/**
  * Map a durable history row to a `RelayEvent` for the rendering layer.
  *
  * History rows carry the full stored metadata (`seenAtMs`, `contentType`,
@@ -201,9 +276,14 @@ export function historyRowToRelayEvent(
   row: X0xHistoryRow,
   channelId: string,
 ): RelayEvent | null {
-  // Only text payloads are channel messages; other content types (binary,
-  // agent-control, etc.) are not timeline rows.
-  if (!row.contentType.startsWith("text/")) {
+  // Buzz's typed channel envelope is JSON on the DM wire and text/plain on
+  // the group wire. Decode both explicitly; binary and control content still
+  // cannot enter the timeline because the strict envelope decoder below must
+  // also accept the payload.
+  if (
+    !row.contentType.startsWith("text/") &&
+    row.contentType !== "application/json"
+  ) {
     return null;
   }
 

@@ -32,7 +32,6 @@ interface ProfilePopoverProps {
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
-  onSendFeedback?: () => void;
   children: React.ReactNode;
   // Optional outer container whose clicks should NOT close the popover.
   // Used when auxiliary triggers (avatar, status text) live alongside the
@@ -63,7 +62,6 @@ export function ProfilePopover({
   onSetUserStatus,
   onClearUserStatus,
   onOpenSettings,
-  onSendFeedback,
   children,
   triggerContainerRef,
   communitySwitcherSlot,
@@ -250,23 +248,6 @@ export function ProfilePopover({
                 {settingsShortcutLabel}
               </kbd>
             </button>
-
-            {onSendFeedback ? (
-              <button
-                className={MENU_ITEM_CLASS}
-                data-testid="profile-popover-send-feedback"
-                onClick={() => {
-                  closePopover();
-                  window.requestAnimationFrame(() => {
-                    onSendFeedback();
-                  });
-                }}
-                role="menuitem"
-                type="button"
-              >
-                <span className="flex-1">Send feedback</span>
-              </button>
-            ) : null}
 
             {communitySwitcherSlot ? (
               <>

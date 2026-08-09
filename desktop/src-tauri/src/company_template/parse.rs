@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::company_template::spec::CompanyTemplate;
+use crate::company_template::spec::{CompanyTemplate, GroupVisibility};
 #[cfg(test)]
 use serde::Deserialize;
 
@@ -29,9 +29,43 @@ pub enum ValidationIssue {
     DuplicateRoleId(String),
     DuplicateStoreId(String),
     DuplicateTaskListId(String),
-    UnknownGroupRef { field: String, group: String },
-    UnknownRoleRef { group: String, role: String },
-    EmptyHarness { role: String },
+    UnknownGroupRef {
+        field: String,
+        group: String,
+    },
+    UnknownRoleRef {
+        group: String,
+        role: String,
+    },
+    EmptyHarness {
+        role: String,
+    },
+    /// Template declares more than one distinct Symphony runner preset. One
+    /// supervised `x0x-symphonyd` resolves a single runner and routes every
+    /// issue through it, so a multi-harness roster is rejected (never silently
+    /// collapsed to the first role's harness).
+    MultipleHarnessesUnsupported {
+        harnesses: Vec<String>,
+    },
+    /// The template must declare exactly one company-shared (`group = None`)
+    /// task list — Symphony's single consumed backlog. `count` is the number
+    /// found (0 or >1 are both rejected).
+    PrimaryTaskListContract {
+        count: usize,
+    },
+    /// The company-shared task list is not declared first, so Symphony would
+    /// bind a group-scoped list as its backlog.
+    PrimaryTaskListNotFirst,
+    /// A group declares a visibility Company cannot provision against the
+    /// current production x0xd group API. Production `POST /groups` accepts
+    /// only the `public_open` preset; a `private_secure` group would fail
+    /// mid-provisioning (after reservation) with an opaque daemon error, so it
+    /// is rejected at the contract boundary before any reservation or
+    /// provisioning. (Secure groups are not creatable in this build.)
+    UnsupportedGroupVisibility {
+        group: String,
+        visibility: String,
+    },
 }
 
 impl fmt::Display for ValidationIssue {
@@ -57,6 +91,30 @@ impl fmt::Display for ValidationIssue {
             }
             ValidationIssue::EmptyHarness { role } => {
                 write!(f, "role `{role}` has an empty harness")
+            }
+            ValidationIssue::MultipleHarnessesUnsupported { harnesses } => {
+                write!(
+                    f,
+                    "template declares multiple Symphony runner harnesses {harnesses:?}; exactly one uniform runner is supported"
+                )
+            }
+            ValidationIssue::PrimaryTaskListContract { count } => {
+                write!(
+                    f,
+                    "template must declare exactly one company-shared (primary) task list; found {count}"
+                )
+            }
+            ValidationIssue::PrimaryTaskListNotFirst => {
+                write!(
+                    f,
+                    "the company-shared (primary) task list must be declared first so Symphony binds it as the backlog"
+                )
+            }
+            ValidationIssue::UnsupportedGroupVisibility { group, visibility } => {
+                write!(
+                    f,
+                    "group `{group}` declares unsupported visibility `{visibility}`; Company provisioning only supports `public_open` groups"
+                )
             }
         }
     }
@@ -171,6 +229,87 @@ pub fn validate(template: &CompanyTemplate) -> Result<(), ParseError> {
                     group: gid.clone(),
                 }));
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate the supported-runtime contract a Company template must satisfy
+/// before the supervised Symphony daemon can run it.
+///
+/// Enforced at the production boundary (instantiation command), NOT in
+/// [`validate`]: this encodes Symphony-daemon runtime constraints (single
+/// uniform runner, single primary task queue), not template well-formedness.
+/// Keeping it separate lets curated fixtures parse freely while the shipping
+/// path still fails closed.
+///
+/// Contract:
+/// 1. **Single uniform runner.** Every role's `harness` normalizes (via
+///    [`crate::company_template::spec::runner_preset`]) to the SAME preset.
+///    One supervised daemon resolves one runner and routes every issue through
+///    it; per-role routing does not exist, so a multi-harness roster is
+///    rejected instead of silently collapsing to the first.
+/// 2. **One primary task queue.** Exactly one company-shared (`group = None`)
+///    task list exists and is declared first — the single backlog Symphony
+///    binds (`tracker.list_id = task_lists.first()`).
+/// 3. **Public groups only.** Every group is `public_open`. Production
+///    `POST /groups` accepts only that preset; a `private_secure` group would
+///    fail mid-provisioning (after reservation) with an opaque daemon error,
+///    so it is rejected here, before reservation.
+pub fn validate_supported_contract(template: &CompanyTemplate) -> Result<(), ParseError> {
+    // 1. Single uniform runner: every role normalizes to one preset.
+    let mut distinct: Vec<String> = Vec::new();
+    for role in &template.roles {
+        let preset = crate::company_template::spec::runner_preset(&role.harness).to_string();
+        if !distinct.contains(&preset) {
+            distinct.push(preset);
+        }
+    }
+    distinct.sort();
+    if distinct.len() > 1 {
+        return Err(ParseError::Invalid(
+            ValidationIssue::MultipleHarnessesUnsupported {
+                harnesses: distinct,
+            },
+        ));
+    }
+
+    // 2. Exactly one primary (company-shared) task list, declared first.
+    let primary_count = template
+        .task_lists
+        .iter()
+        .filter(|t| t.group.is_none())
+        .count();
+    if primary_count != 1 {
+        return Err(ParseError::Invalid(
+            ValidationIssue::PrimaryTaskListContract {
+                count: primary_count,
+            },
+        ));
+    }
+    let first_is_group_scoped = template
+        .task_lists
+        .first()
+        .is_some_and(|t| t.group.is_some());
+    if first_is_group_scoped {
+        return Err(ParseError::Invalid(
+            ValidationIssue::PrimaryTaskListNotFirst,
+        ));
+    }
+
+    // 3. Public groups only. Production `POST /groups` accepts only the
+    //    `public_open` preset; a `private_secure` group would fail mid-
+    //    provisioning (after reservation) with an opaque daemon error.
+    //    Rejected here, before reservation, with a clear message.
+    for group in &template.groups {
+        if group.visibility != GroupVisibility::PublicOpen {
+            return Err(ParseError::Invalid(
+                ValidationIssue::UnsupportedGroupVisibility {
+                    group: group.id.clone(),
+                    visibility: group.visibility.as_x0xd_preset().to_string(),
+                },
+            ));
         }
     }
 

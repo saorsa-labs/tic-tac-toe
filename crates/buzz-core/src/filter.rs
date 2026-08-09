@@ -123,7 +123,7 @@ mod tests {
     fn kind_author_since_until_tag_matching() {
         let keys = Keys::generate();
         let ev = StoredEvent::with_received_at(
-            make_event_with_keys(&keys, Kind::TextNote),
+            make_event_with_keys(&keys, Kind::TextNote).expect("sign"),
             Utc::now(),
             None,
             true,
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn or_semantics() {
-        let ev = make_stored_event(Kind::TextNote, None);
+        let ev = make_stored_event(Kind::TextNote, None).expect("stored event");
         let miss = Filter::new().kind(Kind::ContactList);
         let hit = Filter::new().kind(Kind::TextNote);
         assert!(filters_match(&[miss.clone(), hit], &ev));

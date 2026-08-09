@@ -8,13 +8,13 @@ import type { SidebarDmParticipant } from "@/features/sidebar/ui/SidebarSection"
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 
 export function useDmSidebarMetadata({
-  currentPubkey,
+  currentAgentId,
   directMessages,
   fallbackDisplayName,
   profileDisplayName,
   enabled = true,
 }: {
-  currentPubkey?: string;
+  currentAgentId?: string;
   directMessages: Channel[];
   fallbackDisplayName?: string;
   profileDisplayName?: string | null;
@@ -34,7 +34,7 @@ export function useDmSidebarMetadata({
       directMessages.flatMap((channel) =>
         channel.participantPubkeys.filter((pubkey, index) => {
           const normalizedPubkey = pubkey.toLowerCase();
-          if (normalizedPubkey === currentPubkey?.toLowerCase()) {
+          if (normalizedPubkey === currentAgentId?.toLowerCase()) {
             return false;
           }
 
@@ -43,7 +43,7 @@ export function useDmSidebarMetadata({
           return !participantLabel || !selfDmLabels.has(participantLabel);
         }),
       ),
-    [currentPubkey, directMessages, selfDmLabels],
+    [currentAgentId, directMessages, selfDmLabels],
   );
   const dmPresenceQuery = usePresenceQuery(dmParticipantPubkeys, {
     enabled: enabled && directMessages.length > 0,
@@ -59,7 +59,7 @@ export function useDmSidebarMetadata({
           const otherParticipantPubkey = channel.participantPubkeys.find(
             (pubkey, index) => {
               const normalizedPubkey = pubkey.toLowerCase();
-              if (normalizedPubkey === currentPubkey?.toLowerCase()) {
+              if (normalizedPubkey === currentAgentId?.toLowerCase()) {
                 return false;
               }
 
@@ -78,7 +78,7 @@ export function useDmSidebarMetadata({
           ];
         }),
       ) satisfies Record<string, PresenceStatus>,
-    [currentPubkey, directMessages, dmPresenceQuery.data, selfDmLabels],
+    [currentAgentId, directMessages, dmPresenceQuery.data, selfDmLabels],
   );
   const dmChannelLabels = React.useMemo(
     () =>
@@ -87,12 +87,12 @@ export function useDmSidebarMetadata({
           channel.id,
           resolveChannelDisplayLabel(
             channel,
-            currentPubkey,
+            currentAgentId,
             dmProfilesQuery.data?.profiles,
           ),
         ]),
       ),
-    [currentPubkey, directMessages, dmProfilesQuery.data],
+    [currentAgentId, directMessages, dmProfilesQuery.data],
   );
   const dmParticipantsByChannelId = React.useMemo(
     () =>
@@ -106,7 +106,7 @@ export function useDmSidebarMetadata({
           );
           const otherParticipants = participants.filter((participant) => {
             if (
-              participant.pubkey.toLowerCase() === currentPubkey?.toLowerCase()
+              participant.pubkey.toLowerCase() === currentAgentId?.toLowerCase()
             ) {
               return false;
             }
@@ -125,7 +125,7 @@ export function useDmSidebarMetadata({
                 dmProfiles?.[participant.pubkey.toLowerCase()]?.avatarUrl ??
                 null,
               label: resolveUserLabel({
-                currentPubkey,
+                currentAgentId,
                 fallbackName: participant.fallbackName,
                 profiles: dmProfiles,
                 pubkey: participant.pubkey,
@@ -135,7 +135,7 @@ export function useDmSidebarMetadata({
           ];
         }),
       ) satisfies Record<string, SidebarDmParticipant[]>,
-    [currentPubkey, directMessages, dmProfiles, selfDmLabels],
+    [currentAgentId, directMessages, dmProfiles, selfDmLabels],
   );
 
   return {

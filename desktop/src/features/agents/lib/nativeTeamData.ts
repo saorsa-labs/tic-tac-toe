@@ -13,19 +13,8 @@
  * reconstruction or crypto-state inference.
  */
 
-import type {
-  X0xAgentId,
-  X0xGroupPolicyPreset,
-  X0xNamedGroup,
-} from "@/shared/api/tauriNativeX0x";
-import type { AgentTeam, CreateTeamInput } from "@/shared/api/types";
-
-/**
- * Policy preset for agent teams. Agent teams are private by default: a roster
- * of the owner's personas, not a public directory. Maps to the x0xd
- * `private_secure` preset (Hidden / InviteOnly / MLS-encrypted).
- */
-export const TEAM_GROUP_PRESET: X0xGroupPolicyPreset = "private_secure";
+import type { X0xAgentId, X0xNamedGroup } from "@/shared/api/tauriNativeX0x";
+import type { AgentTeam } from "@/shared/api/types";
 
 /** Metadata-tag version on team metadata store entries. */
 export const TEAM_METADATA_SCHEMA = "buzz.team.v1";
@@ -33,19 +22,6 @@ export const TEAM_METADATA_SCHEMA = "buzz.team.v1";
 /** Topic for a team's auxiliary metadata store (per group). */
 export function teamMetadataStoreTopic(groupId: string): string {
   return `x0x.team.${groupId}`;
-}
-
-/** Creation input for the named group that backs a team. */
-export function teamToNamedGroupInput(team: CreateTeamInput): {
-  name: string;
-  description: string;
-  preset: X0xGroupPolicyPreset;
-} {
-  return {
-    name: team.name,
-    description: team.description ?? "",
-    preset: TEAM_GROUP_PRESET,
-  };
 }
 
 /** Extra metadata the group object cannot carry (instructions, version). */

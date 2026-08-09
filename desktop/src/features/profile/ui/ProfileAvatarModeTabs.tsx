@@ -7,9 +7,8 @@ import type {
 import { cn } from "@/shared/lib/cn";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
-const MODE_TAB_ORDER: AvatarMode[] = ["image", "emoji", "animated"];
+const MODE_TAB_ORDER: AvatarMode[] = ["image", "emoji"];
 const MODE_TAB_LABELS: Record<AvatarMode, string> = {
-  animated: "Animated",
   emoji: "Emoji",
   image: "Image",
 };
@@ -43,7 +42,7 @@ export function ProfileAvatarModeTabs({
         className={cn(
           isOnboardingModal
             ? "flex h-10 w-auto gap-2 rounded-none bg-transparent p-0 text-muted-foreground"
-            : "relative isolate grid h-14 w-full grid-cols-3 overflow-hidden rounded-full bg-muted p-1 text-muted-foreground",
+            : "relative isolate grid h-14 w-full grid-cols-2 overflow-hidden rounded-full bg-muted p-1 text-muted-foreground",
         )}
       >
         {isOnboardingModal ? null : (
@@ -52,7 +51,7 @@ export function ProfileAvatarModeTabs({
             className="absolute bottom-1 left-1 top-1 z-0 rounded-full bg-background shadow transition-transform duration-[250ms] ease-out"
             style={{
               transform: `translateX(${MODE_TAB_ORDER.indexOf(mode) * 100}%)`,
-              width: "calc((100% - 8px) / 3)",
+              width: "calc((100% - 8px) / 2)",
             }}
           />
         )}

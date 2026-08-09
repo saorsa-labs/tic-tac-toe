@@ -13,104 +13,175 @@ const SHOT_DIR = "test-results/onboarding-docked-cta";
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
-test("machine onboarding: landing, backup, setup docked CTAs", async ({
+/**
+ * Only Claude Code and Codex surface in onboarding (see
+ * `ONBOARDING_RUNTIME_ORDER`). A `logged_in` Claude counts as "ready", which
+ * enables the docked Next CTA so the screenshot flow can advance from the
+ * harness setup page into the default-config page without a real install.
+ */
+function onboardingRuntime(
+  id: "claude" | "codex",
+  authStatus: { status: "logged_in" | "logged_out" },
+) {
+  return {
+    id,
+    label: id === "claude" ? "Claude Code" : "Codex",
+    avatar_url: "",
+    availability: "available",
+    command: id,
+    binary_path: `/usr/local/bin/${id}`,
+    default_args: [],
+    mcp_command: null,
+    install_hint: `Install ${id}`,
+    install_instructions_url: "https://example.com",
+    can_auto_install: true,
+    underlying_cli_path: null,
+    node_required: false,
+    auth_status: authStatus,
+    login_hint: `Sign in to ${id}`,
+  };
+}
+
+test("machine onboarding: landing, setup, config docked CTAs", async ({
   page,
 }) => {
-  await installMockBridge(page, undefined, {
-    skipCommunitySeed: true,
-    skipOnboardingSeed: true,
-  });
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        onboardingRuntime("claude", { status: "logged_in" }),
+        onboardingRuntime("codex", { status: "logged_out" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
   await page.goto("/");
 
+  // This is the first test in the file, so it pays the cold-load cost
+  // (fetching + evaluating the full bundle). Boot resolves recovery state +
+  // identity before the machine-onboarding gate replaces the splash, so wait
+  // for that handshake to settle with headroom for the bundle and for the
+  // three screenshots that follow.
+  test.setTimeout(60_000);
   const gate = page.getByTestId("machine-onboarding-gate");
-  await expect(gate).toBeVisible();
+  await expect(gate).toBeVisible({ timeout: 30_000 });
+
+  // M2: the daemon owns identity. The landing screen offers a single
+  // "Get started" CTA that loads the daemon AgentId — the user-key
+  // import / create / backup path is retired. Recovery is fail-closed: with
+  // no user-held key to import or back up, the only forward path is the
+  // daemon resolving the identity, and no private-key material is exposed.
+  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Use an existing key" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Create a new identity key" }),
+  ).toHaveCount(0);
+  await expect(page.getByLabel("Private key", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("nsec-value")).toHaveCount(0);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/01-landing.png` });
 
-  await page.getByRole("button", { name: "Use an existing key" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
-  ).toBeVisible();
-  const importCard = page.getByTestId("nostr-import-card");
-  await expect(importCard).toBeVisible();
-  await expect(page.getByLabel("Private key", { exact: true })).toBeVisible();
-  // The production card uses a baked nine-slice texture: no runtime SVG
-  // filter, measurement, or texture regeneration during resize.
-  await expect(importCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-  await expect(importCard).toHaveCSS("border-top-width", "0px");
-  await expect(importCard).toHaveCSS("border-image-repeat", "repeat");
-  await expect(importCard).toHaveCSS("border-image-outset", "96px");
-  // Icon SVGs (e.g. the reveal toggle) are fine; a filter would mean the
-  // texture regressed to the runtime SVG pipeline.
-  await expect(importCard.locator("svg filter")).toHaveCount(0);
-  await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOT_DIR}/01b-enter-key.png` });
-
-  await page.getByRole("button", { name: "Back" }).click();
-  await expect(
-    page.getByRole("button", { name: "Create a new identity key" }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
-  await expect(
-    page.getByRole("heading", {
-      name: "Your unique identity key has been created",
-    }),
-  ).toBeVisible();
-  await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOT_DIR}/02-backup.png` });
-
-  // Reveal the key: box must not reflow (same-length monospace mask).
-  await page.getByTestId("nsec-reveal-toggle").click();
-  await expect(page.getByTestId("nsec-value")).toHaveClass(/select-text/);
-  await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOT_DIR}/02b-backup-revealed.png` });
-
-  await page.getByTestId("onboarding-next").click();
+  // "Get started" resolves the daemon identity and advances to the harness
+  // setup page — no key ever passes through the UI.
+  await page.getByRole("button", { name: "Get started" }).click();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Set up your agent harnesses" }),
   ).toBeVisible();
+
+  // Daemon-owned identity, made concrete: "Get started" advanced by invoking
+  // the daemon's `get_identity` — no user-held key was imported or persisted
+  // (the fail-closed guarantee: recovery can only ever come from the daemon).
+  const commands = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{ command: string }>;
+        }
+      ).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [],
+  );
+  expect(commands.some((entry) => entry.command === "get_identity")).toBe(true);
+  expect(commands.some((entry) => entry.command === "import_identity")).toBe(
+    false,
+  );
+  expect(
+    commands.some((entry) => entry.command === "persist_current_identity"),
+  ).toBe(false);
+
+  // Docked CTA: Next / Skip / Back portal into the shell's bottom-fixed
+  // footer slot, escaping the step slide's transform.
+  const setupFooter = page.getByTestId("onboarding-footer-slot");
+  await expect(setupFooter).toBeVisible();
+  await expect(page.getByTestId("onboarding-setup-next")).toBeVisible();
+  await expect(page.getByTestId("onboarding-setup-skip")).toBeVisible();
+  await expect(page.getByTestId("onboarding-back")).toBeVisible();
   await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOT_DIR}/03-setup.png` });
+  await page.screenshot({ path: `${SHOT_DIR}/02-setup.png` });
+
+  // Advancing to the default-config page keeps the docked CTA group.
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(
+    page.getByRole("heading", {
+      name: "Configure your default model settings",
+    }),
+  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-finish")).toBeVisible();
+  await expect(page.getByTestId("onboarding-back")).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/03-config.png` });
 });
 
-test("machine key import remains usable in a short viewport", async ({
+test("machine onboarding setup stays usable in a short viewport", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 900, height: 620 });
-  await installMockBridge(page, undefined, {
-    skipCommunitySeed: true,
-    skipOnboardingSeed: true,
-  });
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        onboardingRuntime("claude", { status: "logged_in" }),
+        onboardingRuntime("codex", { status: "logged_out" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
   await page.goto("/");
-  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page.getByRole("button", { name: "Get started" }).click();
 
-  const heading = page.getByRole("heading", { name: "Enter your private key" });
-  const input = page.getByLabel("Private key", { exact: true });
+  const heading = page.getByRole("heading", {
+    name: "Set up your agent harnesses",
+  });
   const footer = page.getByTestId("onboarding-footer-slot");
+  const next = page.getByTestId("onboarding-setup-next");
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(heading).toBeVisible();
-  await expect(input).toBeVisible();
   await expect(footer).toBeVisible();
+  await expect(next).toBeEnabled();
 
   const layout = await page.evaluate(() => {
     const heading = document.querySelector("h1")?.getBoundingClientRect();
-    const input = document
-      .querySelector<HTMLInputElement>("#nostr-private-key")
-      ?.getBoundingClientRect();
     const footer = document
       .querySelector('[data-testid="onboarding-footer-slot"]')
       ?.getBoundingClientRect();
     return {
-      footerTop: footer?.top ?? 0,
-      headingBottom: heading?.bottom ?? 0,
-      inputBottom: input?.bottom ?? 0,
-      inputTop: input?.top ?? 0,
+      clientHeight: document.documentElement.clientHeight,
       clientWidth: document.documentElement.clientWidth,
       scrollHeight: document.documentElement.scrollHeight,
       scrollWidth: document.documentElement.scrollWidth,
+      footerBottom: footer?.bottom ?? 0,
+      footerTop: footer?.top ?? 0,
+      headingTop: heading?.top ?? 0,
     };
   });
-  expect(layout.inputTop).toBeGreaterThan(layout.headingBottom);
-  expect(layout.footerTop).toBeGreaterThan(layout.inputBottom);
+  // The docked CTA is fixed to the viewport bottom (not in normal flow) and
+  // sits below the heading; tall content scrolls under its scrim rather than
+  // colliding with the buttons. No horizontal overflow / scrollbar.
+  expect(layout.footerBottom).toBeLessThanOrEqual(layout.clientHeight);
+  expect(layout.footerTop).toBeGreaterThan(layout.headingTop);
   expect(layout.scrollHeight).toBeGreaterThanOrEqual(620);
   expect(layout.scrollWidth).toBe(layout.clientWidth);
 });

@@ -8,9 +8,6 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         pubkey: format!("pubkey-{name}"),
         name: name.to_string(),
         persona_id: Some(persona_id.to_string()),
-        private_key_nsec: String::new(),
-        auth_tag: None,
-        relay_url: String::new(),
         avatar_url: None,
         acp_command: String::new(),
         agent_command: String::new(),
@@ -55,7 +52,6 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
-        relay_mesh: None,
     }
 }
 

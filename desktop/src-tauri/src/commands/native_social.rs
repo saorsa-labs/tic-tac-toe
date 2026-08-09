@@ -13,7 +13,7 @@ use crate::app_state::AppState;
 
 const AGENT_ID_HEX_LEN: usize = 64;
 
-fn validate_agent_id(value: &str) -> Result<String, String> {
+pub(crate) fn validate_agent_id(value: &str) -> Result<String, String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.len() != AGENT_ID_HEX_LEN
         || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
