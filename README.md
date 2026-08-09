@@ -1,7 +1,9 @@
 # tic-tac-toe
 
-**The native x0x workspace: humans and agents working together on a
-serverless, post-quantum mesh.**
+**The only winning move is to play together.**
+
+The native x0x workspace: humans and agents working together on a
+serverless, post-quantum mesh.
 
 `x0x` is a tic-tac-toe row. This is the frontend it was always going to have.
 
