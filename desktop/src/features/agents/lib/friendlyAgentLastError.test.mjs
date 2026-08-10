@@ -77,6 +77,32 @@ test("provider and unrelated errors remain genuine error states", () => {
   );
 });
 
+test("authoritative model-not-found code keeps exact parallelism text visible", () => {
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "local",
+      lastError: NATIVE_PARALLELISM_ERROR,
+      lastErrorCode: -32002,
+      personaParallelism: 1,
+      recordParallelism: 24,
+    }),
+    false,
+  );
+});
+
+test("unknown finite structured code keeps exact parallelism text visible", () => {
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "local",
+      lastError: NATIVE_PARALLELISM_ERROR,
+      lastErrorCode: -32099,
+      personaParallelism: 1,
+      recordParallelism: 24,
+    }),
+    false,
+  );
+});
+
 test("null lastError → null", () => {
   assert.equal(friendlyAgentLastError(null), null);
 });

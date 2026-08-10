@@ -51,6 +51,7 @@ const NATIVE_PARALLELISM_ERROR_RE =
 type NativeParallelismRecoveryInput = {
   backendType: "local" | "provider";
   lastError: string | null;
+  lastErrorCode?: number | null;
   personaParallelism?: number | null;
   recordParallelism: number;
 };
@@ -66,10 +67,16 @@ type NativeParallelismRecoveryInput = {
 export function isNativeParallelismErrorRecoverableOnStart({
   backendType,
   lastError,
+  lastErrorCode,
   personaParallelism,
   recordParallelism,
 }: NativeParallelismRecoveryInput): boolean {
-  if (backendType !== "local" || lastError == null) return false;
+  // A structured code is authoritative even when its free-form text happens
+  // to match the legacy native-parallelism message. Recovery is only for the
+  // uncoded local error emitted by the native launch gate.
+  if (backendType !== "local" || lastError == null || lastErrorCode != null) {
+    return false;
+  }
 
   const effectiveParallelism = personaParallelism ?? recordParallelism;
   return (

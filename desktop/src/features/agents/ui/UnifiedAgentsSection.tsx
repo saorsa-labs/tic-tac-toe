@@ -277,6 +277,7 @@ function AgentPersonaCard({
     ? isNativeParallelismErrorRecoverableOnStart({
         backendType: agent.backend.type,
         lastError: agent.lastError,
+        lastErrorCode: agent.lastErrorCode,
         personaParallelism: persona.parallelism,
         recordParallelism: agent.parallelism,
       })
@@ -371,6 +372,7 @@ function StandaloneAgentCard({
     isNativeParallelismErrorRecoverableOnStart({
       backendType: agent.backend.type,
       lastError: agent.lastError,
+      lastErrorCode: agent.lastErrorCode,
       recordParallelism: agent.parallelism,
     });
   const isActive = isManagedAgentActive(agent);
