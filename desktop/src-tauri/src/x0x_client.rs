@@ -33,6 +33,8 @@ use tokio_tungstenite::tungstenite::{
 
 use crate::local_stack::{loopback_api_base, named_data_dir, read_api_port, read_api_token};
 
+mod post;
+
 /// Per-request deadline for REST calls. The daemon's history store runs on a
 /// blocking SQLite thread; 15s is generous even for a full-group backfill.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -520,29 +522,6 @@ impl X0xClient {
     ) -> Result<T, X0xClientError> {
         self.post_json_with_timeout(path, body, REQUEST_TIMEOUT)
             .await
-    }
-
-    /// Authenticated `POST` with an explicit bounded deadline. This exists for
-    /// daemon operations whose own documented bound exceeds the ordinary REST
-    /// request deadline (currently exact-AgentId connect only).
-    pub(crate) async fn post_json_with_timeout<B: Serialize, T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-        timeout: Duration,
-    ) -> Result<T, X0xClientError> {
-        let r = self.resolve()?;
-        let url = format!("{}{}", r.api_base, path);
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&r.token)
-            .timeout(timeout)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| X0xClientError::Transport(format!("POST {path}: {e}")))?;
-        Self::decode_json::<T>(resp, path).await
     }
 
     /// Authenticated `PUT` with a JSON body, deserializing the response into
