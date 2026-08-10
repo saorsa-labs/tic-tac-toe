@@ -29,6 +29,16 @@ test("startup and welcome surfaces ship tic-tac-toe branding without the Buzz ma
   );
 });
 
+test("project tagline emphasizes peaceful coexistence", async () => {
+  const readme = await readFile(
+    new URL("../../../../../README.md", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(readme, /The winning move is to live together in peace\./);
+  assert.doesNotMatch(readme, /The only winning move is to play together\./);
+});
+
 test("first-launch starter team uses neutral X and O marks without character images", async () => {
   const [communityFlow, kickoffStage, presentation] = await Promise.all([
     readFile(new URL("./CommunityOnboardingFlow.tsx", import.meta.url), "utf8"),
