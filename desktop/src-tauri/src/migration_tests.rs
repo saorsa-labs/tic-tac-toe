@@ -20,6 +20,83 @@ fn canonical_dev_data_dir_returns_none_for_root() {
 }
 
 #[test]
+fn native_parallelism_migration_normalizes_legacy_records_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            {
+                "pubkey": "",
+                "name": "Guide definition",
+                "parallelism": 24,
+                "definition_parallelism": 24
+            },
+            {
+                "pubkey": "agent-x",
+                "name": "X",
+                "parallelism": 24,
+                "definition_parallelism": 24,
+                "backend": { "type": "local" }
+            },
+            {
+                "pubkey": "agent-o",
+                "name": "O without pre-backend field",
+                "parallelism": 24,
+                "definition_parallelism": 24
+            },
+            {
+                "pubkey": "agent-provider",
+                "name": "Remote provider agent",
+                "parallelism": 24,
+                "definition_parallelism": 24,
+                "backend": {
+                    "type": "provider",
+                    "id": "test-provider",
+                    "config": {}
+                }
+            },
+            {
+                "pubkey": "agent-explicit",
+                "name": "Explicit local concurrency",
+                "parallelism": 8,
+                "definition_parallelism": 8,
+                "backend": { "type": "local" }
+            },
+            {
+                "pubkey": "agent-missing",
+                "name": "Missing default"
+            },
+            {
+                "pubkey": "agent-malformed",
+                "name": "Malformed",
+                "parallelism": "many"
+            }
+        ]),
+    );
+    let path = dir.path().join("agents/managed-agents.json");
+
+    reconcile_native_agent_parallelism_in_file(&path);
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["parallelism"], 1);
+    assert_eq!(records[0]["definition_parallelism"], 1);
+    assert_eq!(records[1]["parallelism"], 1);
+    assert_eq!(records[1]["definition_parallelism"], 1);
+    assert_eq!(records[2]["parallelism"], 1);
+    assert_eq!(records[2]["definition_parallelism"], 1);
+    assert_eq!(records[3]["parallelism"], 24);
+    assert_eq!(records[3]["definition_parallelism"], 24);
+    assert_eq!(records[4]["parallelism"], 8);
+    assert_eq!(records[4]["definition_parallelism"], 8);
+    assert!(records[5].get("parallelism").is_none());
+    assert_eq!(records[6]["parallelism"], "many");
+
+    let once = std::fs::read(&path).unwrap();
+    reconcile_native_agent_parallelism_in_file(&path);
+    let twice = std::fs::read(&path).unwrap();
+    assert_eq!(once, twice, "second migration run must be a no-op");
+}
+
+#[test]
 fn legacy_app_data_dir_maps_release_identifier() {
     let current = PathBuf::from("/Users/me/Library/Application Support/com.saorsalabs.tictactoe");
     let legacy = legacy_app_data_dir(&current).unwrap();
