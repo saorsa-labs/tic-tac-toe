@@ -42,6 +42,7 @@ pub struct AcpClient {
     stdout: FramedRead<ChildStdout, LinesCodec>,
     next_id: u64,
     idle_timeout: Duration,
+    max_turn_duration: Option<Duration>,
     session_id: String,
 }
 
@@ -68,6 +69,7 @@ impl AcpClient {
             stdout: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_BYTES)),
             next_id: 1,
             idle_timeout: config.idle_timeout,
+            max_turn_duration: config.max_turn_duration,
             session_id: String::new(),
         };
 
@@ -106,6 +108,10 @@ impl AcpClient {
     }
 
     pub async fn prompt(&mut self, prompt: &str) -> Result<String, AcpError> {
+        enforce_max_turn_duration(self.max_turn_duration, self.prompt_inner(prompt)).await
+    }
+
+    async fn prompt_inner(&mut self, prompt: &str) -> Result<String, AcpError> {
         let session_id = self.session_id.clone();
         let id = self
             .send_request(
@@ -188,6 +194,21 @@ impl AcpClient {
     }
 }
 
+async fn enforce_max_turn_duration<T, F>(
+    max_turn_duration: Option<Duration>,
+    future: F,
+) -> Result<T, AcpError>
+where
+    F: std::future::Future<Output = Result<T, AcpError>>,
+{
+    if let Some(duration) = max_turn_duration {
+        return tokio::time::timeout(duration, future)
+            .await
+            .map_err(|_| AcpError::Timeout(duration))?;
+    }
+    future.await
+}
+
 fn collect_agent_text(frame: &Value, output: &mut String) {
     let update = match frame.get("params").and_then(|params| params.get("update")) {
         Some(update) => update,
@@ -227,6 +248,23 @@ fn native_mcp_server(config: &Config) -> Value {
 
 fn is_sensitive_agent_env(name: &std::ffi::OsStr) -> bool {
     name.as_encoded_bytes().starts_with(b"X0X_")
+        || matches!(
+            name.to_str(),
+            Some(
+                "NOSTR_PRIVATE_KEY"
+                    | "NOSTR_SECRET_KEY"
+                    | "BUZZ_PRIVATE_KEY"
+                    | "BUZZ_RELAY_URL"
+                    | "BUZZ_RELAY_HTTP"
+                    | "BUZZ_AUTH_TAG"
+                    | "BUZZ_API_TOKEN"
+                    | "BUZZ_ACP_PRIVATE_KEY"
+                    | "BUZZ_ACP_API_TOKEN"
+                    | "BUZZ_SHARE_IDENTITY"
+                    | "BUZZ_MANAGED_AGENT"
+                    | "BUZZ_MANAGED_AGENT_START_NONCE"
+            )
+        )
 }
 
 fn absolute_path_string(path: &Path) -> Result<String, AcpError> {
@@ -269,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_environment_scrubs_all_x0x_credentials_and_paths() {
+    fn agent_environment_scrubs_native_and_legacy_identity_credentials() {
         for name in [
             "X0X_DATA_DIR",
             "X0X_AGENT_ID",
@@ -277,11 +315,35 @@ mod tests {
             "X0X_GROUP_ID",
             "X0X_API_TOKEN",
             "X0X_API_URL",
+            "NOSTR_PRIVATE_KEY",
+            "NOSTR_SECRET_KEY",
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_RELAY_URL",
+            "BUZZ_RELAY_HTTP",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+            "BUZZ_SHARE_IDENTITY",
+            "BUZZ_MANAGED_AGENT",
+            "BUZZ_MANAGED_AGENT_START_NONCE",
         ] {
             assert!(is_sensitive_agent_env(std::ffi::OsStr::new(name)));
         }
-        assert!(!is_sensitive_agent_env(std::ffi::OsStr::new(
-            "BUZZ_ACP_AGENT_COMMAND"
-        )));
+        for name in ["BUZZ_ACP_AGENT_COMMAND", "ANTHROPIC_API_KEY"] {
+            assert!(!is_sensitive_agent_env(std::ffi::OsStr::new(name)));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absolute_turn_duration_caps_continuously_active_agents() {
+        let duration = Duration::from_secs(3);
+        let error = enforce_max_turn_duration(Some(duration), async {
+            std::future::pending::<()>().await;
+            Ok(())
+        })
+        .await
+        .expect_err("absolute turn cap must fire even without an idle period");
+        assert!(matches!(error, AcpError::Timeout(actual) if actual == duration));
     }
 }

@@ -9,7 +9,7 @@ use crate::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
         KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
-        ManagedAgentSummary,
+        ManagedAgentRuntimeLifecycle, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -1628,6 +1628,7 @@ pub fn spawn_agent_child(
     lazy: bool,
     native_launch: &super::ManagedAgentLaunchContext,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    validate_native_agent_parallelism(record.parallelism)?;
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), group_id)?;
     if native_launch.group_id != runtime_key.group_id {
         return Err("managed-agent native launch context belongs to a different group".to_string());
@@ -1949,6 +1950,19 @@ pub fn spawn_agent_child(
 
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let lifecycle_path = native_launch.child_data_dir.join(format!(
+        "buzz-acp-{}.lifecycle.json",
+        native_launch.group_id
+    ));
+    match std::fs::remove_file(&lifecycle_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to clear stale native harness lifecycle receipt: {error}"
+            ));
+        }
+    }
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
@@ -2015,6 +2029,7 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
+        Some(lifecycle_path),
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -2025,7 +2040,18 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
+        lifecycle_path: Some(lifecycle_path),
     })
+}
+
+fn validate_native_agent_parallelism(parallelism: u32) -> Result<(), String> {
+    if parallelism == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "native x0x ACP supports exactly one worker; set agent parallelism to 1 (stored value is {parallelism})"
+        ))
+    }
 }
 
 fn child_rust_log_filter() -> String {
@@ -2039,6 +2065,7 @@ fn child_rust_log_filter() -> String {
 const AGENT_START_STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 const AGENT_START_STABILITY_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(10);
+const NATIVE_AGENT_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(crate) fn mark_agent_start_failure(
     record: &mut ManagedAgentRecord,
@@ -2060,8 +2087,14 @@ pub(crate) fn mark_agent_start_failure(
 pub(crate) fn stabilize_started_agent_process(
     process: &mut crate::managed_agents::ManagedAgentProcess,
     record: &mut ManagedAgentRecord,
-) -> Result<(), String> {
+) -> Result<ManagedAgentRuntimeLifecycle, String> {
     let started = std::time::Instant::now();
+    let readiness_required = process.lifecycle_path.is_some();
+    let timeout = if readiness_required {
+        NATIVE_AGENT_READINESS_TIMEOUT
+    } else {
+        AGENT_START_STABILITY_WINDOW
+    };
     loop {
         match process.child.try_wait() {
             Ok(Some(status)) => {
@@ -2089,14 +2122,63 @@ pub(crate) fn stabilize_started_agent_process(
             }
         }
 
-        let elapsed = started.elapsed();
-        if elapsed >= AGENT_START_STABILITY_WINDOW {
-            return Ok(());
+        if let Some(path) = process.lifecycle_path.as_deref() {
+            match read_native_harness_lifecycle(path, &process.start_nonce) {
+                Ok(Some((ManagedAgentRuntimeLifecycle::Failed, error))) => {
+                    let message = error.unwrap_or_else(|| {
+                        "native agent harness reported startup failure".to_string()
+                    });
+                    return fail_started_agent_process(process, record, &message);
+                }
+                Ok(Some((lifecycle, _))) => return Ok(lifecycle),
+                Ok(None) => {}
+                Err(error) => return fail_started_agent_process(process, record, &error),
+            }
         }
-        std::thread::sleep(
-            AGENT_START_STABILITY_POLL_INTERVAL.min(AGENT_START_STABILITY_WINDOW - elapsed),
-        );
+
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            if readiness_required {
+                let message = format!(
+                    "native agent harness for {} did not publish a matching readiness receipt within {} seconds",
+                    record.name,
+                    NATIVE_AGENT_READINESS_TIMEOUT.as_secs()
+                );
+                return fail_started_agent_process(process, record, &message);
+            }
+            return Ok(ManagedAgentRuntimeLifecycle::Starting);
+        }
+        std::thread::sleep(AGENT_START_STABILITY_POLL_INTERVAL.min(timeout - elapsed));
     }
+}
+
+pub(crate) fn read_native_harness_lifecycle(
+    path: &std::path::Path,
+    expected_nonce: &str,
+) -> Result<Option<(ManagedAgentRuntimeLifecycle, Option<String>)>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to read native harness lifecycle receipt: {error}"
+            ));
+        }
+    };
+    let receipt: super::ManagedAgentHarnessLifecycleReceipt = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid native harness lifecycle receipt: {error}"))?;
+    super::validate_harness_lifecycle_receipt(receipt, expected_nonce)
+}
+
+fn fail_started_agent_process<T>(
+    process: &mut crate::managed_agents::ManagedAgentProcess,
+    record: &mut ManagedAgentRecord,
+    message: &str,
+) -> Result<T, String> {
+    let _ = terminate_process(process.child.id());
+    let exit_code = process.child.wait().ok().and_then(|status| status.code());
+    mark_agent_start_failure(record, message, exit_code);
+    Err(message.to_string())
 }
 
 pub fn start_managed_agent_process(
@@ -2146,11 +2228,14 @@ pub fn start_managed_agent_process(
     record.last_error = None;
     record.last_error_code = None;
 
-    if let Err(error) = stabilize_started_agent_process(&mut process, record) {
-        runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(app, &key);
-        return Err(error);
-    }
+    let initial_lifecycle = match stabilize_started_agent_process(&mut process, record) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            runtimes.remove(&key);
+            super::remove_agent_runtime_receipt(app, &key);
+            return Err(error);
+        }
+    };
 
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -2167,7 +2252,15 @@ pub fn start_managed_agent_process(
         return Err(error);
     }
 
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
+    let lifecycle_path = process.lifecycle_path.clone();
+    let start_nonce = process.start_nonce.clone();
+    runtimes.insert(
+        key.clone(),
+        ManagedAgentPairRuntime::with_lifecycle(process, initial_lifecycle),
+    );
+    if let Some(path) = lifecycle_path {
+        super::spawn_native_lifecycle_monitor(app.clone(), key, path, start_nonce);
+    }
     Ok(())
 }
 

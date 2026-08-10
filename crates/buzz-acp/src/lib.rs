@@ -2,14 +2,17 @@
 
 mod acp;
 mod config;
+mod lifecycle;
 mod x0x;
 
 use std::collections::VecDeque;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use acp::{AcpClient, AcpError};
 use config::{Config, ConfigError};
+use lifecycle::{Lifecycle, LifecyclePublisher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -49,6 +52,11 @@ struct ContextMessage {
 #[derive(Default)]
 struct ConversationContext {
     messages: VecDeque<ContextMessage>,
+}
+
+struct HarnessContext<'a> {
+    config: &'a Config,
+    lifecycle: &'a LifecyclePublisher,
 }
 
 impl ConversationContext {
@@ -99,10 +107,22 @@ async fn async_main() -> Result<(), HarnessError> {
         .try_init();
 
     let config = Config::from_env()?;
+    let lifecycle = LifecyclePublisher::new(&config);
+    let result = run_harness(&config, &lifecycle).await;
+    if result.is_err() {
+        let _ = lifecycle.publish(
+            Lifecycle::Failed,
+            Some("native ACP harness failed; inspect the agent log"),
+        );
+    }
+    result
+}
+
+async fn run_harness(config: &Config, lifecycle: &LifecyclePublisher) -> Result<(), HarnessError> {
     let x0x = X0xClient::new(config.data_dir.clone())?;
     x0x.verify_identity(&config.agent_id).await?;
     let stable_group_id = x0x.resolve_group(&config.group_id).await?;
-    let state_path = durable_state_path(&config);
+    let state_path = durable_state_path(config);
     let loaded_state = load_state(&state_path)?;
     let recent = x0x.recent_history(&stable_group_id).await?;
     let mut context = ConversationContext::default();
@@ -130,8 +150,10 @@ async fn async_main() -> Result<(), HarnessError> {
         }
     };
 
-    let mut acp = AcpClient::start(&config).await?;
-    let (wake_tx, mut wake_rx) = mpsc::channel(1);
+    lifecycle.publish(Lifecycle::Listening, None)?;
+    let mut acp = AcpClient::start(config).await?;
+    lifecycle.publish(Lifecycle::Ready, None)?;
+    let (wake_tx, mut wake_rx) = mpsc::channel(config.parallelism);
     let wake_client = x0x.clone();
     let wake_group = stable_group_id.clone();
     let wake_task = tokio::spawn(async move {
@@ -155,7 +177,7 @@ async fn async_main() -> Result<(), HarnessError> {
             }
         }
         reconcile(
-            &config,
+            &HarnessContext { config, lifecycle },
             &x0x,
             &stable_group_id,
             &state_path,
@@ -172,7 +194,7 @@ async fn async_main() -> Result<(), HarnessError> {
 }
 
 async fn reconcile(
-    config: &Config,
+    harness: &HarnessContext<'_>,
     x0x: &X0xClient,
     stable_group_id: &str,
     state_path: &Path,
@@ -180,6 +202,7 @@ async fn reconcile(
     context: &mut ConversationContext,
     acp: &mut AcpClient,
 ) -> Result<(), HarnessError> {
+    let config = harness.config;
     let rows = x0x
         .history_after(stable_group_id, state.last_seen_id)
         .await?;
@@ -192,16 +215,43 @@ async fn reconcile(
             context.push(&row, envelope);
         }
 
-        if let Some(envelope) = envelope {
-            if should_trigger(config, stable_group_id, &row, &envelope) {
+        if let Some(envelope) =
+            envelope.filter(|envelope| should_trigger(config, stable_group_id, &row, envelope))
+        {
+            after_durable_claim(state_path, state, row.id, || async {
+                harness.lifecycle.publish(Lifecycle::Waking, None)?;
                 handle_directed_message(config, x0x, &row, &envelope, context, acp).await?;
-            }
+                harness.lifecycle.publish(Lifecycle::Ready, None)?;
+                Ok(())
+            })
+            .await?;
+        } else {
+            claim_row(state_path, state, row.id)?;
         }
-
-        state.last_seen_id = state.last_seen_id.max(row.id);
-        persist_state(state_path, state)?;
     }
     Ok(())
+}
+
+fn claim_row(state_path: &Path, state: &mut DurableState, row_id: i64) -> Result<(), HarnessError> {
+    state.last_seen_id = state.last_seen_id.max(row_id);
+    persist_state(state_path, state)
+}
+
+async fn after_durable_claim<F, Fut>(
+    state_path: &Path,
+    state: &mut DurableState,
+    row_id: i64,
+    operation: F,
+) -> Result<(), HarnessError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), HarnessError>>,
+{
+    // Claim before entering ACP. ACP tools can perform externally-visible
+    // sends that cannot be rolled back, so retrying this prompt after a reply
+    // or watermark failure would duplicate a successful side effect.
+    claim_row(state_path, state, row_id)?;
+    operation().await
 }
 
 fn should_trigger(
@@ -216,6 +266,7 @@ fn should_trigger(
     row.is_verified_inbound(stable_group_id)
         && !author.eq_ignore_ascii_case(&config.agent_id)
         && config.author_allowed(author)
+        && !envelope.agent_generated
         && envelope
             .mentions
             .iter()
@@ -248,6 +299,7 @@ async fn handle_directed_message(
         created_at: now_millis(),
         client_id: uuid::Uuid::new_v4().to_string(),
         mentions: vec![author.to_string()],
+        agent_generated: true,
     };
     let body = serde_json::to_string(&response_envelope)?;
     let thread_root = row.thread_root.as_deref().unwrap_or(&row.msg_id);
@@ -319,8 +371,19 @@ fn load_state(path: &Path) -> Result<Option<DurableState>, HarnessError> {
 
 fn persist_state(path: &Path, state: &DurableState) -> Result<(), HarnessError> {
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec(state)?)?;
-    std::fs::rename(temporary, path)?;
+    let bytes = serde_json::to_vec(state)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -359,6 +422,49 @@ mod tests {
         let row = test_row(&config.owner_agent_id, &"c".repeat(64));
         let envelope = row.envelope().expect("valid envelope");
         assert!(!should_trigger(&config, "stable", &row, &envelope));
+    }
+
+    #[test]
+    fn generated_peer_reply_cannot_trigger_an_allowlisted_agent() {
+        let allowed = "c".repeat(64);
+        let mut config = test_config(RespondTo::Allowlist);
+        config.respond_to_allowlist.insert(allowed.clone());
+        let mut row = test_row(&allowed, &config.agent_id);
+        let mut envelope = row.envelope().expect("valid envelope");
+        envelope.agent_generated = true;
+        row.payload = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&envelope).expect("encode envelope"));
+        let envelope = row.envelope().expect("valid generated envelope");
+
+        assert!(!should_trigger(&config, "stable", &row, &envelope));
+    }
+
+    #[tokio::test]
+    async fn directed_row_is_durably_claimed_before_any_acp_side_effect() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState::default();
+
+        let error = after_durable_claim(&state_path, &mut state, 42, || async {
+            let claimed = load_state(&state_path)
+                .expect("load claimed state")
+                .expect("claimed state exists");
+            assert_eq!(claimed.last_seen_id, 42);
+            Err(HarnessError::X0x(X0xError::Transport(
+                "simulated reply failure".to_string(),
+            )))
+        })
+        .await
+        .expect_err("reply failure must propagate");
+
+        assert!(error.to_string().contains("simulated reply failure"));
+        assert_eq!(
+            load_state(&state_path)
+                .expect("reload state")
+                .expect("state remains durable")
+                .last_seen_id,
+            42
+        );
     }
 
     #[test]
@@ -419,6 +525,9 @@ mod tests {
             respond_to,
             respond_to_allowlist: HashSet::new(),
             idle_timeout: Duration::from_secs(1),
+            max_turn_duration: None,
+            parallelism: 1,
+            start_nonce: None,
         }
     }
 
