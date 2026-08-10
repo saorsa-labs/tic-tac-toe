@@ -107,8 +107,8 @@ impl X0xTools {
         json!({
             "tools": [
                 {
-                    "name": "community_members",
-                    "description": "List active and banned members in this managed agent's native x0x community.",
+                    "name": "space_members",
+                    "description": "List active and banned members in this managed agent's native x0x space.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {},
@@ -116,8 +116,8 @@ impl X0xTools {
                     }
                 },
                 {
-                    "name": "community_send",
-                    "description": "Send a native x0x community message, optionally mentioning members or replying in a thread.",
+                    "name": "space_send",
+                    "description": "Send a native x0x space message, optionally mentioning members or replying in a thread.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -152,24 +152,24 @@ impl X0xTools {
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, AppError> {
         match name {
-            "community_members" => {
+            "space_members" => {
                 validate_no_arguments(&arguments)?;
-                self.community_members().await
+                self.space_members().await
             }
-            "community_send" => {
+            "space_send" => {
                 let request = parse_send_arguments(arguments)?;
-                self.community_send(request).await
+                self.space_send(request).await
             }
             _ => Err(AppError::new(format!("unknown tool: {name}"))),
         }
     }
 
-    async fn community_members(&self) -> Result<Value, AppError> {
+    async fn space_members(&self) -> Result<Value, AppError> {
         let path = format!("/groups/{}/members", self.config.group_id);
         self.request_json(Method::GET, &path, None).await
     }
 
-    async fn community_send(&self, request: CommunitySend) -> Result<Value, AppError> {
+    async fn space_send(&self, request: SpaceSend) -> Result<Value, AppError> {
         let body = build_group_send_body(request)?;
         let path = format!("/groups/{}/send", self.config.group_id);
         self.request_json(Method::POST, &path, Some(body)).await
@@ -201,7 +201,7 @@ impl X0xTools {
 
     pub fn server_instructions(&self) -> String {
         format!(
-            "Native x0x community tools for managed agent {} owned by {} in group {}. No relay or Nostr transport is available.",
+            "Native x0x space tools for managed agent {} owned by {} in space {}. No relay or Nostr transport is available.",
             self.config.agent_id, self.config.owner_agent_id, self.config.group_id
         )
     }
@@ -277,7 +277,7 @@ fn http_error(status: StatusCode, value: &Value) -> AppError {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CommunitySend {
+struct SpaceSend {
     text: String,
     #[serde(default)]
     mentions: Vec<String>,
@@ -307,9 +307,9 @@ struct GroupSendBody {
     thread_parent: Option<String>,
 }
 
-fn parse_send_arguments(arguments: Value) -> Result<CommunitySend, AppError> {
-    let request: CommunitySend = serde_json::from_value(arguments)
-        .map_err(|error| AppError::new(format!("invalid community_send arguments: {error}")))?;
+fn parse_send_arguments(arguments: Value) -> Result<SpaceSend, AppError> {
+    let request: SpaceSend = serde_json::from_value(arguments)
+        .map_err(|error| AppError::new(format!("invalid space_send arguments: {error}")))?;
     if request.text.trim().is_empty() {
         return Err(AppError::new("text must not be empty"));
     }
@@ -331,7 +331,7 @@ fn parse_send_arguments(arguments: Value) -> Result<CommunitySend, AppError> {
     Ok(request)
 }
 
-fn build_group_send_body(request: CommunitySend) -> Result<Value, AppError> {
+fn build_group_send_body(request: SpaceSend) -> Result<Value, AppError> {
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| AppError::new("system clock is before the Unix epoch"))?
@@ -367,7 +367,7 @@ fn validate_no_arguments(arguments: &Value) -> Result<(), AppError> {
     if object.is_empty() {
         Ok(())
     } else {
-        Err(AppError::new("community_members does not accept arguments"))
+        Err(AppError::new("space_members does not accept arguments"))
     }
 }
 
@@ -571,7 +571,7 @@ mod tests {
         ))
         .expect("tools");
         let members = tools
-            .call_tool("community_members", json!({}))
+            .call_tool("space_members", json!({}))
             .await
             .expect("members call");
         assert_eq!(members["member_count"], 2);
@@ -587,7 +587,7 @@ mod tests {
         write_endpoint(directory.path(), second.address, "token-two");
         let sent = tools
             .call_tool(
-                "community_send",
+                "space_send",
                 json!({"text": "reply from agent", "mentions": [OWNER_ID]}),
             )
             .await
@@ -628,7 +628,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect();
-        assert_eq!(names, ["community_members", "community_send"]);
+        assert_eq!(names, ["space_members", "space_send"]);
 
         let invalid = handle_request(
             &tools,
@@ -636,7 +636,7 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
-                "params": {"name": "community_send", "arguments": {"text": ""}}
+                "params": {"name": "space_send", "arguments": {"text": ""}}
             }),
         )
         .await
