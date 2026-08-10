@@ -13,6 +13,7 @@ pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;
 mod nest;
+mod orchestration;
 mod persona_avatars;
 pub(crate) mod persona_events;
 mod personas;
@@ -52,6 +53,7 @@ pub(crate) use global_config::{
 };
 pub(crate) use managed_node_paths::*;
 pub use nest::*;
+pub(crate) use orchestration::*;
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;

@@ -5,11 +5,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, stabilize_started_agent_process, terminate_process,
-    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
-    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
-    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
+    prepare_managed_agent_launch, process_is_running, record_agent_command,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    stabilize_started_agent_process, terminate_process, terminate_untracked_pair_runtime,
+    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
+    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
+    ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -219,24 +220,24 @@ pub fn list_managed_agent_runtimes(
     Ok(statuses)
 }
 
-pub(crate) fn start_managed_agent_runtime_pair_lazy(
+pub(crate) async fn start_managed_agent_runtime_pair_lazy(
     pubkey: String,
     group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, group_id, true, None, app)
+    start_pair(pubkey, group_id, true, None, app).await
 }
 
 #[tauri::command]
-pub fn start_managed_agent_runtime(
+pub async fn start_managed_agent_runtime(
     pubkey: String,
     group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_managed_agent_runtime_pair_lazy(pubkey, group_id, app)
+    start_managed_agent_runtime_pair_lazy(pubkey, group_id, app).await
 }
 
-fn start_pair(
+async fn start_pair(
     pubkey: String,
     group_id: String,
     lazy: bool,
@@ -244,6 +245,26 @@ fn start_pair(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
+    let record_snapshot = {
+        let _store = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(&app)?;
+        records
+            .iter()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&pubkey))
+            .cloned()
+            .ok_or_else(|| format!("agent {pubkey} not found"))?
+    };
+    if record_snapshot.backend != BackendKind::Local {
+        return Err("managed runtime pairs require a local agent".into());
+    }
+    if expected_updated_at.is_some_and(|expected| record_snapshot.updated_at != expected) {
+        return Err("managed agent changed while runtime reconciliation was in flight".into());
+    }
+    let native_launch = prepare_managed_agent_launch(&app, &record_snapshot, &group_id).await?;
+
     let _transition = state
         .managed_agent_runtime_transition
         .lock()
@@ -260,7 +281,9 @@ fn start_pair(
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
-    if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
+    if record.updated_at != record_snapshot.updated_at
+        || expected_updated_at.is_some_and(|expected| record.updated_at != expected)
+    {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
     let key = ManagedAgentRuntimeKey::new(pubkey, &group_id)?;
@@ -278,7 +301,7 @@ fn start_pair(
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
 
-    let mut process = spawn_agent_child(&app, record, &key.group_id, lazy)?;
+    let mut process = spawn_agent_child(&app, record, &key.group_id, lazy, &native_launch)?;
     let now = crate::util::now_iso();
     record.runtime_pid = None;
     record.updated_at = now.clone();
@@ -383,13 +406,13 @@ pub fn stop_managed_agent_runtime(
 }
 
 #[tauri::command]
-pub fn restart_managed_agent_runtime(
+pub async fn restart_managed_agent_runtime(
     pubkey: String,
     group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     stop_managed_agent_runtime(pubkey.clone(), group_id.clone(), app.clone())?;
-    start_pair(pubkey, group_id, true, None, app)
+    start_pair(pubkey, group_id, true, None, app).await
 }
 
 #[cfg(test)]

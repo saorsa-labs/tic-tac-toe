@@ -82,7 +82,9 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             pubkey.to_string(),
             group_id.clone(),
             app.clone(),
-        ) {
+        )
+        .await
+        {
             errors.push(format!("{group_id}: {error}"));
         }
     }
@@ -132,6 +134,16 @@ pub(super) async fn start_local_agent_with_preflight(
         return Err(format!("agent {pubkey} is not a local agent"));
     }
 
+    let group_id = state
+        .active_group_id
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "no native community is active".to_string())?;
+    let native_launch =
+        crate::managed_agents::prepare_managed_agent_launch(app, &record_snapshot, &group_id)
+            .await?;
+
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -159,7 +171,9 @@ pub(super) async fn start_local_agent_with_preflight(
             record.updated_at = crate::util::now_iso();
         }
     }
-    if let Err(start_error) = start_managed_agent_process(app, record, &mut runtimes) {
+    if let Err(start_error) =
+        start_managed_agent_process(app, record, &mut runtimes, &native_launch)
+    {
         if let Err(save_error) = save_managed_agents(app, &records) {
             return Err(format!(
                 "{start_error}; additionally failed to persist the stopped agent state: {save_error}"

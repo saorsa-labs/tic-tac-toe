@@ -1,5 +1,38 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[test]
+fn native_launch_exports_actual_child_identity_and_group() {
+    let record_pubkey = "aa".repeat(32);
+    let child_agent_id = "bb".repeat(32);
+    let context = crate::managed_agents::ManagedAgentLaunchContext {
+        child_agent_id: child_agent_id.clone(),
+        owner_agent_id: "cc".repeat(32),
+        child_data_dir: std::path::PathBuf::from("/tmp/x0x-managed-guide"),
+        group_id: "welcome-group".to_string(),
+    };
+    let mut command = std::process::Command::new("buzz-acp");
+
+    super::configure_native_agent_env(&mut command, &context);
+
+    let env = command
+        .get_envs()
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_ne!(record_pubkey, child_agent_id);
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("X0X_AGENT_ID")),
+        Some(&std::ffi::OsStr::new(&child_agent_id))
+    );
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("X0X_GROUP_ID")),
+        Some(&std::ffi::OsStr::new("welcome-group"))
+    );
+    assert_ne!(
+        env.get(std::ffi::OsStr::new("X0X_AGENT_ID")),
+        Some(&std::ffi::OsStr::new(&record_pubkey))
+    );
+}
+
 // ── buffer_contains_identifier tests ────────────────────────────────────
 
 #[test]

@@ -1589,6 +1589,16 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+fn configure_native_agent_env(
+    command: &mut std::process::Command,
+    native_launch: &super::ManagedAgentLaunchContext,
+) {
+    command.env("X0X_DATA_DIR", &native_launch.child_data_dir);
+    command.env("X0X_OWNER_AGENT_ID", &native_launch.owner_agent_id);
+    command.env("X0X_AGENT_ID", &native_launch.child_agent_id);
+    command.env("X0X_GROUP_ID", &native_launch.group_id);
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -1597,8 +1607,12 @@ pub fn spawn_agent_child(
     record: &ManagedAgentRecord,
     group_id: &str,
     lazy: bool,
+    native_launch: &super::ManagedAgentLaunchContext,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), group_id)?;
+    if native_launch.group_id != runtime_key.group_id {
+        return Err("managed-agent native launch context belongs to a different group".to_string());
+    }
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -1687,32 +1701,10 @@ pub fn spawn_agent_child(
     }
     command.env("RUST_LOG", child_rust_log_filter());
     // ── Native x0x identity and observer transport ────────────────────────
-    // Each managed agent gets a dedicated x0xd child. Its isolated data dir
-    // owns the ML-DSA keys; the harness receives only native identity handles.
-    match crate::managed_agents::agent_identity::provision_managed_agent_child(
-        &record.pubkey,
-    ) {
-        Ok(child) => {
-            let owner_agent_id = crate::local_stack::fetch_agent()
-                .ok()
-                .and_then(|v| v.get("agent_id").and_then(|a| a.as_str()).map(str::to_string));
-            match owner_agent_id {
-                Some(owner_id) => {
-                    command.env("X0X_DATA_DIR", &child.data_dir);
-                    command.env("X0X_OWNER_AGENT_ID", &owner_id);
-                    command.env("X0X_AGENT_ID", &child.agent_id);
-                }
-                None => eprintln!(
-                    "buzz-desktop: agent {} native observer transport disabled — owner agent_id unavailable",
-                    record.name
-                ),
-            }
-        }
-        Err(error) => eprintln!(
-            "buzz-desktop: agent {} native observer transport disabled — child x0xd bring-up failed: {error:?}",
-            record.name
-        ),
-    }
+    // Community orchestration has already provisioned the child, established
+    // contact consent, attached its actual AgentId, and observed child-side
+    // group convergence. The harness receives only native identity handles.
+    configure_native_agent_env(&mut command, native_launch);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
@@ -2098,6 +2090,7 @@ pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    native_launch: &super::ManagedAgentLaunchContext,
 ) -> Result<(), String> {
     let group_id = {
         use tauri::Manager;
@@ -2123,7 +2116,7 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = match spawn_agent_child(app, record, &key.group_id, false) {
+    let mut process = match spawn_agent_child(app, record, &key.group_id, false, native_launch) {
         Ok(process) => process,
         Err(error) => {
             mark_agent_start_failure(record, &error, None);
