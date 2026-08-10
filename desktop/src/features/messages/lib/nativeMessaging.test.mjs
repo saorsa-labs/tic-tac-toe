@@ -372,3 +372,33 @@ test("sendNativeMessage falls back to clientId when daemon returns no msg_id", a
     "no thread tags without threadRoot",
   );
 });
+
+test("create-agent intro sends the child AgentId and preserves a human contact mention", async () => {
+  const recordPubkey = "1".repeat(64);
+  const childAgentId = "2".repeat(64);
+  const humanAgentId = "3".repeat(64);
+  response = "4".repeat(64);
+
+  const event = await sendNativeMessage(
+    {
+      channel: channel({ id: "group-create-agent" }),
+      content: "@Guide, help me create a new agent.",
+      identity: { agentId: "5".repeat(64) },
+      mentionPubkeys: [recordPubkey, humanAgentId],
+    },
+    async (mentions) => {
+      assert.deepEqual(mentions, [recordPubkey, humanAgentId]);
+      return [childAgentId, humanAgentId];
+    },
+  );
+
+  const sendCall = calls.find((call) => call.cmd === "x0x_send_group_message");
+  assert.ok(sendCall);
+  const envelope = JSON.parse(sendCall.args.input.body);
+  assert.deepEqual(envelope.mentions, [childAgentId, humanAgentId]);
+  assert.ok(!envelope.mentions.includes(recordPubkey));
+  assert.deepEqual(
+    event.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
+    ["5".repeat(64), childAgentId, humanAgentId],
+  );
+});

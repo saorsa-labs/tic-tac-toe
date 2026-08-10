@@ -1217,7 +1217,7 @@ test("editAgent_findingE_capableBuzzAgentLoadedCatalog_preservedOnNoOpSave", () 
 //              correctly via id-fallback when catalog command is the resolved path
 //
 // Problem: buzz-agent stores agentCommand="buzz-agent" (short name) while the
-// catalog entry has command="/Applications/Buzz.app/.../buzz-agent" (resolved path).
+// catalog entry has command="/Applications/tic-tac-toe.app/.../buzz-agent" (resolved path).
 // Command-based matching fails (short name ≠ full path), so selectedRuntimeId
 // stayed "custom" → selectedRuntime=undefined → canDiscoverModelOptions=false →
 // discovery never fired for inherited agents.
@@ -1244,7 +1244,7 @@ test("editAgent_bugA_inheritedShortName_resolvesViaIdFallback", () => {
   const runtimes = [
     {
       id: "buzz-agent",
-      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent", // resolved path
+      command: "/Applications/tic-tac-toe.app/Contents/MacOS/buzz-agent", // resolved path
       availability: "available",
       defaultArgs: [],
     },
@@ -1299,7 +1299,7 @@ test("editAgent_bugA_inheritedShortName_discoveryGatePasses", () => {
   const runtimes = [
     {
       id: "buzz-agent",
-      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+      command: "/Applications/tic-tac-toe.app/Contents/MacOS/buzz-agent",
       availability: "available",
       defaultArgs: [],
     },
@@ -1336,7 +1336,7 @@ test("editAgent_bugA_inheritedShortName_discoveryGatePasses", () => {
   );
   assert.equal(
     discoveryAgentCommand,
-    "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+    "/Applications/tic-tac-toe.app/Contents/MacOS/buzz-agent",
     "discoveryAgentCommand must be the resolved path from the catalog entry",
   );
   assert.equal(
@@ -1354,7 +1354,7 @@ test("editAgent_bugA_unknownCommandStillFallsBackToCustom", () => {
   const runtimes = [
     {
       id: "buzz-agent",
-      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+      command: "/Applications/tic-tac-toe.app/Contents/MacOS/buzz-agent",
       availability: "available",
       defaultArgs: [],
     },

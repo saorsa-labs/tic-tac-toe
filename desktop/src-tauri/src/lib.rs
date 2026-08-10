@@ -447,6 +447,8 @@ pub fn run() {
             discover_managed_agent_prereqs,
             sign_out,
             get_managed_agent_native_identity,
+            has_managed_agent_channel_message_marker,
+            send_managed_agent_channel_message,
             show_native_notification,
             save_png_data_url,
             copy_text_to_clipboard,

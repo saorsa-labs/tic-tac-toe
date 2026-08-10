@@ -1,5 +1,6 @@
 import type { SendChannelMessageResult } from "@/shared/api/types";
 import { invokeTauri } from "@/shared/api/tauri";
+import { resolveNativeMentionAgentIds } from "@/shared/api/managedAgentMentionIdentity";
 
 type RawSendChannelMessageResult = {
   event_id: string;
@@ -9,27 +10,33 @@ type RawSendChannelMessageResult = {
   created_at: number;
 };
 
-export async function sendManagedAgentChannelMessage(input: {
-  agentPubkey: string;
-  channelId: string;
-  content: string;
-  marker?: string;
-  markerScope?: "agent" | "channel";
-  mentionPubkeys?: string[];
-  parentEventId?: string;
-  additionalMarkers?: string[];
-}): Promise<SendChannelMessageResult> {
+export async function sendManagedAgentChannelMessage(
+  input: {
+    agentPubkey: string;
+    channelId: string;
+    content: string;
+    marker?: string;
+    markerScope?: "agent" | "channel";
+    mentionPubkeys?: string[];
+    parentEventId?: string;
+    additionalMarkers?: string[];
+  },
+  resolveMentionAgentIds = resolveNativeMentionAgentIds,
+): Promise<SendChannelMessageResult> {
+  const mentionAgentIds = await resolveMentionAgentIds(input.mentionPubkeys);
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_managed_agent_channel_message",
     {
-      agentPubkey: input.agentPubkey,
-      channelId: input.channelId,
-      content: input.content,
-      marker: input.marker ?? null,
-      markerScope: input.markerScope ?? null,
-      mentionPubkeys: input.mentionPubkeys ?? null,
-      parentEventId: input.parentEventId ?? null,
-      additionalMarkers: input.additionalMarkers ?? null,
+      input: {
+        agentPubkey: input.agentPubkey,
+        channelId: input.channelId,
+        content: input.content,
+        marker: input.marker ?? null,
+        markerScope: input.markerScope ?? null,
+        mentionPubkeys: mentionAgentIds.length > 0 ? mentionAgentIds : null,
+        parentEventId: input.parentEventId ?? null,
+        additionalMarkers: input.additionalMarkers ?? null,
+      },
     },
   );
 

@@ -10243,7 +10243,11 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "send_managed_agent_channel_message":
         return handleSendManagedAgentChannelMessage(
-          payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
+          (
+            payload as {
+              input: Parameters<typeof handleSendManagedAgentChannelMessage>[0];
+            }
+          ).input,
           activeConfig,
         );
       case "delete_message":
