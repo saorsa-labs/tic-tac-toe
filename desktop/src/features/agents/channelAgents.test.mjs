@@ -109,3 +109,31 @@ test("attach fails closed when the child identity is unresolved", async () => {
   assert.equal(readMembers, false);
   assert.deepEqual(additions, []);
 });
+
+test("attach rejects a record key returned as its own child before roster access", async () => {
+  let memberReads = 0;
+  let additions = 0;
+  await assert.rejects(
+    attachManagedAgentToChannel(
+      groupId,
+      { agent: agent() },
+      {
+        startManagedAgent: async () => {
+          throw new Error("running agent must not restart");
+        },
+        getManagedAgentNativeIdentity: async () => recordPubkey,
+        getChannelMembers: async () => {
+          memberReads += 1;
+          return [];
+        },
+        x0xAddGroupMember: async () => {
+          additions += 1;
+        },
+      },
+    ),
+    /Guide.*no native identity.*Start or restart/i,
+  );
+
+  assert.equal(memberReads, 0);
+  assert.equal(additions, 0);
+});

@@ -81,6 +81,7 @@ test("native child roster membership expands to its managed record alias", () =>
   const humanAgentId = "c".repeat(64);
   const expanded = expandManagedAgentMemberPubkeys(
     [childAgentId.toUpperCase(), humanAgentId],
+    [recordPubkey],
     { [recordPubkey.toUpperCase()]: childAgentId },
   );
 
@@ -90,11 +91,33 @@ test("native child roster membership expands to its managed record alias", () =>
   );
 });
 
-test("managed record alias is not added when its child is absent from the roster", () => {
+test("legacy record roster entry cannot stand in for a distinct child", () => {
+  const expanded = expandManagedAgentMemberPubkeys(
+    [recordPubkey],
+    [recordPubkey],
+    { [recordPubkey]: childAgentId },
+  );
+
+  assert.deepEqual(expanded, new Set());
+});
+
+test("unresolved legacy record roster entry does not count as membership", () => {
   const humanAgentId = "c".repeat(64);
-  const expanded = expandManagedAgentMemberPubkeys([humanAgentId], {
-    [recordPubkey]: childAgentId,
-  });
+  const expanded = expandManagedAgentMemberPubkeys(
+    [recordPubkey, humanAgentId],
+    [recordPubkey],
+    {},
+  );
 
   assert.deepEqual(expanded, new Set([humanAgentId]));
+});
+
+test("translation rejects a managed record returned as its own child identity", async () => {
+  await assert.rejects(
+    resolveNativeMentionAgentIds([recordPubkey], {
+      listManagedAgents: async () => [{ name: "Guide", pubkey: recordPubkey }],
+      getManagedAgentNativeIdentity: async () => recordPubkey,
+    }),
+    /Managed agent "Guide" has no native identity.*Start or restart/i,
+  );
 });

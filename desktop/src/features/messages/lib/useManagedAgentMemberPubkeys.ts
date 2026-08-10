@@ -37,8 +37,9 @@ export function useManagedAgentMemberPubkeys(
     () =>
       expandManagedAgentMemberPubkeys(
         members.map((member) => member.pubkey),
+        agents.map((agent) => agent.pubkey),
         nativeIdentitiesQuery.data ?? {},
       ),
-    [members, nativeIdentitiesQuery.data],
+    [agents, members, nativeIdentitiesQuery.data],
   );
 }

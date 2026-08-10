@@ -41,7 +41,9 @@ export async function resolveManagedAgentNativeIdentityMap(
         const childAgentId = normalizePubkey(
           (await resolveIdentity(recordPubkey)) ?? "",
         );
-        return recordPubkey && AGENT_ID_PATTERN.test(childAgentId)
+        return recordPubkey &&
+          AGENT_ID_PATTERN.test(childAgentId) &&
+          childAgentId !== recordPubkey
           ? ([recordPubkey, childAgentId] as const)
           : null;
       } catch {
@@ -53,20 +55,36 @@ export async function resolveManagedAgentNativeIdentityMap(
 }
 
 /**
- * Add managed record-key aliases for child AgentIds already present in an
- * x0xd roster. The child IDs remain in the set; record keys are added only so
- * UI/readiness code can compare its control identity against native members.
+ * Remove every managed lifecycle record key from a raw x0xd roster, then add
+ * one back as a UI alias only when its distinct, valid child AgentId is also a
+ * native member. This prevents stale legacy record keys from impersonating a
+ * provisioned child while still letting UI/readiness code use control keys.
  */
 export function expandManagedAgentMemberPubkeys(
   memberPubkeys: Iterable<string>,
+  managedRecordPubkeys: Iterable<string>,
   nativeIdentityByRecordPubkey: ManagedAgentNativeIdentityMap,
 ): Set<string> {
-  const expanded = new Set([...memberPubkeys].map(normalizePubkey));
+  const managedRecords = new Set(
+    [...managedRecordPubkeys].map(normalizePubkey),
+  );
+  const expanded = new Set(
+    [...memberPubkeys]
+      .map(normalizePubkey)
+      .filter((pubkey) => !managedRecords.has(pubkey)),
+  );
   for (const [recordPubkey, childAgentId] of Object.entries(
     nativeIdentityByRecordPubkey,
   )) {
-    if (expanded.has(normalizePubkey(childAgentId))) {
-      expanded.add(normalizePubkey(recordPubkey));
+    const normalizedRecordPubkey = normalizePubkey(recordPubkey);
+    const normalizedChildAgentId = normalizePubkey(childAgentId);
+    if (
+      managedRecords.has(normalizedRecordPubkey) &&
+      AGENT_ID_PATTERN.test(normalizedChildAgentId) &&
+      normalizedChildAgentId !== normalizedRecordPubkey &&
+      expanded.has(normalizedChildAgentId)
+    ) {
+      expanded.add(normalizedRecordPubkey);
     }
   }
   return expanded;
@@ -109,7 +127,7 @@ export async function resolveNativeMentionAgentIds(
     const childAgentId = normalizePubkey(
       (await dependencies.getManagedAgentNativeIdentity(candidate)) ?? "",
     );
-    if (!AGENT_ID_PATTERN.test(childAgentId)) {
+    if (!AGENT_ID_PATTERN.test(childAgentId) || childAgentId === candidate) {
       throw new Error(
         `Managed agent "${managedAgent.name}" has no native identity. Start or restart it before mentioning it.`,
       );

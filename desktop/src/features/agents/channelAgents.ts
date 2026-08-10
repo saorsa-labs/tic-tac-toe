@@ -160,7 +160,10 @@ export async function attachManagedAgentToChannel(
   const memberAgentId = normalizePubkey(
     (await dependencies.getManagedAgentNativeIdentity(agent.pubkey)) ?? "",
   );
-  if (!/^[0-9a-f]{64}$/.test(memberAgentId)) {
+  if (
+    !/^[0-9a-f]{64}$/.test(memberAgentId) ||
+    memberAgentId === normalizePubkey(agent.pubkey)
+  ) {
     throw new Error(
       `Managed agent "${agent.name}" has no native identity. Start or restart it before adding it to a community.`,
     );

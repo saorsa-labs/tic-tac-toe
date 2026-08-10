@@ -165,9 +165,13 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
 
 test("a native child roster entry yields exactly one in-channel managed record suggestion", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
-  const memberPubkeys = expandManagedAgentMemberPubkeys([PUB_B], {
-    [PUB_A]: PUB_B,
-  });
+  const memberPubkeys = expandManagedAgentMemberPubkeys(
+    [PUB_B],
+    managedAgentPubkeys,
+    {
+      [PUB_A]: PUB_B,
+    },
+  );
   const candidates = [
     makeAgent({ pubkey: PUB_B, displayName: "child", isMember: true }),
     makeAgent({
