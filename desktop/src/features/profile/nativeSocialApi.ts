@@ -26,6 +26,11 @@ export async function listNativeContacts(): Promise<NativeContact[]> {
   return invokeTauri<NativeContact[]>("x0x_list_contacts");
 }
 
+/** Only explicit contact trust satisfies the human first-contact gate. */
+export function isEstablishedNativeContact(contact: NativeContact): boolean {
+  return contact.trustLevel === "known" || contact.trustLevel === "trusted";
+}
+
 /** Project the active x0x group's roster into the shared agent directory. */
 export async function listNativeAgents(): Promise<RelayAgent[]> {
   const groupId = await getActiveNativeGroupId();
@@ -207,6 +212,28 @@ async function nativeDisplayNames(): Promise<Map<string, string | null>> {
   return names;
 }
 
+/** Directory names are restricted to contacts the human has accepted. */
+async function establishedNativeDisplayNames(): Promise<
+  Map<string, string | null>
+> {
+  const [groupId, contacts] = await Promise.all([
+    getActiveNativeGroupId(),
+    listNativeContacts(),
+  ]);
+  const names = new Map(
+    contacts
+      .filter(isEstablishedNativeContact)
+      .map((contact) => [contact.agentId, contact.label] as const),
+  );
+  const members = await x0xGetGroupMembers(groupId);
+  for (const member of members) {
+    if (names.has(member.agentId) && member.displayName?.trim()) {
+      names.set(member.agentId, member.displayName);
+    }
+  }
+  return names;
+}
+
 type RawAgentCardEnvelope = {
   card?: {
     agent_id?: string;
@@ -284,7 +311,7 @@ export async function searchNativeProfiles(
   limit: number,
 ): Promise<UserSearchResult[]> {
   const needle = query.trim().toLowerCase();
-  return [...(await nativeDisplayNames()).entries()]
+  return [...(await establishedNativeDisplayNames()).entries()]
     .filter(
       ([agentId, label]) =>
         !needle ||

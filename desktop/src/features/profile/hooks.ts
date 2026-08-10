@@ -18,11 +18,13 @@ import {
   getNativeSelfProfile,
   getNativeUserProfile,
   getNativeUsersBatch,
+  isEstablishedNativeContact,
   listNativeContacts,
   removeNativeContact,
   searchNativeProfiles,
   updateNativeProfile,
 } from "@/features/profile/nativeSocialApi";
+import type { NativeContact } from "@/features/profile/nativeSocialApi";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import type {
   Profile,
@@ -49,6 +51,7 @@ import { updateCachedChannelMemberDisplayName } from "@/features/channels/channe
 export const profileQueryKey = ["profile"] as const;
 export const contactListQueryKey = (pubkey: string) =>
   ["contact-list", pubkey] as const;
+export const nativeContactsQueryKey = ["native-contacts"] as const;
 export const allPulseTimelinesQueryKey = ["pulse-timeline"] as const;
 
 /**
@@ -219,12 +222,22 @@ async function getNativeContactList(): Promise<ContactListResponse> {
     id: "x0xd-contacts",
     pubkey: agentId,
     createdAt: 0,
-    contacts: contacts.map((contact) => ({
+    contacts: contacts.filter(isEstablishedNativeContact).map((contact) => ({
       // Legacy Buzz render field; value is the daemon's x0x AgentId.
       pubkey: contact.agentId,
       petname: contact.label ?? undefined,
     })),
   };
+}
+
+export function useNativeContactsQuery(options?: { enabled?: boolean }) {
+  return useQuery<NativeContact[]>({
+    queryKey: nativeContactsQueryKey,
+    queryFn: listNativeContacts,
+    enabled: options?.enabled ?? true,
+    staleTime: 30_000,
+    gcTime: 5 * 60_000,
+  });
 }
 
 export function useContactListQuery(agentId?: string) {
@@ -247,6 +260,7 @@ export function useFollowMutation(currentAgentId?: string) {
   return useMutation({
     mutationFn: (targetAgentId: string) => addNativeContact(targetAgentId),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: nativeContactsQueryKey });
       void queryClient.invalidateQueries({
         queryKey: contactListQueryKey(currentAgentId ?? "native"),
       });
@@ -263,6 +277,7 @@ export function useUnfollowMutation(currentAgentId?: string) {
   return useMutation({
     mutationFn: removeNativeContact,
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: nativeContactsQueryKey });
       void queryClient.invalidateQueries({
         queryKey: contactListQueryKey(currentAgentId ?? "native"),
       });

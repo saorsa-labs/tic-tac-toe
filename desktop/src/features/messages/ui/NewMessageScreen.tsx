@@ -10,7 +10,10 @@ import {
 } from "@/features/channels/hooks";
 import { useSendMessageMutation } from "@/features/messages/hooks";
 import { addNativeContactFromInput } from "@/features/profile/nativeSocialApi";
-import { contactListQueryKey } from "@/features/profile/hooks";
+import {
+  contactListQueryKey,
+  nativeContactsQueryKey,
+} from "@/features/profile/hooks";
 import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidateSearch";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -23,6 +26,7 @@ import { MessageComposer } from "./MessageComposer";
 import {
   getAddedNativeContactStatus,
   getNewMessageContactPrompt,
+  shouldPreferNewMessageContactPrompt,
 } from "./newMessageContactPrompt";
 import { NewMessageResultRow } from "./NewMessageResultRow";
 import {
@@ -74,6 +78,7 @@ export function NewMessageScreen() {
     handleDirectoryScroll,
     hasReachedRecipientLimit,
     isDirectoryLoading,
+    nativeContacts,
     ownerProfiles,
     presence,
     removeUser,
@@ -86,9 +91,18 @@ export function NewMessageScreen() {
   } = useNewMessageRecipients({ active: true, currentAgentId });
 
   const isSearchTransitionPending = searchQuery.trim() !== deferredSearchQuery;
+  const contactPrompt = getNewMessageContactPrompt(
+    deferredSearchQuery,
+    nativeContacts,
+  );
+  const shouldPreferContactPrompt = shouldPreferNewMessageContactPrompt(
+    contactPrompt,
+    searchResults.map((candidate) => candidate.pubkey),
+  );
   const visibleSearchResults =
-    isSearchTransitionPending || isDirectoryLoading ? [] : searchResults;
-  const contactPrompt = getNewMessageContactPrompt(deferredSearchQuery);
+    isSearchTransitionPending || isDirectoryLoading || shouldPreferContactPrompt
+      ? []
+      : searchResults;
   const showRecipientPicker = isRecipientPickerOpen && !isPending;
   const highlightedRecipientIndex = React.useMemo(() => {
     if (!showRecipientPicker || visibleSearchResults.length === 0) {
@@ -192,7 +206,18 @@ export function NewMessageScreen() {
     setSubmitErrorMessage(null);
     setContactAddStatus(null);
     try {
-      const added = await addNativeContactFromInput(searchQuery);
+      const currentPrompt = getNewMessageContactPrompt(
+        searchQuery,
+        nativeContacts,
+      );
+      if (currentPrompt.kind !== "action") {
+        throw new Error("Choose a signed agent card or exact Agent ID.");
+      }
+      const added = await addNativeContactFromInput(
+        currentPrompt.input.kind === "agentCard"
+          ? currentPrompt.input.card
+          : currentPrompt.input.agentId,
+      );
       const user: UserSearchResult = {
         pubkey: added.agentId,
         displayName: added.displayName,
@@ -210,6 +235,7 @@ export function NewMessageScreen() {
           queryKey: contactListQueryKey(currentAgentId ?? "native"),
         }),
         queryClient.invalidateQueries({ queryKey: ["user-search"] }),
+        queryClient.invalidateQueries({ queryKey: nativeContactsQueryKey }),
         queryClient.invalidateQueries({ queryKey: ["presence"] }),
         queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
         queryClient.invalidateQueries({ queryKey: channelsQueryKey }),
@@ -228,6 +254,7 @@ export function NewMessageScreen() {
     handleSelectUser,
     isAddingContact,
     queryClient,
+    nativeContacts,
     searchQuery,
   ]);
 
@@ -526,8 +553,16 @@ export function NewMessageScreen() {
                         results: visibleSearchResults,
                       });
                     if (!keyboardSelection) {
-                      const prompt = getNewMessageContactPrompt(searchQuery);
-                      if (prompt.kind === "action") {
+                      const prompt = getNewMessageContactPrompt(
+                        searchQuery,
+                        nativeContacts,
+                      );
+                      if (
+                        shouldPreferNewMessageContactPrompt(
+                          prompt,
+                          searchResults.map((candidate) => candidate.pubkey),
+                        )
+                      ) {
                         event.preventDefault();
                         void handleAddContact();
                       }
