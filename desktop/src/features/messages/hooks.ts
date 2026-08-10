@@ -1,5 +1,11 @@
 import { useEffect, useEffectEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  type QueryKey,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -373,6 +379,38 @@ export function useChannelSubscription(channel: Channel | null) {
   }, [channel, channelId, channelType]);
 }
 
+function restoreCachedQuery<T>(
+  queryClient: QueryClient,
+  queryKey: QueryKey,
+  previous: T | undefined,
+) {
+  if (previous === undefined) {
+    queryClient.removeQueries({ queryKey, exact: true });
+    return;
+  }
+  queryClient.setQueryData(queryKey, previous);
+}
+
+/** Restore every cache surface changed by an optimistic send. */
+export function rollbackOptimisticMessageCache(
+  queryClient: QueryClient,
+  context: MessageQueryContext,
+) {
+  queryClient.setQueryData(context.queryKey, context.previousMessages);
+  restoreCachedQuery(
+    queryClient,
+    channelWindowKey(context.channelId),
+    context.previousWindow,
+  );
+  if (context.threadRootId) {
+    restoreCachedQuery(
+      queryClient,
+      threadRepliesKey(context.channelId, context.threadRootId),
+      context.previousThreadReplies,
+    );
+  }
+}
+
 export function useSendMessageMutation(
   channel: Channel | null,
   identity: Identity | undefined,
@@ -540,17 +578,7 @@ export function useSendMessageMutation(
         return;
       }
 
-      queryClient.setQueryData(context.queryKey, context.previousMessages);
-      queryClient.setQueryData(
-        channelWindowKey(context.channelId),
-        context.previousWindow,
-      );
-      if (context.threadRootId) {
-        queryClient.setQueryData(
-          threadRepliesKey(context.channelId, context.threadRootId),
-          context.previousThreadReplies,
-        );
-      }
+      rollbackOptimisticMessageCache(queryClient, context);
     },
     onSuccess: (message, _variables, context) => {
       // An accepted send proves the write-block is lifted; clear any recorded
