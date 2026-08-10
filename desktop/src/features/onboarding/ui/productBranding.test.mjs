@@ -46,6 +46,16 @@ test("first-launch starter team uses neutral X and O marks without character ima
   assert.doesNotMatch(starterTeamSurface, /<img|animated character/);
 });
 
+test("create-from-scratch agent form uses a neutral starter name", async () => {
+  const agentDefinitionDialog = await readFile(
+    new URL("../../agents/ui/AgentDefinitionDialog.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(agentDefinitionDialog, /placeholder="Guide"/);
+  assert.doesNotMatch(agentDefinitionDialog, /placeholder="Fizz"/);
+});
+
 test("retired starter character images are not shipped as public assets", async () => {
   const retiredAssets = ["fizz.png", "honey.png", "bumble.png"];
 
