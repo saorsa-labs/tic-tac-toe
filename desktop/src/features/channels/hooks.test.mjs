@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createChannelsQueryFn,
   createOpenDmCacheLifecycle,
+  reconcileNativeChannelRefresh,
   reconcileRefreshedCachedChannel,
   upsertCachedChannel,
   upsertCachedChannelMember,
@@ -166,4 +168,57 @@ test("profile Message keeps an empty native DM route resolvable after refresh", 
     openedDm,
     "the #/channels/<AgentId> target must still resolve to its native DM composer",
   );
+});
+
+test("later live channel refresh retains the active native DM and drops stale streams", async () => {
+  const peerAgentId = "cd".repeat(32);
+  const activeDm = makeChannel(peerAgentId, "Remote contact", "dm", {
+    participantPubkeys: [peerAgentId],
+    participants: ["Remote contact"],
+  });
+  const staleStream = makeChannel("stale", "Removed stream");
+  const refreshedStream = {
+    ...makeChannel("general", "General"),
+    lastMessageAt: "2026-08-10T15:12:00Z",
+  };
+  const cachedChannels = [activeDm, staleStream];
+  const snapshots = [];
+  const queryFn = createChannelsQueryFn(
+    {
+      getQueryData() {
+        return cachedChannels;
+      },
+    },
+    "community-a",
+    async () => [refreshedStream],
+    (groupId, channels) => snapshots.push({ groupId, channels }),
+  );
+
+  const refreshed = await queryFn();
+
+  assert.strictEqual(
+    refreshed.find((channel) => channel.id === peerAgentId),
+    activeDm,
+    "B's live reply refresh must not evict the AgentId DM route or sidebar row",
+  );
+  assert.strictEqual(
+    refreshed.find((channel) => channel.id === refreshedStream.id),
+    refreshedStream,
+  );
+  assert.equal(
+    refreshed.some((channel) => channel.id === staleStream.id),
+    false,
+  );
+  assert.deepEqual(snapshots, [
+    { groupId: "community-a", channels: refreshed },
+  ]);
+});
+
+test("native channel refresh preserves only cached DMs", () => {
+  const dm = makeChannel("dm", "DM", "dm");
+  const removedStream = makeChannel("removed", "Removed stream");
+
+  assert.deepEqual(reconcileNativeChannelRefresh([dm, removedStream], []), [
+    dm,
+  ]);
 });
