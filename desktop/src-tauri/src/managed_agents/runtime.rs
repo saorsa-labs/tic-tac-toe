@@ -1539,9 +1539,12 @@ pub fn find_managed_agent_mut<'a>(
 ///
 /// Returns `Err(...)` if the record's allowlist fails validation. The harness
 /// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(record: &ManagedAgentRecord) -> Result<RespondToEnv, String> {
+pub(crate) fn build_respond_to_env(
+    record: &ManagedAgentRecord,
+    effective_allowlist: &[String],
+) -> Result<RespondToEnv, String> {
     // Defensive re-validation: an on-disk record could have been hand-edited.
-    let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
+    let normalized = super::types::validate_respond_to_allowlist(effective_allowlist)?;
     if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
         return Err(
             "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
@@ -1597,6 +1600,22 @@ fn configure_native_agent_env(
     command.env("X0X_OWNER_AGENT_ID", &native_launch.owner_agent_id);
     command.env("X0X_AGENT_ID", &native_launch.child_agent_id);
     command.env("X0X_GROUP_ID", &native_launch.group_id);
+}
+
+fn configure_respond_to_env(
+    command: &mut std::process::Command,
+    record: &ManagedAgentRecord,
+    native_launch: &super::ManagedAgentLaunchContext,
+) -> Result<(), String> {
+    let (gate_set, gate_remove) =
+        build_respond_to_env(record, &native_launch.effective_respond_to_allowlist)?;
+    for (key, value) in gate_set {
+        command.env(key, value);
+    }
+    for key in gate_remove {
+        command.env_remove(key);
+    }
+    Ok(())
 }
 
 /// Spawn an agent process without holding any locks on records or runtimes.
@@ -1901,13 +1920,7 @@ pub fn spawn_agent_child(
 
     // Inbound author gate. Sender authority comes from authenticated x0x DMs;
     // this environment only carries the user's response policy.
-    let (gate_set, gate_remove) = build_respond_to_env(record)?;
-    for (key, value) in &gate_set {
-        command.env(key, value);
-    }
-    for key in &gate_remove {
-        command.env_remove(key);
-    }
+    configure_respond_to_env(&mut command, record, native_launch)?;
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
