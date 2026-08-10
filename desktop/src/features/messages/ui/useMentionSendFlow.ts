@@ -146,6 +146,48 @@ const DM_THREAD_AGENT_MENTION_ERROR =
 const DM_THREAD_MEMBERS_LOADING_ERROR =
   "Checking conversation members. Try again in a moment.";
 
+type PostSendAction = {
+  label: string;
+  run: () => void | Promise<void>;
+};
+
+/**
+ * Keep the commit boundary around the transport send itself.
+ *
+ * A rejected send is still a definite failure and restores the captured
+ * composer state. Once the send resolves, however, the message is committed:
+ * failures in local audience/draft bookkeeping are reported independently and
+ * must never make the composer look as though the message was not sent.
+ */
+export async function runMentionSendCommitBoundary({
+  send,
+  restoreOnSendFailure,
+  postSendActions,
+  reportPostSendFailure,
+}: {
+  send: () => Promise<void>;
+  restoreOnSendFailure: () => void;
+  postSendActions: readonly PostSendAction[];
+  reportPostSendFailure: (label: string, error: unknown) => void;
+}): Promise<"sent" | "failed"> {
+  try {
+    await send();
+  } catch {
+    restoreOnSendFailure();
+    return "failed";
+  }
+
+  for (const action of postSendActions) {
+    try {
+      await action.run();
+    } catch (error) {
+      reportPostSendFailure(action.label, error);
+    }
+  }
+
+  return "sent";
+}
+
 export function useMentionSendFlow({
   channelId,
   channelLinks,
@@ -514,47 +556,66 @@ export function useMentionSendFlow({
           );
         }
 
-        try {
-          await onSendRef.current(
-            draft.finalContent,
-            mentionPubkeys,
-            outgoingTags,
-            sendChannelId,
-            draft.capturedThreadContext,
-          );
-          if (effectiveExplicitAgentPubkeys.length > 0) {
-            // Promote only explicitly authored agents that remained effective
-            // for this successful send. "Send without inviting" removes its
-            // excluded recipients here as well as from event routing.
-            onSuccessfulExplicitAgentAudience?.({
-              channelId: sendChannelId ?? draft.capturedChannelId ?? "",
-              expectedGeneration: draft.audienceGeneration,
-              expectedRevision: draft.audienceRevision,
-              explicitAgentPubkeys: effectiveExplicitAgentPubkeys,
-            });
-          }
-          if (draft.sentDraftKey) {
-            drafts.markDraftSent(
-              draft.sentDraftKey,
-              draft.savedContent,
-              sendChannelId ?? draft.sentDraftKey,
-              draft.savedImeta,
-              [...draft.savedSpoileredAttachmentUrls],
-            );
-          }
-        } catch {
-          // Only restore the composer content if the user is still on the
-          // channel that originated the send.
-          if (draft.capturedChannelId === channelIdRef.current) {
-            setContent(draft.savedContent);
-            contentRef.current = draft.savedContent;
-            richText.setContent(draft.savedContent);
-            setPendingImeta(draft.savedImeta);
-            setSpoileredAttachmentUrls?.(
-              new Set(draft.savedSpoileredAttachmentUrls),
-            );
-          }
+        const postSendActions: PostSendAction[] = [];
+        if (effectiveExplicitAgentPubkeys.length > 0) {
+          postSendActions.push({
+            label: "persistent agent audience update",
+            run: () => {
+              // Promote only explicitly authored agents that remained
+              // effective for this successful send. "Send without inviting"
+              // removes its excluded recipients here as well as from routing.
+              onSuccessfulExplicitAgentAudience?.({
+                channelId: sendChannelId ?? draft.capturedChannelId ?? "",
+                expectedGeneration: draft.audienceGeneration,
+                expectedRevision: draft.audienceRevision,
+                explicitAgentPubkeys: effectiveExplicitAgentPubkeys,
+              });
+            },
+          });
         }
+        if (draft.sentDraftKey) {
+          const sentDraftKey = draft.sentDraftKey;
+          postSendActions.push({
+            label: "sent draft cleanup",
+            run: () => {
+              drafts.markDraftSent(
+                sentDraftKey,
+                draft.savedContent,
+                sendChannelId ?? sentDraftKey,
+                draft.savedImeta,
+                [...draft.savedSpoileredAttachmentUrls],
+              );
+            },
+          });
+        }
+
+        await runMentionSendCommitBoundary({
+          send: () =>
+            onSendRef.current(
+              draft.finalContent,
+              mentionPubkeys,
+              outgoingTags,
+              sendChannelId,
+              draft.capturedThreadContext,
+            ),
+          restoreOnSendFailure: () => {
+            // Only restore the composer content if the user is still on the
+            // channel that originated the send.
+            if (draft.capturedChannelId === channelIdRef.current) {
+              setContent(draft.savedContent);
+              contentRef.current = draft.savedContent;
+              richText.setContent(draft.savedContent);
+              setPendingImeta(draft.savedImeta);
+              setSpoileredAttachmentUrls?.(
+                new Set(draft.savedSpoileredAttachmentUrls),
+              );
+            }
+          },
+          postSendActions,
+          reportPostSendFailure: (label, error) => {
+            console.error(`Message sent, but ${label} failed`, error);
+          },
+        });
       } finally {
         isCompleteSendPendingRef.current = false;
         if (isMountedRef.current) {

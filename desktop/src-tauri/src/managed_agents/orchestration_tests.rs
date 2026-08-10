@@ -1,4 +1,3 @@
-
 use super::*;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -685,6 +684,46 @@ async fn member_equality_cannot_hide_authoritative_projection_mismatch() {
     .expect("observe mismatched group");
 
     assert_eq!(observation, ChildGroupObservation::PresentStale);
+    task.abort();
+}
+
+#[tokio::test]
+async fn retained_owner_ancestor_with_stale_roster_remains_a_safety_hold() {
+    let group_id = "group";
+    let child_id = "bb".repeat(32);
+    // The raw observation does not itself prove or apply the retained suffix.
+    // A different roster root must remain fail-closed until the catch-up path
+    // validates the exact ancestry and the child reports the strict owner head.
+    let owner_state = GroupStateProjection::from_value(
+        &group_state_json(group_id, 26, "owner-hash", "current-roster"),
+        group_id,
+    )
+    .expect("owner projection");
+    let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+        &child_id,
+        vec![Some(group_json(&child_id, 21, "active"))],
+        group_state_json(group_id, 21, "retained-ancestor-hash", "stale-roster"),
+    )
+    .await;
+
+    let observation = observe_child_group(
+        &loopback_http_client().expect("HTTP client"),
+        &child,
+        &ChildGroupExpectation {
+            group_path: &format!("/groups/{group_id}"),
+            group_id,
+            owner_state: &owner_state,
+            forbidden_agent_id: None,
+        },
+    )
+    .await
+    .expect("observe signed ancestor with stale roster");
+
+    assert_eq!(observation, ChildGroupObservation::PresentStale);
+    assert_eq!(
+        active_owner_action(observation),
+        ActiveOwnerAction::RejectStale
+    );
     task.abort();
 }
 

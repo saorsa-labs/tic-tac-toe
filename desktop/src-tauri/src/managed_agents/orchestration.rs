@@ -23,6 +23,9 @@ use super::{load_managed_agents, ManagedAgentRecord, RespondTo};
 use crate::local_stack::loopback_api_base;
 use crate::x0x_client::{X0xClient, X0xClientError};
 
+#[path = "orchestration_catchup.rs"]
+mod catchup;
+
 const CHILD_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const GROUP_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
 const GROUP_CONVERGENCE_POLL: Duration = Duration::from_millis(250);
@@ -278,33 +281,45 @@ async fn bind_child_to_group(
     )?;
 
     let mut expected_roster_revision = roster_revision(&owner_group)?;
-    let mut owner_state = read_owner_group_state(
-        owner_client,
-        &OwnerGroupExpectation {
-            group_path: &group_path,
-            group_id,
-            roster_revision: expected_roster_revision,
-            required_agent_id: binding.attach_agent_id,
-            required_member_state: owner_child_state,
-            forbidden_agent_id: None,
-        },
-    )
-    .await?;
+    let owner_expectation = OwnerGroupExpectation {
+        group_path: &group_path,
+        group_id,
+        roster_revision: expected_roster_revision,
+        required_agent_id: binding.attach_agent_id,
+        required_member_state: owner_child_state,
+        forbidden_agent_id: None,
+    };
+    let mut owner_state = read_owner_group_state(owner_client, &owner_expectation).await?;
     let needs_attach = match owner_child_state {
         GroupMemberState::Active => {
-            let observation = wait_for_child_group_observation(
+            let child_expectation = ChildGroupExpectation {
+                group_path: &group_path,
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            };
+            let mut observation = wait_for_child_group_observation(
                 loopback_http,
                 child,
-                &ChildGroupExpectation {
-                    group_path: &group_path,
-                    group_id,
-                    owner_state: &owner_state,
-                    forbidden_agent_id: None,
-                },
+                &child_expectation,
                 CHILD_GROUP_RESTORE_GRACE,
                 GROUP_CONVERGENCE_POLL,
             )
             .await?;
+            if matches!(
+                observation,
+                ChildGroupObservation::Equivalent | ChildGroupObservation::PresentStale
+            ) {
+                catchup::catch_up_child_from_owner_history(
+                    owner_client,
+                    loopback_http,
+                    child,
+                    &owner_expectation,
+                    &child_expectation,
+                )
+                .await?;
+                observation = ChildGroupObservation::Strict;
+            }
             match active_owner_action(observation) {
                 ActiveOwnerAction::Keep => false,
                 ActiveOwnerAction::RejectStale => {

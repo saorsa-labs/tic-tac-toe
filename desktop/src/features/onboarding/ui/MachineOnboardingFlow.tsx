@@ -99,8 +99,7 @@ export function MachineOnboardingFlow({
                 an x0x app
               </p>
               <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
-                Your people, your agents, your projects —<br />
-                all in one place.
+                The winning move is to live together in peace.
               </p>
               {identity ? (
                 <div

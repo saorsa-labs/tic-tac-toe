@@ -12,7 +12,11 @@ const {
   expandManagedAgentMemberPubkeys,
   resolveManagedAgentNativeIdentityMap,
   resolveNativeMentionAgentIds,
+  wakeManagedAgentsForStructuredMention,
 } = await import("./managedAgentMentionIdentity.ts");
+const { wakeManagedAgentMentionFromLiveEvent } = await import(
+  "../../features/channels/useLiveChannelUpdates.ts"
+);
 
 const recordPubkey = "a".repeat(64);
 const childAgentId = "b".repeat(64);
@@ -120,4 +124,138 @@ test("translation rejects a managed record returned as its own child identity", 
     }),
     /Managed agent "Guide" has no native identity.*Start or restart/i,
   );
+});
+
+test("a managed child structured mention cold-starts the stopped target by record key", async () => {
+  const guideRecord = "1".repeat(64);
+  const guideChild = "2".repeat(64);
+  const targetRecord = "3".repeat(64);
+  const targetChild = "4".repeat(64);
+  const starts = [];
+  const agents = [
+    {
+      backend: { type: "local" },
+      name: "Guide",
+      pubkey: guideRecord,
+      status: "running",
+    },
+    {
+      backend: { type: "local" },
+      name: "X",
+      pubkey: targetRecord,
+      status: "stopped",
+    },
+  ];
+
+  const started = await wakeManagedAgentMentionFromLiveEvent(
+    {
+      id: "guide-mentions-x",
+      kind: 9,
+      pubkey: guideChild,
+      created_at: 1,
+      content: "Please take this, @X",
+      sig: "verified",
+      tags: [
+        ["h", "welcome"],
+        ["p", guideChild],
+        ["p", targetChild],
+      ],
+    },
+    {
+      listManagedAgents: async () => agents,
+      getManagedAgentNativeIdentity: async (record) =>
+        record === guideRecord ? guideChild : targetChild,
+      startManagedAgent: async (record) => {
+        starts.push(record);
+      },
+    },
+  );
+
+  assert.deepEqual(started, [targetRecord]);
+  assert.deepEqual(starts, [targetRecord]);
+  assert.ok(!starts.includes(targetChild));
+});
+
+test("a stranger cannot cold-start a managed target with a structured mention", async () => {
+  const guideRecord = "1".repeat(64);
+  const guideChild = "2".repeat(64);
+  const targetRecord = "3".repeat(64);
+  const targetChild = "4".repeat(64);
+  const starts = [];
+
+  const started = await wakeManagedAgentsForStructuredMention(
+    {
+      pubkey: "9".repeat(64),
+      tags: [["p", targetChild]],
+    },
+    {
+      listManagedAgents: async () => [
+        {
+          backend: { type: "local" },
+          name: "Guide",
+          pubkey: guideRecord,
+          status: "running",
+        },
+        {
+          backend: { type: "local" },
+          name: "X",
+          pubkey: targetRecord,
+          status: "stopped",
+        },
+      ],
+      getManagedAgentNativeIdentity: async (record) =>
+        record === guideRecord ? guideChild : targetChild,
+      startManagedAgent: async (record) => {
+        starts.push(record);
+      },
+    },
+  );
+
+  assert.deepEqual(started, []);
+  assert.deepEqual(starts, []);
+});
+
+test("legacy record-key mention and already-running target do not start a child", async () => {
+  const guideRecord = "1".repeat(64);
+  const guideChild = "2".repeat(64);
+  const targetRecord = "3".repeat(64);
+  const targetChild = "4".repeat(64);
+  const starts = [];
+  const dependencies = {
+    listManagedAgents: async () => [
+      {
+        backend: { type: "local" },
+        name: "Guide",
+        pubkey: guideRecord,
+        status: "running",
+      },
+      {
+        backend: { type: "local" },
+        name: "X",
+        pubkey: targetRecord,
+        status: "running",
+      },
+    ],
+    getManagedAgentNativeIdentity: async (record) =>
+      record === guideRecord ? guideChild : targetChild,
+    startManagedAgent: async (record) => {
+      starts.push(record);
+    },
+  };
+
+  assert.deepEqual(
+    await wakeManagedAgentsForStructuredMention(
+      { pubkey: guideChild, tags: [["p", targetRecord]] },
+      dependencies,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    await wakeManagedAgentsForStructuredMention(
+      { pubkey: guideChild, tags: [["p", targetChild]] },
+      dependencies,
+    ),
+    [],
+  );
+  assert.deepEqual(starts, []);
 });
