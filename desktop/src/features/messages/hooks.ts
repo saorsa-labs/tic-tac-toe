@@ -411,6 +411,21 @@ export function rollbackOptimisticMessageCache(
   }
 }
 
+/** Replace an optimistic row while retaining the native durable correlation key. */
+export function acknowledgeOptimisticChannelWindowMessage(
+  current: ChannelWindowStore,
+  message: RelayEvent,
+  optimisticId: string,
+) {
+  const withoutPending: ChannelWindowStore = {
+    ...current,
+    liveOverlay: current.liveOverlay.filter(
+      (event) => event.id !== optimisticId,
+    ),
+  };
+  return mergeLiveChannelWindowEvent(withoutPending, message);
+}
+
 export function useSendMessageMutation(
   channel: Channel | null,
   identity: Identity | undefined,
@@ -592,16 +607,11 @@ export function useSendMessageMutation(
       const current =
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
         emptyChannelWindowStore();
-      const withoutPending: ChannelWindowStore = {
-        ...current,
-        liveOverlay: current.liveOverlay.filter(
-          (event) => event.id !== context.optimisticId,
-        ),
-      };
-      const next = mergeLiveChannelWindowEvent(withoutPending, {
-        ...message,
-        localKey: context.optimisticId,
-      });
+      const next = acknowledgeOptimisticChannelWindowMessage(
+        current,
+        message,
+        context.optimisticId,
+      );
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, context.channelId);
       if (context.threadRootId) {
@@ -610,7 +620,7 @@ export function useSendMessageMutation(
           (current = []) =>
             mergeMessages(
               current.filter((event) => event.id !== context.optimisticId),
-              { ...message, localKey: context.optimisticId },
+              message,
             ),
         );
       }

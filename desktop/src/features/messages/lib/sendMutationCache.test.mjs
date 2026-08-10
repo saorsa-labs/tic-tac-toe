@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryClient } from "@tanstack/react-query";
 
-import { rollbackOptimisticMessageCache } from "../hooks.ts";
+import {
+  acknowledgeOptimisticChannelWindowMessage,
+  rollbackOptimisticMessageCache,
+} from "../hooks.ts";
 import { channelMessagesKey, channelWindowKey } from "./messageQueryKeys.ts";
 import { projectChannelWindowMessages } from "./projectChannelWindow.ts";
 import {
   emptyChannelWindowStore,
   mergeLiveChannelWindowEvent,
+  replaceNewestChannelWindow,
 } from "./channelWindowStore.ts";
 
 const CHANNEL_ID = "b".repeat(64);
@@ -35,6 +39,16 @@ function context(optimisticId) {
     threadRootId: null,
     channelId: CHANNEL_ID,
     queryKey: channelMessagesKey(CHANNEL_ID),
+  };
+}
+
+function newestPage(events) {
+  return {
+    startCursor: null,
+    rows: events.map((event) => ({ event, thread: null })),
+    aux: [],
+    nextCursor: null,
+    hasMore: false,
   };
 }
 
@@ -101,4 +115,43 @@ test("failed offline send retry renders exactly one acknowledged row", () => {
     false,
     "the first failed SENDING row must not survive the successful retry",
   );
+});
+
+test("successful DM refresh replaces its receipt with one durable row", () => {
+  const queryClient = new QueryClient();
+  const messagesKey = channelMessagesKey(CHANNEL_ID);
+  const windowKey = channelWindowKey(CHANNEL_ID);
+  const optimistic = message("optimistic-send", {
+    localKey: "optimistic-send",
+    pending: true,
+  });
+  const optimisticWindow = mergeLiveChannelWindowEvent(
+    emptyChannelWindowStore(),
+    optimistic,
+  );
+  queryClient.setQueryData(windowKey, optimisticWindow);
+  queryClient.setQueryData(messagesKey, [optimistic]);
+
+  const clientId = "native-client-id";
+  const receipt = message(clientId, { localKey: clientId });
+  const acknowledgedWindow = acknowledgeOptimisticChannelWindowMessage(
+    optimisticWindow,
+    receipt,
+    optimistic.id,
+  );
+  queryClient.setQueryData(windowKey, acknowledgedWindow);
+  projectChannelWindowMessages(queryClient, CHANNEL_ID);
+
+  const durable = message("e".repeat(64), { localKey: clientId });
+  queryClient.setQueryData(
+    windowKey,
+    replaceNewestChannelWindow(acknowledgedWindow, newestPage([durable])),
+  );
+  projectChannelWindowMessages(queryClient, CHANNEL_ID);
+
+  const rendered = queryClient.getQueryData(messagesKey);
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].id, durable.id);
+  assert.equal(rendered[0].localKey, clientId);
+  assert.equal(rendered[0].pending, false);
 });
