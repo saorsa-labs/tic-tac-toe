@@ -2031,6 +2031,69 @@ fn child_rust_log_filter() -> String {
     }
 }
 
+const AGENT_START_STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+const AGENT_START_STABILITY_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(10);
+
+pub(crate) fn mark_agent_start_failure(
+    record: &mut ManagedAgentRecord,
+    message: &str,
+    exit_code: Option<i32>,
+) {
+    let now = now_iso();
+    record.runtime_pid = None;
+    record.updated_at = now.clone();
+    record.last_stopped_at = Some(now);
+    record.last_exit_code = exit_code;
+    record.last_error = Some(message.to_string());
+    record.last_error_code = None;
+}
+
+/// Refuse to register a harness that exits during its initial stabilization
+/// window. ACP harnesses are persistent processes, so even a successful exit
+/// here means startup failed rather than completed successfully.
+pub(crate) fn stabilize_started_agent_process(
+    process: &mut crate::managed_agents::ManagedAgentProcess,
+    record: &mut ManagedAgentRecord,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    loop {
+        match process.child.try_wait() {
+            Ok(Some(status)) => {
+                let message = match status.code() {
+                    Some(code) => format!(
+                        "agent harness `{}` for {} exited immediately with code {code}",
+                        record.acp_command, record.name
+                    ),
+                    None => format!(
+                        "agent harness `{}` for {} exited immediately ({status})",
+                        record.acp_command, record.name
+                    ),
+                };
+                mark_agent_start_failure(record, &message, status.code());
+                return Err(message);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let message = format!(
+                    "failed to inspect newly-started agent harness for {}: {error}",
+                    record.name
+                );
+                mark_agent_start_failure(record, &message, None);
+                return Err(message);
+            }
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= AGENT_START_STABILITY_WINDOW {
+            return Ok(());
+        }
+        std::thread::sleep(
+            AGENT_START_STABILITY_POLL_INTERVAL.min(AGENT_START_STABILITY_WINDOW - elapsed),
+        );
+    }
+}
+
 pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
@@ -2060,8 +2123,29 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.group_id, false)?;
+    let mut process = match spawn_agent_child(app, record, &key.group_id, false) {
+        Ok(process) => process,
+        Err(error) => {
+            mark_agent_start_failure(record, &error, None);
+            runtimes.remove(&key);
+            super::remove_agent_runtime_receipt(app, &key);
+            return Err(error);
+        }
+    };
     let now = now_iso();
+    record.updated_at = now.clone();
+    record.last_started_at = Some(now.clone());
+    record.last_stopped_at = None;
+    record.last_exit_code = None;
+    record.last_error = None;
+    record.last_error_code = None;
+
+    if let Err(error) = stabilize_started_agent_process(&mut process, record) {
+        runtimes.remove(&key);
+        super::remove_agent_runtime_receipt(app, &key);
+        return Err(error);
+    }
+
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
         pid: process.child.id(),
@@ -2070,16 +2154,12 @@ pub fn start_managed_agent_process(
     };
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());
-        let _ = process.child.wait();
+        let exit_code = process.child.wait().ok().and_then(|status| status.code());
+        mark_agent_start_failure(record, &error, exit_code);
+        runtimes.remove(&key);
+        super::remove_agent_runtime_receipt(app, &key);
         return Err(error);
     }
-
-    record.updated_at = now.clone();
-    record.last_started_at = Some(now);
-    record.last_stopped_at = None;
-    record.last_exit_code = None;
-    record.last_error = None;
-    record.last_error_code = None;
 
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())

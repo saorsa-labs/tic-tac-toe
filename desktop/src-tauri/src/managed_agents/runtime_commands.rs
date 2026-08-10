@@ -6,10 +6,10 @@ use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
     process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    spawn_agent_child, stabilize_started_agent_process, terminate_process,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -280,6 +280,22 @@ fn start_pair(
 
     let mut process = spawn_agent_child(&app, record, &key.group_id, lazy)?;
     let now = crate::util::now_iso();
+    record.runtime_pid = None;
+    record.updated_at = now.clone();
+    record.last_started_at = Some(now.clone());
+    record.last_stopped_at = None;
+    record.last_exit_code = None;
+    record.last_error = None;
+    record.last_error_code = None;
+
+    if let Err(error) = stabilize_started_agent_process(&mut process, record) {
+        runtimes.remove(&key);
+        super::remove_agent_runtime_receipt(&app, &key);
+        drop(runtimes);
+        save_managed_agents(&app, &records)?;
+        return Err(error);
+    }
+
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
         pid: process.child.id(),
@@ -291,11 +307,6 @@ fn start_pair(
         let _ = process.child.wait();
         return Err(error);
     }
-    record.runtime_pid = None;
-    record.updated_at = now.clone();
-    record.last_started_at = Some(now);
-    record.last_stopped_at = None;
-    record.last_error = None;
     runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
     let status = status_for(&app, record, &key, runtimes.get(&key), None);
     drop(runtimes);

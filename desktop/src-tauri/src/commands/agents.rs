@@ -159,7 +159,14 @@ pub(super) async fn start_local_agent_with_preflight(
             record.updated_at = crate::util::now_iso();
         }
     }
-    start_managed_agent_process(app, record, &mut runtimes)?;
+    if let Err(start_error) = start_managed_agent_process(app, record, &mut runtimes) {
+        if let Err(save_error) = save_managed_agents(app, &records) {
+            return Err(format!(
+                "{start_error}; additionally failed to persist the stopped agent state: {save_error}"
+            ));
+        }
+        return Err(start_error);
+    }
     save_managed_agents(app, &records)?;
     let record = records
         .iter()

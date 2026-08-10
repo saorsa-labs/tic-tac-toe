@@ -26,6 +26,27 @@ fn child_config_keeps_an_explicit_isolated_directory() {
 }
 
 #[test]
+fn managed_pubkey_maps_to_valid_stable_x0xd_instance_name() {
+    let pubkey = "AB".repeat(32);
+    let bounded = bounded_agent_child_instance(&pubkey);
+    let different_pubkey = format!("{}ac", "AB".repeat(31));
+    let expected_dir_name = format!("x0x-managed-{bounded}");
+
+    assert_eq!(bounded.len(), MANAGED_INSTANCE_KEY_LEN);
+    assert!(bounded.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(bounded, bounded_agent_child_instance(&pubkey));
+    assert_ne!(bounded, bounded_agent_child_instance(&different_pubkey));
+    assert_eq!(format!("managed-{bounded}").len(), 64);
+    assert_eq!(
+        agent_child_data_dir(&bounded)
+            .and_then(|path| path.file_name().map(|name| name.to_owned()))
+            .and_then(|name| name.into_string().ok())
+            .as_deref(),
+        Some(expected_dir_name.as_str())
+    );
+}
+
+#[test]
 fn handle_debug_never_contains_a_token_field() {
     let debug_fields = "agent_id base_url data_dir owned";
     assert!(!debug_fields.contains("api-token"));

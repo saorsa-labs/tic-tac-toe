@@ -919,3 +919,32 @@ fn invalid_pubkey_resolves_no_pair_key() {
     // the summary must fall back to the stopped/legacy-pid path, not panic.
     assert!(super::resolve_workspace_pair_key("not-a-key", "group-a").is_none());
 }
+
+#[cfg(unix)]
+#[test]
+fn immediate_successful_harness_exit_is_a_persisted_start_failure() {
+    let child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn short-lived harness");
+    let mut process = crate::managed_agents::ManagedAgentProcess {
+        child,
+        log_path: std::path::PathBuf::from("agent.log"),
+        spawn_config_hash: 0,
+        setup_mode: false,
+        adapter_availability: None,
+        start_nonce: "test-start".to_string(),
+    };
+    let mut record = fixture(RespondTo::Anyone, Vec::new());
+    record.name = "Guide".to_string();
+    record.last_started_at = Some("started".to_string());
+
+    let error = super::stabilize_started_agent_process(&mut process, &mut record)
+        .expect_err("an immediately-exited ACP harness must fail startup");
+
+    assert_eq!(record.last_exit_code, Some(0));
+    assert!(record.last_stopped_at.is_some());
+    assert_eq!(record.last_error.as_deref(), Some(error.as_str()));
+    assert!(error.contains("Guide"));
+    assert!(error.contains("exited immediately with code 0"));
+}

@@ -32,6 +32,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use crate::local_stack::{
     http_get_json, loopback_api_base, read_api_port, read_api_token, resolve_sidecar, DaemonProbe,
@@ -45,6 +46,12 @@ use crate::local_stack::{
 /// keeping them disjoint from the owner daemon (`x0x`) and any operator-named
 /// instance (`x0x-<name>`). Resolves to `<data_dir>/x0x-managed-<instance>/`.
 const MANAGED_INSTANCE_PREFIX: &str = "x0x-managed-";
+
+/// `x0xd --name` accepts at most 64 characters. Managed children prepend
+/// `managed-` to this stable suffix, leaving 56 characters for the per-agent
+/// key. Long keys use the first 224 bits of a SHA-256 digest so Company keys
+/// with long common prefixes remain distinct as well as deterministic.
+const MANAGED_INSTANCE_KEY_LEN: usize = 64 - "managed-".len();
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const DEFAULT_AGENT_CHILD_TIMEOUT: Duration = Duration::from_secs(15);
@@ -203,7 +210,8 @@ impl AgentChildConfig {
     /// record's stable storage key) — it is never the agent_id, which the
     /// child itself owns and which is fetched after bring-up.
     pub(super) fn resolve(instance: &str) -> Result<Self, AgentChildError> {
-        let data_dir = agent_child_data_dir(instance).ok_or(AgentChildError::NoDataDir)?;
+        let bounded_instance = bounded_agent_child_instance(instance);
+        let data_dir = agent_child_data_dir(&bounded_instance).ok_or(AgentChildError::NoDataDir)?;
         let binary = resolve_sidecar(X0XD_BINARY_NAME, X0XD_BINARY_ENV)
             .map_err(AgentChildError::from_spawn)?;
         Ok(Self {
@@ -221,6 +229,20 @@ impl AgentChildConfig {
             timeout: DEFAULT_AGENT_CHILD_TIMEOUT,
         }
     }
+}
+
+/// Bound the filesystem suffix and matching `x0xd --name` suffix together.
+/// Both are derived from this value, so the daemon always writes readiness
+/// artifacts into the directory polled by [`AgentChildSupervisor`].
+fn bounded_agent_child_instance(instance: &str) -> String {
+    let canonical = instance.trim().to_ascii_lowercase();
+    if canonical.is_ascii() && canonical.len() <= MANAGED_INSTANCE_KEY_LEN {
+        return canonical;
+    }
+    hex::encode(Sha256::digest(canonical.as_bytes()))
+        .chars()
+        .take(MANAGED_INSTANCE_KEY_LEN)
+        .collect()
 }
 
 // ── Supervisor ──────────────────────────────────────────────────────────────
