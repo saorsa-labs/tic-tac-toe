@@ -3,6 +3,11 @@ import {
   resolveStartRuntimeForDefinition,
 } from "@/features/agents/lib/instanceInputForDefinition";
 import {
+  getWelcomeTeamIdentity,
+  WELCOME_TEAM_IDENTITIES,
+  WELCOME_TEAM_ID as WELCOME_TEAM_IDENTITY,
+} from "@/features/agents/lib/welcomeTeamIdentity";
+import {
   addChannelMembers,
   createManagedAgent,
   discoverAcpRuntimes,
@@ -20,9 +25,9 @@ import type {
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
-export const WELCOME_GUIDE_AGENT_NAME = "Guide";
+export const WELCOME_GUIDE_AGENT_NAME = WELCOME_TEAM_IDENTITIES[0].displayName;
 export const WELCOME_GUIDE_PERSONA_ID = "builtin:fizz";
-export const WELCOME_TEAM_ID = "builtin-team:welcome";
+export const WELCOME_TEAM_ID = WELCOME_TEAM_IDENTITY;
 export const WELCOME_GUIDE_INTRO_MARKER = "buzz-welcome-intro.v1";
 const LEGACY_WELCOME_GUIDE_AGENT_NAME = "Kit";
 export const LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT =
@@ -40,19 +45,12 @@ export type WelcomeTeamStarterDefinition = Readonly<{
 
 /** Stable identities used to provision the Rust-seeded Welcome Team. */
 export const WELCOME_TEAM_STARTERS = [
-  { name: "Guide", personaId: "builtin:fizz", role: "lead" },
-  { name: "X", personaId: "builtin:honey", role: "teammate" },
-  { name: "O", personaId: "builtin:bumble", role: "teammate" },
+  ...WELCOME_TEAM_IDENTITIES.map(({ displayName, personaId, role }) => ({
+    name: displayName,
+    personaId,
+    role,
+  })),
 ] as const satisfies readonly WelcomeTeamStarterDefinition[];
-
-const WELCOME_TEAM_SYSTEM_PROMPTS: Readonly<Record<string, string>> = {
-  "builtin:fizz":
-    "You are Guide, a practical teammate who helps people turn ideas into action. Be upbeat, clear, collaborative, and concise.",
-  "builtin:honey":
-    "You are X, a thoughtful teammate who helps people write clearly, organize ideas, brainstorm, and prepare for conversations. Be kind, creative, and concise.",
-  "builtin:bumble":
-    "You are O, a curious teammate who researches questions, compares options, checks assumptions, and explains useful evidence clearly. Be candid when uncertain.",
-};
 
 export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
@@ -199,9 +197,11 @@ export async function buildWelcomeStarterCreateInput(
   );
   return {
     ...(await buildInstanceInputForDefinition(persona, runtime)),
+    avatarUrl: undefined,
     name: starter.name,
     systemPrompt:
-      WELCOME_TEAM_SYSTEM_PROMPTS[starter.personaId] ?? persona.systemPrompt,
+      getWelcomeTeamIdentity(starter.personaId)?.systemPrompt ??
+      persona.systemPrompt,
     teamId: WELCOME_TEAM_ID,
     spawnAfterCreate: false,
     startOnAppLaunch: false,

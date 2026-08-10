@@ -150,7 +150,7 @@ test("all Welcome starters use the onboarding runtime preference", async () => {
         model: null,
         provider: null,
         runtime: null,
-        avatarUrl: null,
+        avatarUrl: "data:image/png;base64,legacy-character",
         envVars: {},
         isBuiltIn: true,
         isActive: true,
@@ -166,6 +166,7 @@ test("all Welcome starters use the onboarding runtime preference", async () => {
     assert.equal(input.teamId, WELCOME_TEAM_ID);
     assert.equal(input.spawnAfterCreate, false);
     assert.equal(input.startOnAppLaunch, false);
+    assert.equal(input.avatarUrl, undefined);
     assert.match(input.systemPrompt, new RegExp(`You are ${starter.name}`));
     assert.notEqual(input.systemPrompt, "Previous built-in prompt");
   }

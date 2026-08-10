@@ -7,19 +7,22 @@ import {
   useChannelMembersQuery,
 } from "@/features/channels/hooks";
 import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
-import {
-  coalesceAgentAutocompleteCandidates,
-  isAgentIdentityInManagedList,
-} from "@/features/agents/lib/agentAutocompleteEligibility";
+import { coalesceAgentAutocompleteCandidates } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
 import { formatMemberName } from "@/features/channels/lib/memberUtils";
 import {
+  useNativeContactsQuery,
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import {
+  getEstablishedNativeContactPubkeys,
+  isEligibleMemberAddCandidate,
+  isEstablishedNativeContactCandidate,
+} from "@/features/channels/lib/memberAddCandidateEligibility";
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
@@ -242,6 +245,13 @@ export function MembersSidebar({
   const canAddMembers =
     (selfMember !== null || channel?.visibility === "open") &&
     channel?.channelType !== "dm";
+  const nativeContactsQuery = useNativeContactsQuery({
+    enabled: open && canAddMembers,
+  });
+  const establishedNativeContactPubkeys = React.useMemo(
+    () => getEstablishedNativeContactPubkeys(nativeContactsQuery.data),
+    [nativeContactsQuery.data],
+  );
   const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: false,
     enabled:
@@ -281,7 +291,11 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        !isEligibleMemberAddCandidate(
+          candidate,
+          managedAgentPubkeys,
+          establishedNativeContactPubkeys,
+        )
       ) {
         return;
       }
@@ -314,6 +328,14 @@ export function MembersSidebar({
     };
 
     for (const user of userSearchResults) {
+      if (
+        !isEstablishedNativeContactCandidate(
+          user,
+          establishedNativeContactPubkeys,
+        )
+      ) {
+        continue;
+      }
       addCandidate(
         addMemberCandidateWithAgentMetadata(user, managedAgentsByPubkey),
       );
@@ -360,6 +382,7 @@ export function MembersSidebar({
     });
   }, [
     canAddMembers,
+    establishedNativeContactPubkeys,
     isArchivedDiscovery,
     currentAgentId,
     managedAgentsQuery.data,
@@ -371,6 +394,7 @@ export function MembersSidebar({
   ]);
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
+    nativeContactsQuery.isLoading ||
     managedAgentsQuery.isLoading ||
     relayAgentsQuery.isLoading;
   const handlePeopleSearchScroll = useUserSearchFetchMoreOnScroll(
