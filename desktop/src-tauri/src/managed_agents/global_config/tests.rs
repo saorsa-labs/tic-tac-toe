@@ -153,6 +153,26 @@ fn validate_accepts_valid_provider_and_model() {
     assert!(validate_global_config(&config).is_ok());
 }
 
+#[test]
+fn validate_accepts_catalog_preferred_runtime() {
+    let config = GlobalAgentConfig {
+        preferred_runtime: Some("buzz-agent".to_string()),
+        ..Default::default()
+    };
+    assert!(validate_global_config(&config).is_ok());
+}
+
+#[test]
+fn validate_rejects_unknown_preferred_runtime() {
+    let config = GlobalAgentConfig {
+        preferred_runtime: Some("not-installed".to_string()),
+        ..Default::default()
+    };
+    let error = validate_global_config(&config).expect_err("unknown runtime must fail closed");
+    assert!(error.contains("preferred_runtime"));
+    assert!(error.contains("not a supported ACP runtime"));
+}
+
 // ── normalize_global_config_fields ───────────────────────────────────────────
 
 #[test]
@@ -225,6 +245,20 @@ fn normalize_none_fields_stay_none() {
     normalize_global_config_fields(&mut config);
     assert!(config.provider.is_none());
     assert!(config.model.is_none());
+}
+
+#[test]
+fn normalize_preferred_runtime_trims_and_clears_blank_values() {
+    let mut config = GlobalAgentConfig {
+        preferred_runtime: Some("  buzz-agent  ".to_string()),
+        ..Default::default()
+    };
+    normalize_global_config_fields(&mut config);
+    assert_eq!(config.preferred_runtime.as_deref(), Some("buzz-agent"));
+
+    config.preferred_runtime = Some("   ".to_string());
+    normalize_global_config_fields(&mut config);
+    assert_eq!(config.preferred_runtime, None);
 }
 
 // ── strip_empty_env_vars ──────────────────────────────────────────────────────

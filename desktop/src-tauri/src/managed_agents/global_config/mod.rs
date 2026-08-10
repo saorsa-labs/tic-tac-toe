@@ -12,9 +12,11 @@
 //!
 //! # Semantics
 //!
-//! Unlike per-agent/persona env (snapshotted at create time), global config is
-//! **live-resolved at spawn/readiness/deploy** — change a global key and every
-//! agent picks it up on the next restart, with no delete+respawn required.
+//! Global env/provider/model values are **live-resolved at
+//! spawn/readiness/deploy** — change one and every agent picks it up on the
+//! next restart. `preferred_runtime` is the exception: it is a create-time
+//! default that is materialized on new records so later global edits do not
+//! silently change an existing agent's runtime.
 //!
 //! # Storage
 //!
@@ -29,6 +31,7 @@ use tauri::AppHandle;
 use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
+use crate::managed_agents::known_acp_runtime_exact;
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
 use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 
@@ -64,7 +67,7 @@ pub struct GlobalAgentConfig {
     #[serde(default)]
     pub model: Option<String>,
 
-    /// Preferred ACP runtime for definitions without an explicit runtime.
+    /// Preferred ACP runtime for new records without an explicit runtime.
     #[serde(default)]
     pub preferred_runtime: Option<String>,
 }
@@ -137,6 +140,22 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
         }
     }
 
+    if let Some(runtime) = config
+        .preferred_runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|runtime| !runtime.is_empty())
+    {
+        let catalog_runtime = known_acp_runtime_exact(runtime).ok_or_else(|| {
+            format!("global config `preferred_runtime` is not a supported ACP runtime: {runtime}")
+        })?;
+        if catalog_runtime.commands.is_empty() {
+            return Err(format!(
+                "global config `preferred_runtime` has no available command: {runtime}"
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -149,7 +168,7 @@ pub fn strip_empty_env_vars(config: &mut GlobalAgentConfig) {
     config.env_vars.retain(|_, v| !v.is_empty());
 }
 
-/// Normalize `provider` and `model` to `None` when blank or whitespace-only.
+/// Normalize `provider`, `model`, and `preferred_runtime` string fields.
 ///
 /// `Some("")` and `Some("  ")` have no meaningful value and break
 /// unset/fallback semantics (a blank provider would be treated as "provider
@@ -169,6 +188,12 @@ pub fn normalize_global_config_fields(config: &mut GlobalAgentConfig) {
             config.model = None;
         }
     }
+    config.preferred_runtime = config
+        .preferred_runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 }
 
 fn global_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -185,18 +210,22 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read global agent config: {e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("failed to parse global agent config: {e}"))
+    let config: GlobalAgentConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse global agent config: {e}"))?;
+    validate_global_config(&config)?;
+    Ok(config)
 }
 
 /// Save the global agent config to disk.
 ///
-/// Strips empty env values and normalizes blank provider/model to `None`
+/// Strips empty env values and normalizes blank string fields to `None`
 /// before writing (empty = "inherit" semantics).
 /// Written `0o600` — same protection as `managed-agents.json`.
 pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> Result<(), String> {
     let mut config = config.clone();
     strip_empty_env_vars(&mut config);
     normalize_global_config_fields(&mut config);
+    validate_global_config(&config)?;
 
     let path = global_config_path(app)?;
     let payload = serde_json::to_vec_pretty(&config)

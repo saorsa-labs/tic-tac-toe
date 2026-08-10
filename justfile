@@ -26,6 +26,7 @@ crates-check:
 # the gate itself stays red until the M3 relay/Nostr cutover completes.
 no-relay-gate:
     node --test scripts/no-relay-gate.test.mjs
+    node --test scripts/portable-package-contract.test.mjs
     node scripts/no-relay-gate.mjs
 
 # Stage x0xd for the active target triple (Tauri externalBin naming).

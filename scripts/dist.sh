@@ -5,7 +5,7 @@
 #
 # Produces: dist/tic-tac-toe-v<X0XD_VERSION>-aarch64.tar.gz
 # containing:
-#   Buzz.app/              - Tauri-built, signed application bundle
+#   tic-tac-toe.app/       - Tauri-built, signed application bundle
 #   run-tic-tac-toe.sh     - launcher with x0xd auto-detection
 #   VERSION                - exact build and signing manifest
 #
@@ -17,6 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 X0X_DIR="$ROOT/../x0x"
 DESKTOP_DIR="$ROOT/desktop"
 DIST_DIR="$ROOT/dist"
+APP_BUNDLE_NAME="tic-tac-toe.app"
 TARGET_TRIPLE="$(rustc -vV | awk '/^host:/ { print $2 }')"
 SKIP_NOTARIZATION=false
 
@@ -111,7 +112,7 @@ echo "Building and signing the Tauri application"
     corepack pnpm exec tauri build --bundles app --ci
 )
 
-APP_BUNDLE="$DESKTOP_DIR/src-tauri/target/release/bundle/macos/Buzz.app"
+APP_BUNDLE="$DESKTOP_DIR/src-tauri/target/release/bundle/macos/$APP_BUNDLE_NAME"
 if [[ ! -d "$APP_BUNDLE" ]]; then
     echo "Tauri app bundle not found: $APP_BUNDLE" >&2
     exit 1
@@ -133,7 +134,7 @@ TARBALL_TMP="$TARBALL.tmp"
 
 rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR"
-ditto "$APP_BUNDLE" "$PKG_DIR/Buzz.app"
+ditto "$APP_BUNDLE" "$PKG_DIR/$APP_BUNDLE_NAME"
 install -m 755 "$ROOT/scripts/run-tic-tac-toe.sh" "$PKG_DIR/run-tic-tac-toe.sh"
 
 notarized="no"
@@ -150,9 +151,9 @@ signing_identity: $APPLE_SIGNING_IDENTITY
 notarized: $notarized
 EOF
 
-codesign --verify --deep --strict --verbose=2 "$PKG_DIR/Buzz.app"
+codesign --verify --deep --strict --verbose=2 "$PKG_DIR/$APP_BUNDLE_NAME"
 rm -f "$TARBALL_TMP"
-tar -czf "$TARBALL_TMP" -C "$PKG_DIR" Buzz.app run-tic-tac-toe.sh VERSION
+tar -czf "$TARBALL_TMP" -C "$PKG_DIR" "$APP_BUNDLE_NAME" run-tic-tac-toe.sh VERSION
 mv "$TARBALL_TMP" "$TARBALL"
 
 echo

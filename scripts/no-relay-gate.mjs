@@ -43,6 +43,9 @@ const PACKAGING_FILES = [
   "desktop/src-tauri/tauri.conf.json",
   "desktop/src-tauri/capabilities/default.json",
   "desktop/src-tauri/src/lib.rs",
+  "desktop/scripts/verify-macos-entitlements.sh",
+  "scripts/dist.sh",
+  "scripts/run-tic-tac-toe.sh",
   "scripts/stage-sidecars.sh",
   "justfile",
 ];
@@ -55,6 +58,8 @@ const PACKAGING_FILES = [
 // Patterns target each manifest's declaration syntax (JSON key / TOML crate =
 // line) so prose mentions in comments or script names do not false-fire.
 const FORBIDDEN_PACKAGING = [
+  ["legacy app bundle name", /\bBuzz\.app\b/],
+  ["legacy private key environment", /\b(?:BUZZ_PRIVATE_KEY|NOSTR_PRIVATE_KEY)\b/],
   ["compatibility sidecar", /x0x-nostr-bridge/i],
   ["relay URL environment", /BUZZ_RELAY_(?:URL|HTTP)/],
   [

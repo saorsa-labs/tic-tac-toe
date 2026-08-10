@@ -169,6 +169,13 @@ mod relay;
 mod relay_admission;
 `,
   ],
+  [
+    "scripts/run-tic-tac-toe.sh",
+    `APP_PATH="$DIR/Buzz.app"
+export BUZZ_PRIVATE_KEY="portable-bypass"
+export NOSTR_PRIVATE_KEY="legacy"
+`,
+  ],
 ];
 
 const has = (violations, basename, category) =>
@@ -341,6 +348,19 @@ describe("no-relay-gate — hardened Rust scan", () => {
     assert.equal(
       hasDetail(violations, "packaging", "tauri-plugin-websocket crate dependency"),
       true,
+    );
+  });
+
+  it("flags legacy app bundle and private-key packaging regressions", () => {
+    assert.equal(
+      hasDetail(violations, "packaging", "legacy app bundle name"),
+      true,
+      "the packaged launcher must use the Tauri productName bundle",
+    );
+    assert.equal(
+      hasDetail(violations, "packaging", "legacy private key environment"),
+      true,
+      "portable launchers must not recreate retired identity secrets",
     );
   });
 

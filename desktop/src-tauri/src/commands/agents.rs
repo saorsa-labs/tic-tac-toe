@@ -396,6 +396,7 @@ pub async fn create_managed_agent(
 
         // Load personas once for harness/pack/avatar resolution below.
         let personas = load_personas(&app).unwrap_or_default();
+        let global_agent_config = crate::managed_agents::load_global_agent_config(&app)?;
 
         // Harness resolution: the persona's runtime is authoritative. A
         // persona-backed create stores an `agent_command_override` ONLY when the
@@ -412,13 +413,15 @@ pub async fn create_managed_agent(
             input.harness_override,
         );
         // The create-time snapshot used for arg/mcp/avatar derivations and
-        // legacy reconcile. Authoritative spawn resolution re-derives this via
-        // `effective_agent_command` at use-time.
-        let agent_command = crate::managed_agents::effective_agent_command(
-            requested_persona_id.as_deref(),
-            &personas,
-            agent_command_override.as_deref(),
-        );
+        // legacy reconcile. A global preferred runtime is materialized on the
+        // new record; explicit record/persona choices remain authoritative.
+        let (agent_command, materialized_runtime) =
+            crate::managed_agents::resolve_create_agent_runtime(
+                requested_persona_id.as_deref(),
+                &personas,
+                agent_command_override.as_deref(),
+                global_agent_config.preferred_runtime.as_deref(),
+            )?;
         let agent_args = normalize_agent_args(
             &agent_command,
             input
@@ -572,7 +575,7 @@ pub async fn create_managed_agent(
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             display_name: None,
             slug: None,
-            runtime: None,
+            runtime: materialized_runtime,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

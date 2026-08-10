@@ -12,6 +12,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_BUNDLE_NAME="tic-tac-toe.app"
 
 # ── Parse flags ───────────────────────────────────────────────────────────
 
@@ -27,11 +28,10 @@ done
 
 # ── Locate the app binary ─────────────────────────────────────────────────
 
-# .app bundle: Contents/MacOS/buzz-desktop
-# .app bundle: Buzz.app/Contents/MacOS/buzz-desktop
+# .app bundle: tic-tac-toe.app/Contents/MacOS/buzz-desktop
 # Portable dir: ./tic-tac-toe or ./buzz-desktop
-if [[ -x "$DIR/Buzz.app/Contents/MacOS/buzz-desktop" ]]; then
-    BINARY="$DIR/Buzz.app/Contents/MacOS/buzz-desktop"
+if [[ -x "$DIR/$APP_BUNDLE_NAME/Contents/MacOS/buzz-desktop" ]]; then
+    BINARY="$DIR/$APP_BUNDLE_NAME/Contents/MacOS/buzz-desktop"
 elif [[ -x "$DIR/buzz-desktop" ]]; then
     BINARY="$DIR/buzz-desktop"
 elif [[ -x "$DIR/tic-tac-toe" ]]; then
@@ -44,7 +44,7 @@ fi
 
 BUNDLED_X0XD=""
 for candidate in \
-    "$DIR/Buzz.app/Contents/MacOS/x0xd" \
+    "$DIR/$APP_BUNDLE_NAME/Contents/MacOS/x0xd" \
     "$DIR/x0xd" \
     "$DIR/../Resources/x0xd" \
     "$DIR/../Resources/binaries/x0xd"; do
@@ -148,9 +148,6 @@ fi
 # ── Launch ────────────────────────────────────────────────────────────────
 
 export TTT_X0XD_BINARY="$X0XD_PATH"
-# Bypass macOS keychain check for portable/unsigned binaries — in native x0x
-# mode, identity comes from the daemon's AgentId, not this value.
-export BUZZ_PRIVATE_KEY="portable-bypass"
 
 echo "▸ launching tic-tac-toe…"
 exec "$BINARY" "$@"

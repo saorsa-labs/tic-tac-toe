@@ -7,8 +7,8 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    refresh_login_shell_path, resolve_create_agent_runtime, BUZZ_AGENT_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -347,6 +347,40 @@ fn effective_agent_command_falls_back_to_default() {
         effective_agent_command(None, &personas, None),
         default_agent_command()
     );
+}
+
+#[test]
+fn create_runtime_materializes_global_preference_before_default() {
+    let (command, runtime) = resolve_create_agent_runtime(None, &[], None, Some("claude"))
+        .expect("known global runtime should resolve");
+    assert_eq!(command, "claude-agent-acp");
+    assert_eq!(runtime.as_deref(), Some("claude"));
+}
+
+#[test]
+fn create_runtime_explicit_record_command_wins_over_global_preference() {
+    let (command, runtime) =
+        resolve_create_agent_runtime(None, &[], Some("codex-acp"), Some("claude"))
+            .expect("explicit command should resolve");
+    assert_eq!(command, "codex-acp");
+    assert_eq!(runtime, None);
+}
+
+#[test]
+fn create_runtime_persona_choice_wins_over_global_preference() {
+    let personas = vec![persona_with_runtime("p1", Some("goose"))];
+    let (command, runtime) =
+        resolve_create_agent_runtime(Some("p1"), &personas, None, Some("claude"))
+            .expect("persona runtime should resolve");
+    assert_eq!(command, "goose");
+    assert_eq!(runtime, None);
+}
+
+#[test]
+fn create_runtime_invalid_global_preference_fails_closed() {
+    let error = resolve_create_agent_runtime(None, &[], None, Some("not-installed"))
+        .expect_err("unknown global runtime must not fall back silently");
+    assert!(error.contains("global preferred runtime"));
 }
 
 #[test]

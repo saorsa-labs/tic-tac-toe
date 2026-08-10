@@ -337,6 +337,57 @@ pub fn effective_agent_command(
         .unwrap_or_else(default_agent_command)
 }
 
+/// Resolve and, when needed, materialize the runtime for a newly-created
+/// managed agent.
+///
+/// Create-time precedence is deliberately explicit:
+///   1. a per-record command override;
+///   2. the linked persona's catalog runtime;
+///   3. the validated global preferred runtime;
+///   4. the bundled default.
+///
+/// Only the global selection is materialized on the new record. Explicit
+/// record and persona choices already have their own authoritative storage.
+pub fn resolve_create_agent_runtime(
+    persona_id: Option<&str>,
+    personas: &[crate::managed_agents::types::AgentDefinition],
+    agent_command_override: Option<&str>,
+    preferred_runtime: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    if let Some(pin) = agent_command_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok((pin.to_string(), None));
+    }
+
+    if let Some(runtime_id) = persona_id
+        .and_then(|pid| personas.iter().find(|persona| persona.id == pid))
+        .and_then(|persona| persona.runtime.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let command = known_acp_runtime_exact(runtime_id)
+            .and_then(|runtime| runtime.commands.first().copied())
+            .ok_or_else(|| format!("persona runtime has no available command: {runtime_id}"))?;
+        return Ok((command.to_string(), None));
+    }
+
+    if let Some(runtime_id) = preferred_runtime
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let command = known_acp_runtime_exact(runtime_id)
+            .and_then(|runtime| runtime.commands.first().copied())
+            .ok_or_else(|| {
+                format!("global preferred runtime has no available command: {runtime_id}")
+            })?;
+        return Ok((command.to_string(), Some(runtime_id.to_string())));
+    }
+
+    Ok((default_agent_command(), None))
+}
+
 mod overrides;
 pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
 
