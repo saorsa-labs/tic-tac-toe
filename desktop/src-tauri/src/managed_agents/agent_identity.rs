@@ -27,6 +27,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::File;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -52,6 +54,19 @@ const MANAGED_INSTANCE_PREFIX: &str = "x0x-managed-";
 /// key. Long keys use the first 224 bits of a SHA-256 digest so Company keys
 /// with long common prefixes remain distinct as well as deterministic.
 const MANAGED_INSTANCE_KEY_LEN: usize = 64 - "managed-".len();
+
+/// x0x's persisted `agent.key` envelope. The desktop crate intentionally does
+/// not depend on the x0x library (it talks to the bundled daemon over HTTP), so
+/// durable stopped-child recovery mirrors x0x's small, documented v1/v2
+/// envelope here. These sizes are the ML-DSA-65 constants enforced by x0x's
+/// `AgentKeypair::from_bytes` parser.
+const X0X_KEYFILE_V2_MAGIC: [u8; 4] = *b"X0K2";
+const X0X_KEYFILE_LEN_PREFIX_BYTES: usize = 8;
+const X0X_AGENT_PUBLIC_KEY_BYTES: usize = 1_952;
+const X0X_AGENT_SECRET_KEY_BYTES: u64 = 4_032;
+const X0X_AGENT_KEYFILE_V1_BYTES: u64 = 6_000;
+const X0X_AGENT_KEYFILE_V2_BYTES: u64 = 6_012;
+const X0X_AGENT_ID_DOMAIN: &[u8] = b"AUTONOMI_PEER_ID_V2:";
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const DEFAULT_AGENT_CHILD_TIMEOUT: Duration = Duration::from_secs(15);
@@ -245,6 +260,92 @@ fn bounded_agent_child_instance(instance: &str) -> String {
         .collect()
 }
 
+/// Resolve the identity directory x0xd itself chooses for a named instance.
+/// Unlike readiness/history artifacts, named-instance identity material lives
+/// under `$HOME/.x0x-<name>` rather than the platform application-data dir.
+fn agent_child_identity_dir(home_dir: &Path, bounded_instance: &str) -> PathBuf {
+    home_dir.join(format!(".x0x-managed-{bounded_instance}"))
+}
+
+/// Read only the public-key portion of an x0x `agent.key` and derive the same
+/// native AgentId x0x exposes from `/agent`. The secret bytes are never read or
+/// retained. Every structural field and the exact file length is checked, so a
+/// truncated, extended, wrong-key-type, or unknown-version file fails closed.
+fn agent_id_from_persisted_key(key_path: &Path) -> Option<String> {
+    let path_metadata = std::fs::symlink_metadata(key_path).ok()?;
+    if !path_metadata.file_type().is_file() {
+        return None;
+    }
+
+    let mut key_file = File::open(key_path).ok()?;
+    let file_len = key_file.metadata().ok()?.len();
+
+    let mut prefix = [0_u8; X0X_KEYFILE_V2_MAGIC.len()];
+    key_file.read_exact(&mut prefix).ok()?;
+
+    let is_v2 = prefix == X0X_KEYFILE_V2_MAGIC;
+    let expected_file_len = if is_v2 {
+        X0X_AGENT_KEYFILE_V2_BYTES
+    } else {
+        X0X_AGENT_KEYFILE_V1_BYTES
+    };
+    if file_len != expected_file_len {
+        return None;
+    }
+
+    let mut public_len_bytes = [0_u8; X0X_KEYFILE_LEN_PREFIX_BYTES];
+    if is_v2 {
+        key_file.read_exact(&mut public_len_bytes).ok()?;
+    } else {
+        public_len_bytes[..prefix.len()].copy_from_slice(&prefix);
+        key_file
+            .read_exact(&mut public_len_bytes[prefix.len()..])
+            .ok()?;
+    }
+    if u64::from_le_bytes(public_len_bytes) != X0X_AGENT_PUBLIC_KEY_BYTES as u64 {
+        return None;
+    }
+
+    let mut public_key = [0_u8; X0X_AGENT_PUBLIC_KEY_BYTES];
+    key_file.read_exact(&mut public_key).ok()?;
+
+    let mut secret_len_bytes = [0_u8; X0X_KEYFILE_LEN_PREFIX_BYTES];
+    key_file.read_exact(&mut secret_len_bytes).ok()?;
+    if u64::from_le_bytes(secret_len_bytes) != X0X_AGENT_SECRET_KEY_BYTES {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(X0X_AGENT_ID_DOMAIN);
+    hasher.update(public_key);
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Recover one stopped child's durable native identity from paths anchored to
+/// its stable managed-record key. This never consults display names, cached
+/// rosters, or any other mutable product metadata.
+fn recover_managed_agent_child_identity(
+    record_key: &str,
+    key_path: &Path,
+    data_dir: PathBuf,
+) -> Option<ManagedAgentChild> {
+    if !is_canonical_lower_hex_id(record_key) {
+        return None;
+    }
+    let agent_id = agent_id_from_persisted_key(key_path)?;
+    if agent_id == record_key {
+        return None;
+    }
+    Some(ManagedAgentChild { agent_id, data_dir })
+}
+
+fn is_canonical_lower_hex_id(candidate: &str) -> bool {
+    candidate.len() == 64
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 // ── Supervisor ──────────────────────────────────────────────────────────────
 
 pub(super) struct AgentChildSupervisor<P: DaemonProbe, S: SidecarSpawner, T: TimeSource> {
@@ -413,11 +514,7 @@ pub(super) fn extract_agent_id(value: &Value) -> Option<String> {
             .and_then(|v| v.as_str())
     })?;
     let id = candidate.trim();
-    if id.len() == 64
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
+    if is_canonical_lower_hex_id(id) {
         Some(id.to_string())
     } else {
         None
@@ -578,6 +675,13 @@ pub(crate) fn provision_managed_agent_child(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(handle) = children.get(&instance) {
+        if handle.agent_id == instance || !is_canonical_lower_hex_id(&handle.agent_id) {
+            return Err(AgentChildError::InvalidAgentCard {
+                reason:
+                    "child native identity must be canonical and differ from its managed record key"
+                        .to_string(),
+            });
+        }
         return Ok(ManagedAgentChild {
             agent_id: handle.agent_id.clone(),
             data_dir: handle.data_dir.clone(),
@@ -590,6 +694,13 @@ pub(crate) fn provision_managed_agent_child(
     })?;
     let supervisor = std_supervisor(cfg);
     let handle = supervisor.bring_up()?;
+    if handle.agent_id == instance || !is_canonical_lower_hex_id(&handle.agent_id) {
+        return Err(AgentChildError::InvalidAgentCard {
+            reason:
+                "child native identity must be canonical and differ from its managed record key"
+                    .to_string(),
+        });
+    }
     let identity = ManagedAgentChild {
         agent_id: handle.agent_id.clone(),
         data_dir: handle.data_dir.clone(),
@@ -598,16 +709,31 @@ pub(crate) fn provision_managed_agent_child(
     Ok(identity)
 }
 
-/// Look up the native identity for a managed agent, if a child was provisioned.
+/// Look up the native identity for a managed agent. A live handle is the
+/// authoritative fast path; after stop/desktop restart, recover the same
+/// identity without spawning by reading the bounded named-instance key file.
 pub(crate) fn managed_agent_child_identity(pubkey: &str) -> Option<ManagedAgentChild> {
     let instance = managed_agent_instance(pubkey);
-    let children = MANAGED_AGENT_CHILDREN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    children.get(&instance).map(|handle| ManagedAgentChild {
-        agent_id: handle.agent_id.clone(),
-        data_dir: handle.data_dir.clone(),
-    })
+    {
+        let children = MANAGED_AGENT_CHILDREN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(handle) = children.get(&instance) {
+            if handle.agent_id == instance || !is_canonical_lower_hex_id(&handle.agent_id) {
+                return None;
+            }
+            return Some(ManagedAgentChild {
+                agent_id: handle.agent_id.clone(),
+                data_dir: handle.data_dir.clone(),
+            });
+        }
+    }
+
+    let bounded_instance = bounded_agent_child_instance(&instance);
+    let home_dir = dirs::home_dir()?;
+    let key_path = agent_child_identity_dir(&home_dir, &bounded_instance).join("agent.key");
+    let data_dir = agent_child_data_dir(&bounded_instance)?;
+    recover_managed_agent_child_identity(&instance, &key_path, data_dir)
 }
 
 /// Release the app-owned x0xd child for one managed agent. Called from the
@@ -640,6 +766,151 @@ pub(super) fn std_supervisor(
         StdSidecarSpawner,
         crate::local_stack::BlockingTimeSource,
     )
+}
+
+#[cfg(test)]
+mod persisted_identity_tests {
+    use super::*;
+
+    const EXPECTED_TEST_AGENT_ID: &str =
+        "72304d2d521ec7647603869401a2f052bc23d7365bfd5256180dd30b591dd9cd";
+
+    fn keyfile_fixture(v2: bool) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(if v2 {
+            X0X_AGENT_KEYFILE_V2_BYTES as usize
+        } else {
+            X0X_AGENT_KEYFILE_V1_BYTES as usize
+        });
+        if v2 {
+            bytes.extend_from_slice(&X0X_KEYFILE_V2_MAGIC);
+        }
+        bytes.extend_from_slice(&(X0X_AGENT_PUBLIC_KEY_BYTES as u64).to_le_bytes());
+        bytes.extend_from_slice(&vec![0xa5; X0X_AGENT_PUBLIC_KEY_BYTES]);
+        bytes.extend_from_slice(&X0X_AGENT_SECRET_KEY_BYTES.to_le_bytes());
+        bytes.extend_from_slice(&vec![0x5a; X0X_AGENT_SECRET_KEY_BYTES as usize]);
+        if v2 {
+            bytes.extend_from_slice(&1_900_000_000_u64.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn write_fixture(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).expect("write test agent.key");
+    }
+
+    #[test]
+    fn stopped_child_recovers_native_identity_from_v1_key_without_a_handle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key_path = temp.path().join("agent.key");
+        write_fixture(&key_path, &keyfile_fixture(false));
+        let data_dir = temp.path().join("data");
+        let record_key = "11".repeat(32);
+
+        let identity =
+            recover_managed_agent_child_identity(&record_key, &key_path, data_dir.clone())
+                .expect("valid stopped-child identity");
+
+        assert_eq!(identity.agent_id, EXPECTED_TEST_AGENT_ID);
+        assert_eq!(identity.data_dir, data_dir);
+        assert_ne!(identity.agent_id, record_key);
+    }
+
+    #[test]
+    fn stopped_child_recovers_native_identity_from_v2_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key_path = temp.path().join("agent.key");
+        write_fixture(&key_path, &keyfile_fixture(true));
+
+        assert_eq!(
+            agent_id_from_persisted_key(&key_path).as_deref(),
+            Some(EXPECTED_TEST_AGENT_ID)
+        );
+    }
+
+    #[test]
+    fn persisted_identity_rejects_corrupt_truncated_and_wrong_key_envelopes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key_path = temp.path().join("agent.key");
+
+        let mut truncated = keyfile_fixture(false);
+        truncated.pop();
+        write_fixture(&key_path, &truncated);
+        assert!(agent_id_from_persisted_key(&key_path).is_none());
+
+        let mut wrong_public_size = keyfile_fixture(false);
+        wrong_public_size[..X0X_KEYFILE_LEN_PREFIX_BYTES].copy_from_slice(&1_184_u64.to_le_bytes());
+        write_fixture(&key_path, &wrong_public_size);
+        assert!(agent_id_from_persisted_key(&key_path).is_none());
+
+        let mut wrong_secret_size = keyfile_fixture(false);
+        let secret_len_offset = X0X_KEYFILE_LEN_PREFIX_BYTES + X0X_AGENT_PUBLIC_KEY_BYTES;
+        wrong_secret_size[secret_len_offset..secret_len_offset + X0X_KEYFILE_LEN_PREFIX_BYTES]
+            .copy_from_slice(&2_528_u64.to_le_bytes());
+        write_fixture(&key_path, &wrong_secret_size);
+        assert!(agent_id_from_persisted_key(&key_path).is_none());
+
+        let mut extended = keyfile_fixture(false);
+        extended.push(0);
+        write_fixture(&key_path, &extended);
+        assert!(agent_id_from_persisted_key(&key_path).is_none());
+
+        let mut unknown_version = keyfile_fixture(true);
+        unknown_version[..X0X_KEYFILE_V2_MAGIC.len()].copy_from_slice(b"X0K3");
+        write_fixture(&key_path, &unknown_version);
+        assert!(agent_id_from_persisted_key(&key_path).is_none());
+    }
+
+    #[test]
+    fn persisted_identity_rejects_record_child_equality_and_non_record_keys() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key_path = temp.path().join("agent.key");
+        write_fixture(&key_path, &keyfile_fixture(false));
+
+        assert!(recover_managed_agent_child_identity(
+            EXPECTED_TEST_AGENT_ID,
+            &key_path,
+            temp.path().join("equal")
+        )
+        .is_none());
+        assert!(recover_managed_agent_child_identity(
+            "Guide",
+            &key_path,
+            temp.path().join("display-name")
+        )
+        .is_none());
+        assert!(recover_managed_agent_child_identity(
+            &"AA".repeat(32),
+            &key_path,
+            temp.path().join("noncanonical")
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_identity_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_key_path = temp.path().join("real-agent.key");
+        let symlink_path = temp.path().join("agent.key");
+        write_fixture(&real_key_path, &keyfile_fixture(false));
+        symlink(&real_key_path, &symlink_path).expect("create key symlink");
+
+        assert!(agent_id_from_persisted_key(&symlink_path).is_none());
+    }
+
+    #[test]
+    fn durable_identity_path_matches_bounded_x0xd_named_instance() {
+        let record_key = "ab".repeat(32);
+        let bounded = bounded_agent_child_instance(&record_key);
+        let home = Path::new("/Users/tester");
+
+        assert_eq!(
+            agent_child_identity_dir(home, &bounded).join("agent.key"),
+            home.join(format!(".x0x-managed-{bounded}/agent.key"))
+        );
+    }
 }
 
 #[cfg(test)]

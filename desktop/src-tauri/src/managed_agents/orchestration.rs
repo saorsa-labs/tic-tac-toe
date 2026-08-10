@@ -26,6 +26,10 @@ use crate::x0x_client::{X0xClient, X0xClientError};
 const CHILD_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const GROUP_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
 const GROUP_CONVERGENCE_POLL: Duration = Duration::from_millis(250);
+/// A healthy child API can become reachable shortly before its persisted
+/// communities are visible. Never rewrite an already-active owner roster on
+/// that first transient gap; give the child a bounded restore window first.
+const CHILD_GROUP_RESTORE_GRACE: Duration = Duration::from_secs(3);
 
 /// Native launch values that are safe to pass to the ACP harness.
 ///
@@ -274,38 +278,84 @@ async fn bind_child_to_group(
     )?;
 
     let mut expected_roster_revision = roster_revision(&owner_group)?;
-    let child_installed = child_group_matches(
-        loopback_http,
-        child,
-        &group_path,
-        expected_roster_revision,
-        None,
+    let mut owner_state = read_owner_group_state(
+        owner_client,
+        &OwnerGroupExpectation {
+            group_path: &group_path,
+            group_id,
+            roster_revision: expected_roster_revision,
+            required_agent_id: binding.attach_agent_id,
+            required_member_state: owner_child_state,
+            forbidden_agent_id: None,
+        },
     )
     .await?;
-    if !child_installed {
-        match owner_child_state {
-            GroupMemberState::Active => {
-                // A previous add may have committed before contact consent
-                // existed. x0xd returns 409 without resending bootstrap, so
-                // remove/re-add emits a fresh bootstrap. Banned and other
-                // non-active states are never rewritten by this repair path.
-                remove_owner_member(owner_client, &encoded_group, binding.attach_agent_id).await?;
-            }
-            GroupMemberState::Absent => {}
-            GroupMemberState::Banned => {
-                return Err(format!(
-                    "managed-agent child {} is banned in the owner community roster; explicitly unban it before starting the runtime",
-                    binding.attach_agent_id
-                ));
-            }
-            GroupMemberState::Other(state) => {
-                return Err(format!(
-                    "managed-agent child {} has non-active community state {state:?}; manual roster repair is required",
-                    binding.attach_agent_id
-                ));
+    let needs_attach = match owner_child_state {
+        GroupMemberState::Active => {
+            let observation = wait_for_child_group_observation(
+                loopback_http,
+                child,
+                &ChildGroupExpectation {
+                    group_path: &group_path,
+                    group_id,
+                    owner_state: &owner_state,
+                    forbidden_agent_id: None,
+                },
+                CHILD_GROUP_RESTORE_GRACE,
+                GROUP_CONVERGENCE_POLL,
+            )
+            .await?;
+            match active_owner_action(observation) {
+                ActiveOwnerAction::Keep => false,
+                ActiveOwnerAction::RejectStale => {
+                    return Err(format!(
+                        "managed-agent community {group_id} is present on child {} but is not equivalent to the owner state at revision {expected_roster_revision}; refusing to rewrite an active owner roster",
+                        child.agent_id
+                    ));
+                }
+                ActiveOwnerAction::RepairMissing => {
+                    // Only a group that remained absent for the entire restore
+                    // grace can use the legacy bootstrap repair. Re-read the
+                    // owner first so an in-flight roster edit is never
+                    // overwritten by this remove/re-add.
+                    let refreshed_state = read_owner_group_state(
+                        owner_client,
+                        &OwnerGroupExpectation {
+                            group_path: &group_path,
+                            group_id,
+                            roster_revision: expected_roster_revision,
+                            required_agent_id: binding.attach_agent_id,
+                            required_member_state: GroupMemberState::Active,
+                            forbidden_agent_id: None,
+                        },
+                    )
+                    .await?;
+                    if refreshed_state != owner_state {
+                        return Err(format!(
+                            "managed-agent community {group_id} changed while child bootstrap repair was waiting; retry without rewriting the owner roster"
+                        ));
+                    }
+                    remove_owner_member(owner_client, &encoded_group, binding.attach_agent_id)
+                        .await?;
+                    true
+                }
             }
         }
-
+        GroupMemberState::Absent => true,
+        GroupMemberState::Banned => {
+            return Err(format!(
+                "managed-agent child {} is banned in the owner community roster; explicitly unban it before starting the runtime",
+                binding.attach_agent_id
+            ));
+        }
+        GroupMemberState::Other(state) => {
+            return Err(format!(
+                "managed-agent child {} has non-active community state {state:?}; manual roster repair is required",
+                binding.attach_agent_id
+            ));
+        }
+    };
+    if needs_attach {
         let members_path = format!("{group_path}/members");
         let add_body = group_member_body(binding.attach_agent_id, &record.name);
         let add_result: Result<Value, X0xClientError> =
@@ -324,6 +374,18 @@ async fn bind_child_to_group(
             "owner community roster after attach",
         )?;
         expected_roster_revision = roster_revision(&owner_group)?;
+        owner_state = read_owner_group_state(
+            owner_client,
+            &OwnerGroupExpectation {
+                group_path: &group_path,
+                group_id,
+                roster_revision: expected_roster_revision,
+                required_agent_id: binding.attach_agent_id,
+                required_member_state: GroupMemberState::Active,
+                forbidden_agent_id: None,
+            },
+        )
+        .await?;
     }
 
     wait_for_child_group(
@@ -331,7 +393,7 @@ async fn bind_child_to_group(
         child,
         &group_path,
         group_id,
-        expected_roster_revision,
+        &owner_state,
         None,
     )
     .await?;
@@ -357,12 +419,24 @@ async fn bind_child_to_group(
                 "owner community roster after migration",
             )?;
             expected_roster_revision = roster_revision(&owner_group)?;
+            owner_state = read_owner_group_state(
+                owner_client,
+                &OwnerGroupExpectation {
+                    group_path: &group_path,
+                    group_id,
+                    roster_revision: expected_roster_revision,
+                    required_agent_id: binding.attach_agent_id,
+                    required_member_state: GroupMemberState::Active,
+                    forbidden_agent_id: Some(legacy_agent_id),
+                },
+            )
+            .await?;
             wait_for_child_group(
                 loopback_http,
                 child,
                 &group_path,
                 group_id,
-                expected_roster_revision,
+                &owner_state,
                 Some(legacy_agent_id),
             )
             .await?;
@@ -372,33 +446,320 @@ async fn bind_child_to_group(
     Ok(())
 }
 
-async fn child_group_matches(
+fn require_signed_public_group(group: &Value, group_id: &str) -> Result<(), String> {
+    if group
+        .pointer("/policy/confidentiality")
+        .and_then(Value::as_str)
+        == Some("signed_public")
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "community {group_id} is not signed_public; managed-agent direct attachment is unsupported"
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupStateProjection {
+    group_id: String,
+    genesis: Value,
+    roster_root: String,
+    policy_hash: String,
+    public_meta_hash: String,
+    security_binding: Value,
+    withdrawn: bool,
+    state_hash: String,
+    state_revision: u64,
+}
+
+impl GroupStateProjection {
+    fn from_value(value: &Value, expected_group_id: &str) -> Result<Self, String> {
+        fn required_string(value: &Value, field: &str) -> Result<String, String> {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("x0xd group state is missing {field}"))
+        }
+
+        let group_id = required_string(value, "group_id")?;
+        if group_id != expected_group_id {
+            return Err("x0xd group state returned a different group_id".to_string());
+        }
+        let genesis = value
+            .get("genesis")
+            .filter(|entry| entry.is_object())
+            .cloned()
+            .ok_or_else(|| "x0xd group state is missing genesis".to_string())?;
+        if genesis.get("group_id").and_then(Value::as_str) != Some(expected_group_id) {
+            return Err("x0xd group state genesis returned a different group_id".to_string());
+        }
+        let security_binding = value
+            .get("security_binding")
+            .cloned()
+            .ok_or_else(|| "x0xd group state is missing security_binding".to_string())?;
+        let withdrawn = value
+            .get("withdrawn")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "x0xd group state is missing withdrawn".to_string())?;
+        let state_revision = value
+            .get("state_revision")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "x0xd group state is missing state_revision".to_string())?;
+
+        Ok(Self {
+            group_id,
+            genesis,
+            roster_root: required_string(value, "roster_root")?,
+            policy_hash: required_string(value, "policy_hash")?,
+            public_meta_hash: required_string(value, "public_meta_hash")?,
+            security_binding,
+            withdrawn,
+            state_hash: required_string(value, "state_hash")?,
+            state_revision,
+        })
+    }
+
+    fn authoritative_projection_eq(&self, other: &Self) -> bool {
+        self.group_id == other.group_id
+            && self.genesis == other.genesis
+            && self.roster_root == other.roster_root
+            && self.policy_hash == other.policy_hash
+            && self.public_meta_hash == other.public_meta_hash
+            && self.security_binding == other.security_binding
+            && self.withdrawn == other.withdrawn
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildGroupObservation {
+    Missing,
+    Strict,
+    Equivalent,
+    PresentStale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveOwnerAction {
+    Keep,
+    RepairMissing,
+    RejectStale,
+}
+
+fn active_owner_action(observation: ChildGroupObservation) -> ActiveOwnerAction {
+    match observation {
+        ChildGroupObservation::Strict | ChildGroupObservation::Equivalent => {
+            ActiveOwnerAction::Keep
+        }
+        ChildGroupObservation::Missing => ActiveOwnerAction::RepairMissing,
+        ChildGroupObservation::PresentStale => ActiveOwnerAction::RejectStale,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChildGroupExpectation<'a> {
+    group_path: &'a str,
+    group_id: &'a str,
+    owner_state: &'a GroupStateProjection,
+    forbidden_agent_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnerGroupExpectation<'a> {
+    group_path: &'a str,
+    group_id: &'a str,
+    roster_revision: u64,
+    required_agent_id: &'a str,
+    required_member_state: GroupMemberState<'a>,
+    forbidden_agent_id: Option<&'a str>,
+}
+
+async fn read_owner_group_state(
+    owner_client: &X0xClient,
+    expectation: &OwnerGroupExpectation<'_>,
+) -> Result<GroupStateProjection, String> {
+    let state_path = format!("{}/state", expectation.group_path);
+    let state_before: Value = owner_client
+        .get_json(&state_path, &[])
+        .await
+        .map_err(|error| format!("owner community state lookup failed: {error}"))?;
+    let projection_before = GroupStateProjection::from_value(&state_before, expectation.group_id)?;
+    let group: Value = owner_client
+        .get_json(expectation.group_path, &[])
+        .await
+        .map_err(|error| format!("owner community snapshot lookup failed: {error}"))?;
+    let state_after: Value = owner_client
+        .get_json(&state_path, &[])
+        .await
+        .map_err(|error| format!("owner community state recheck failed: {error}"))?;
+    let projection_after = GroupStateProjection::from_value(&state_after, expectation.group_id)?;
+    validate_owner_group_snapshot(&projection_before, &group, &projection_after, expectation)?;
+    if projection_after.withdrawn {
+        return Err(format!(
+            "owner community {} is withdrawn; managed-agent launch is unavailable",
+            expectation.group_id
+        ));
+    }
+    Ok(projection_after)
+}
+
+fn validate_owner_group_snapshot(
+    state_before: &GroupStateProjection,
+    group: &Value,
+    state_after: &GroupStateProjection,
+    expectation: &OwnerGroupExpectation<'_>,
+) -> Result<(), String> {
+    require_signed_public_group(group, expectation.group_id)?;
+    if roster_revision(group)? != expectation.roster_revision {
+        return Err(format!(
+            "owner community roster changed while its state was being read (expected revision {})",
+            expectation.roster_revision
+        ));
+    }
+    if group_member_state(group, expectation.required_agent_id) != expectation.required_member_state
+    {
+        return Err(
+            "owner community required membership changed while its state was being read"
+                .to_string(),
+        );
+    }
+    if expectation
+        .forbidden_agent_id
+        .is_some_and(|agent_id| group_member_state(group, agent_id) == GroupMemberState::Active)
+    {
+        return Err(
+            "owner community forbidden legacy membership remained active after migration"
+                .to_string(),
+        );
+    }
+    if state_before != state_after {
+        return Err("owner community state changed while it was being read".to_string());
+    }
+    Ok(())
+}
+
+async fn observe_child_group(
     loopback_http: &reqwest::Client,
     child: &ManagedAgentChild,
-    group_path: &str,
-    expected_roster_revision: u64,
-    forbidden_agent_id: Option<&str>,
-) -> Result<bool, String> {
-    match child_request_json(
+    expectation: &ChildGroupExpectation<'_>,
+) -> Result<ChildGroupObservation, String> {
+    let state_path = format!("{}/state", expectation.group_path);
+    let state_before =
+        read_child_group_state(loopback_http, child, &state_path, expectation.group_id).await?;
+    let group = match child_request_json(
         loopback_http,
         &child.data_dir,
         Method::GET,
-        group_path,
+        expectation.group_path,
         None,
     )
     .await
     {
-        Ok(group) => group_satisfies_convergence(
-            &group,
-            &child.agent_id,
-            expected_roster_revision,
-            forbidden_agent_id,
-        ),
+        Ok(group) => Some(group),
         Err(ChildHttpError {
             status: Some(StatusCode::NOT_FOUND),
             ..
-        }) => Ok(false),
-        Err(error) => Err(format!("managed-agent community lookup failed: {error}")),
+        }) => None,
+        Err(error) => return Err(format!("managed-agent community lookup failed: {error}")),
+    };
+    let state_after =
+        read_child_group_state(loopback_http, child, &state_path, expectation.group_id).await?;
+    let Some(group) = group else {
+        return Ok(if state_before.is_none() && state_after.is_none() {
+            ChildGroupObservation::Missing
+        } else {
+            ChildGroupObservation::PresentStale
+        });
+    };
+    require_signed_public_group(&group, expectation.group_id)?;
+
+    let child_state = group_member_state(&group, &child.agent_id);
+    reject_banned_member(
+        child_state,
+        &child.agent_id,
+        "managed-agent child community",
+    )?;
+    let contains_forbidden_active = expectation
+        .forbidden_agent_id
+        .is_some_and(|id| group_member_state(&group, id) == GroupMemberState::Active);
+    if child_state != GroupMemberState::Active || contains_forbidden_active {
+        return Ok(ChildGroupObservation::PresentStale);
+    }
+
+    let (Some(child_projection_before), Some(child_projection_after)) = (state_before, state_after)
+    else {
+        return Ok(ChildGroupObservation::PresentStale);
+    };
+    if child_projection_before != child_projection_after {
+        return Ok(ChildGroupObservation::PresentStale);
+    }
+    if child_projection_after.withdrawn {
+        return Ok(ChildGroupObservation::PresentStale);
+    }
+    if child_projection_after.state_revision == expectation.owner_state.state_revision
+        && child_projection_after.state_hash == expectation.owner_state.state_hash
+    {
+        return Ok(ChildGroupObservation::Strict);
+    }
+    if child_projection_after.authoritative_projection_eq(expectation.owner_state) {
+        return Ok(ChildGroupObservation::Equivalent);
+    }
+    Ok(ChildGroupObservation::PresentStale)
+}
+
+async fn read_child_group_state(
+    loopback_http: &reqwest::Client,
+    child: &ManagedAgentChild,
+    state_path: &str,
+    group_id: &str,
+) -> Result<Option<GroupStateProjection>, String> {
+    match child_request_json(
+        loopback_http,
+        &child.data_dir,
+        Method::GET,
+        state_path,
+        None,
+    )
+    .await
+    {
+        Ok(state) => GroupStateProjection::from_value(&state, group_id).map(Some),
+        Err(ChildHttpError {
+            status: Some(StatusCode::NOT_FOUND),
+            ..
+        }) => Ok(None),
+        Err(error) => Err(format!(
+            "managed-agent community state lookup failed: {error}"
+        )),
+    }
+}
+
+async fn wait_for_child_group_observation(
+    loopback_http: &reqwest::Client,
+    child: &ManagedAgentChild,
+    expectation: &ChildGroupExpectation<'_>,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<ChildGroupObservation, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut saw_present = false;
+    loop {
+        let observation = observe_child_group(loopback_http, child, expectation).await?;
+        match observation {
+            ChildGroupObservation::Strict | ChildGroupObservation::Equivalent => {
+                return Ok(observation);
+            }
+            ChildGroupObservation::PresentStale => saw_present = true,
+            ChildGroupObservation::Missing => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(if saw_present {
+                ChildGroupObservation::PresentStale
+            } else {
+                ChildGroupObservation::Missing
+            });
+        }
+        tokio::time::sleep(poll).await;
     }
 }
 
@@ -407,31 +768,39 @@ async fn wait_for_child_group(
     child: &ManagedAgentChild,
     group_path: &str,
     group_id: &str,
-    expected_roster_revision: u64,
+    owner_state: &GroupStateProjection,
     forbidden_agent_id: Option<&str>,
 ) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + GROUP_CONVERGENCE_TIMEOUT;
-    loop {
-        if child_group_matches(
-            loopback_http,
-            child,
+    let observation = wait_for_child_group_observation(
+        loopback_http,
+        child,
+        &ChildGroupExpectation {
             group_path,
-            expected_roster_revision,
+            group_id,
+            owner_state,
             forbidden_agent_id,
-        )
-        .await?
-        {
+        },
+        GROUP_CONVERGENCE_TIMEOUT,
+        GROUP_CONVERGENCE_POLL,
+    )
+    .await?;
+    match observation {
+        ChildGroupObservation::Strict => return Ok(()),
+        ChildGroupObservation::Equivalent => {
+            eprintln!(
+                "tic-tac-toe: managed-agent community {group_id} has an equivalent signed-public projection on child {} but a different signed head; launching without owner roster mutation",
+                child.agent_id
+            );
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(format!(
-                "managed-agent community {group_id} did not converge on child {} at roster revision {expected_roster_revision} within {} seconds",
-                child.agent_id,
-                GROUP_CONVERGENCE_TIMEOUT.as_secs()
-            ));
-        }
-        tokio::time::sleep(GROUP_CONVERGENCE_POLL).await;
+        ChildGroupObservation::Missing | ChildGroupObservation::PresentStale => {}
     }
+    Err(format!(
+        "managed-agent community {group_id} did not converge on child {} at roster revision {} within {} seconds ({observation:?})",
+        child.agent_id,
+        owner_state.state_revision,
+        GROUP_CONVERGENCE_TIMEOUT.as_secs()
+    ))
 }
 
 async fn remove_owner_member(
@@ -533,21 +902,6 @@ fn require_active_member(group: &Value, agent_id: &str, location: &str) -> Resul
     Ok(())
 }
 
-fn group_satisfies_convergence(
-    group: &Value,
-    child_agent_id: &str,
-    expected_roster_revision: u64,
-    forbidden_agent_id: Option<&str>,
-) -> Result<bool, String> {
-    let child_state = group_member_state(group, child_agent_id);
-    reject_banned_member(child_state, child_agent_id, "managed-agent child community")?;
-    let contains_forbidden_active = forbidden_agent_id
-        .is_some_and(|id| group_member_state(group, id) == GroupMemberState::Active);
-    Ok(child_state == GroupMemberState::Active
-        && !contains_forbidden_active
-        && roster_revision(group)? == expected_roster_revision)
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct MembershipBinding<'a> {
     attach_agent_id: &'a str,
@@ -627,8 +981,144 @@ async fn child_request_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use axum::{
+        extract::State, http::StatusCode as AxumStatusCode, response::IntoResponse, routing::get,
+        Json, Router,
+    };
 
     const PROXY_TEST_CHILD: &str = "BUZZ_LOOPBACK_PROXY_TEST_CHILD";
+
+    #[derive(Clone)]
+    struct ScriptedChildApi {
+        group_calls: Arc<AtomicUsize>,
+        group_responses: Arc<Vec<Option<Value>>>,
+        state_calls: Arc<AtomicUsize>,
+        state_responses: Arc<Vec<Option<Value>>>,
+    }
+
+    async fn scripted_group(State(script): State<ScriptedChildApi>) -> impl IntoResponse {
+        let index = script.group_calls.fetch_add(1, Ordering::SeqCst);
+        let response = script
+            .group_responses
+            .get(index)
+            .or_else(|| script.group_responses.last())
+            .cloned()
+            .flatten();
+        match response {
+            Some(group) => (AxumStatusCode::OK, Json(group)).into_response(),
+            None => (AxumStatusCode::NOT_FOUND, Json(json!({}))).into_response(),
+        }
+    }
+
+    async fn scripted_group_state(State(script): State<ScriptedChildApi>) -> impl IntoResponse {
+        let index = script.state_calls.fetch_add(1, Ordering::SeqCst);
+        let response = script
+            .state_responses
+            .get(index)
+            .or_else(|| script.state_responses.last())
+            .cloned()
+            .flatten();
+        match response {
+            Some(state) => (AxumStatusCode::OK, Json(state)).into_response(),
+            None => (AxumStatusCode::NOT_FOUND, Json(json!({}))).into_response(),
+        }
+    }
+
+    async fn spawn_scripted_child_api(
+        agent_id: &str,
+        group_responses: Vec<Option<Value>>,
+        state: Value,
+    ) -> (
+        tempfile::TempDir,
+        ManagedAgentChild,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        spawn_scripted_child_api_with_states(agent_id, group_responses, vec![Some(state)]).await
+    }
+
+    async fn spawn_scripted_child_api_with_states(
+        agent_id: &str,
+        group_responses: Vec<Option<Value>>,
+        state_responses: Vec<Option<Value>>,
+    ) -> (
+        tempfile::TempDir,
+        ManagedAgentChild,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted child API");
+        let address = listener.local_addr().expect("read child API address");
+        let data_dir = tempfile::tempdir().expect("create child data dir");
+        std::fs::write(
+            data_dir.path().join("api.port"),
+            format!("127.0.0.1:{}", address.port()),
+        )
+        .expect("write child api.port");
+        std::fs::write(data_dir.path().join("api-token"), "test-token")
+            .expect("write child api-token");
+
+        let group_calls = Arc::new(AtomicUsize::new(0));
+        let script = ScriptedChildApi {
+            group_calls: group_calls.clone(),
+            group_responses: Arc::new(group_responses),
+            state_calls: Arc::new(AtomicUsize::new(0)),
+            state_responses: Arc::new(state_responses),
+        };
+        let router = Router::new()
+            .route("/groups/{group_id}", get(scripted_group))
+            .route("/groups/{group_id}/state", get(scripted_group_state))
+            .with_state(script);
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve scripted child API");
+        });
+        let child = ManagedAgentChild {
+            agent_id: agent_id.to_string(),
+            data_dir: data_dir.path().to_path_buf(),
+        };
+        (data_dir, child, group_calls, task)
+    }
+
+    fn group_json(agent_id: &str, revision: u64, state: &str) -> Value {
+        json!({
+            "policy": { "confidentiality": "signed_public" },
+            "roster_revision": revision,
+            "members": [{ "agent_id": agent_id, "state": state }],
+        })
+    }
+
+    fn group_state_json(
+        group_id: &str,
+        revision: u64,
+        state_hash: &str,
+        roster_root: &str,
+    ) -> Value {
+        json!({
+            "group_id": group_id,
+            "genesis": {
+                "group_id": group_id,
+                "creator_agent_id": "owner",
+                "created_at": 1,
+                "creation_nonce": "nonce",
+            },
+            "roster_root": roster_root,
+            "policy_hash": "policy-hash",
+            "public_meta_hash": "public-meta-hash",
+            "security_binding": null,
+            "withdrawn": false,
+            "state_hash": state_hash,
+            "state_revision": revision,
+        })
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn loopback_http_client_bypasses_system_proxy() {
@@ -750,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn banned_child_is_rejected_on_owner_and_child_rosters() {
+    fn banned_child_is_rejected_on_owner_roster() {
         let child_id = "bb".repeat(32);
         let group = json!({
             "roster_revision": 7,
@@ -760,11 +1250,8 @@ mod tests {
 
         let owner_error = reject_banned_member(state, &child_id, "owner community roster")
             .expect_err("owner must not auto-repair a banned child");
-        let child_error = group_satisfies_convergence(&group, &child_id, 7, None)
-            .expect_err("child-side banned state must not converge");
 
         assert!(owner_error.contains("explicitly unban"));
-        assert!(child_error.contains("explicitly unban"));
     }
 
     #[test]
@@ -784,15 +1271,517 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stale_child_roster_revision_does_not_converge() {
+    #[tokio::test]
+    async fn transient_missing_group_converges_without_becoming_repairable() {
+        let group_id = "group";
         let child_id = "bb".repeat(32);
-        let group = json!({
-            "roster_revision": 6,
-            "members": [{ "agent_id": child_id, "state": "active" }],
-        });
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 22, "shared-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![None, Some(group_json(&child_id, 22, "active"))],
+            group_state_json(group_id, 22, "shared-hash", "shared-roster"),
+        )
+        .await;
 
-        assert!(!group_satisfies_convergence(&group, &child_id, 7, None).unwrap());
-        assert!(group_satisfies_convergence(&group, &child_id, 6, None).unwrap());
+        let observation = wait_for_child_group_observation(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("observe restored group");
+
+        assert_eq!(observation, ChildGroupObservation::Strict);
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn persistent_missing_group_is_the_only_repairable_observation() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 22, "shared-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, calls, task) =
+            spawn_scripted_child_api_with_states(&child_id, vec![None], vec![None]).await;
+
+        let observation = wait_for_child_group_observation(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("observe missing group");
+
+        assert_eq!(observation, ChildGroupObservation::Missing);
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn any_present_stale_snapshot_prevents_destructive_missing_repair() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 22, "owner-hash", "owner-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group_json(&child_id, 21, "active")), None],
+            group_state_json(group_id, 21, "child-hash", "child-roster"),
+        )
+        .await;
+
+        let observation = wait_for_child_group_observation(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("observe stale group");
+
+        assert_eq!(observation, ChildGroupObservation::PresentStale);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn authoritative_projection_accepts_equivalent_revision_history() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "owner-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group_json(&child_id, 22, "active"))],
+            group_state_json(group_id, 22, "child-hash", "shared-roster"),
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect("observe equivalent group");
+
+        assert_eq!(observation, ChildGroupObservation::Equivalent);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn policy_only_state_revision_can_converge_strictly() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "shared-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group_json(&child_id, 22, "active"))],
+            group_state_json(group_id, 26, "shared-hash", "shared-roster"),
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect("observe strict policy-only revision");
+
+        assert_eq!(observation, ChildGroupObservation::Strict);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn policy_only_state_revision_can_converge_equivalently() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 30, "owner-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group_json(&child_id, 22, "active"))],
+            group_state_json(group_id, 26, "child-hash", "shared-roster"),
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect("observe equivalent policy-only revision");
+
+        assert_eq!(observation, ChildGroupObservation::Equivalent);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn child_state_change_during_group_read_fails_closed() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "after-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api_with_states(
+            &child_id,
+            vec![Some(group_json(&child_id, 22, "active"))],
+            vec![
+                Some(group_state_json(
+                    group_id,
+                    25,
+                    "before-hash",
+                    "shared-roster",
+                )),
+                Some(group_state_json(
+                    group_id,
+                    26,
+                    "after-hash",
+                    "shared-roster",
+                )),
+            ],
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect("observe changing child state");
+
+        assert_eq!(observation, ChildGroupObservation::PresentStale);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn group_404_with_visible_state_is_not_repairable_missing() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "shared-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![None],
+            group_state_json(group_id, 26, "shared-hash", "shared-roster"),
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect("observe inconsistent 404");
+
+        assert_eq!(observation, ChildGroupObservation::PresentStale);
+        task.abort();
+    }
+
+    #[test]
+    fn owner_state_change_during_group_read_fails_closed() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let before = GroupStateProjection::from_value(
+            &group_state_json(group_id, 25, "before-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("before projection");
+        let after = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "after-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("after projection");
+        let group = group_json(&child_id, 22, "active");
+        let error = validate_owner_group_snapshot(
+            &before,
+            &group,
+            &after,
+            &OwnerGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                roster_revision: 22,
+                required_agent_id: &child_id,
+                required_member_state: GroupMemberState::Active,
+                forbidden_agent_id: None,
+            },
+        )
+        .expect_err("owner head change must fail closed");
+
+        assert!(error.contains("state changed"));
+    }
+
+    #[test]
+    fn authoritative_projection_requires_every_signed_public_field() {
+        let group_id = "group";
+        let owner = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "owner-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let mut equivalent = GroupStateProjection::from_value(
+            &group_state_json(group_id, 22, "child-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("child projection");
+        assert!(owner.authoritative_projection_eq(&equivalent));
+
+        equivalent.group_id = "other-group".to_string();
+        assert!(!owner.authoritative_projection_eq(&equivalent));
+        equivalent = owner.clone();
+        equivalent.genesis["creation_nonce"] = json!("other-nonce");
+        assert!(!owner.authoritative_projection_eq(&equivalent));
+        equivalent = owner.clone();
+        equivalent.roster_root = "other-roster".to_string();
+        assert!(!owner.authoritative_projection_eq(&equivalent));
+        equivalent = owner.clone();
+        equivalent.policy_hash = "other-policy".to_string();
+        assert!(!owner.authoritative_projection_eq(&equivalent));
+        equivalent = owner.clone();
+        equivalent.public_meta_hash = "other-meta".to_string();
+        assert!(!owner.authoritative_projection_eq(&equivalent));
+        equivalent = owner.clone();
+        equivalent.security_binding = json!({ "epoch": 1 });
+        assert!(!owner.authoritative_projection_eq(&equivalent));
+        equivalent = owner.clone();
+        equivalent.withdrawn = true;
+        assert!(!owner.authoritative_projection_eq(&equivalent));
+    }
+
+    #[test]
+    fn active_owner_mutation_is_allowed_only_for_persistent_missing() {
+        assert_eq!(
+            active_owner_action(ChildGroupObservation::Strict),
+            ActiveOwnerAction::Keep
+        );
+        assert_eq!(
+            active_owner_action(ChildGroupObservation::Equivalent),
+            ActiveOwnerAction::Keep
+        );
+        assert_eq!(
+            active_owner_action(ChildGroupObservation::PresentStale),
+            ActiveOwnerAction::RejectStale
+        );
+        assert_eq!(
+            active_owner_action(ChildGroupObservation::Missing),
+            ActiveOwnerAction::RepairMissing
+        );
+    }
+
+    #[tokio::test]
+    async fn member_equality_cannot_hide_authoritative_projection_mismatch() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "owner-hash", "owner-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group_json(&child_id, 22, "active"))],
+            group_state_json(group_id, 22, "child-hash", "child-roster"),
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect("observe mismatched group");
+
+        assert_eq!(observation, ChildGroupObservation::PresentStale);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn banned_child_state_fails_closed_before_equivalence() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 22, "shared-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group_json(&child_id, 22, "banned"))],
+            group_state_json(group_id, 22, "shared-hash", "shared-roster"),
+        )
+        .await;
+
+        let error = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect_err("banned child must fail closed");
+
+        assert!(error.contains("explicitly unban"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn withdrawn_child_state_cannot_converge_even_with_matching_head() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 22, "shared-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let mut withdrawn_state = group_state_json(group_id, 22, "shared-hash", "shared-roster");
+        withdrawn_state["withdrawn"] = json!(true);
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group_json(&child_id, 22, "active"))],
+            withdrawn_state,
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: None,
+            },
+        )
+        .await
+        .expect("observe withdrawn child state");
+
+        assert_eq!(observation, ChildGroupObservation::PresentStale);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn active_legacy_identity_blocks_equivalent_convergence() {
+        let group_id = "group";
+        let child_id = "bb".repeat(32);
+        let legacy_id = "aa".repeat(32);
+        let owner_state = GroupStateProjection::from_value(
+            &group_state_json(group_id, 26, "owner-hash", "shared-roster"),
+            group_id,
+        )
+        .expect("owner projection");
+        let group = json!({
+            "policy": { "confidentiality": "signed_public" },
+            "roster_revision": 22,
+            "members": [
+                { "agent_id": child_id, "state": "active" },
+                { "agent_id": legacy_id, "state": "active" },
+            ],
+        });
+        let (_data_dir, child, _calls, task) = spawn_scripted_child_api(
+            &child_id,
+            vec![Some(group)],
+            group_state_json(group_id, 22, "child-hash", "shared-roster"),
+        )
+        .await;
+
+        let observation = observe_child_group(
+            &loopback_http_client().expect("HTTP client"),
+            &child,
+            &ChildGroupExpectation {
+                group_path: &format!("/groups/{group_id}"),
+                group_id,
+                owner_state: &owner_state,
+                forbidden_agent_id: Some(&legacy_id),
+            },
+        )
+        .await
+        .expect("observe legacy identity");
+
+        assert_eq!(observation, ChildGroupObservation::PresentStale);
+        task.abort();
     }
 }
