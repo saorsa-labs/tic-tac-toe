@@ -522,6 +522,7 @@ pub fn run() {
             x0x_unban_group_member,
             x0x_leave_group,
             x0x_update_group,
+            x0x_connect_agent,
             x0x_list_contacts,
             x0x_add_contact,
             x0x_remove_contact,

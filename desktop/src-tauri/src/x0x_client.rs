@@ -518,13 +518,26 @@ impl X0xClient {
         path: &str,
         body: &B,
     ) -> Result<T, X0xClientError> {
+        self.post_json_with_timeout(path, body, REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Authenticated `POST` with an explicit bounded deadline. This exists for
+    /// daemon operations whose own documented bound exceeds the ordinary REST
+    /// request deadline (currently exact-AgentId connect only).
+    pub(crate) async fn post_json_with_timeout<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        timeout: Duration,
+    ) -> Result<T, X0xClientError> {
         let r = self.resolve()?;
         let url = format!("{}{}", r.api_base, path);
         let resp = self
             .http
             .post(&url)
             .bearer_auth(&r.token)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
             .json(body)
             .send()
             .await

@@ -60,6 +60,22 @@ struct FakeKillable {
     label: &'static str,
     log: Arc<Mutex<Vec<&'static str>>>,
 }
+
+struct FakeExitedChild {
+    status: String,
+}
+
+impl Killable for FakeExitedChild {
+    fn label(&self) -> &'static str {
+        DAEMON
+    }
+
+    fn try_wait(&mut self) -> Result<Option<String>, String> {
+        Ok(Some(self.status.clone()))
+    }
+
+    fn kill_and_reap(&mut self) {}
+}
 impl Killable for FakeKillable {
     fn label(&self) -> &'static str {
         self.label
@@ -91,6 +107,7 @@ struct SpawnPlan {
     write_artifacts: bool,
     boot_daemon: bool,
     fail: bool,
+    early_exit_status: Option<String>,
     port: u16,
     token: String,
 }
@@ -100,6 +117,7 @@ impl Default for SpawnPlan {
             write_artifacts: true,
             boot_daemon: true,
             fail: false,
+            early_exit_status: None,
             port: 4847,
             token: SENTINEL_TOKEN.to_string(),
         }
@@ -151,6 +169,11 @@ impl SidecarSpawner for FakeSidecarSpawner {
         }
         if plan.boot_daemon {
             self.booted.store(true, Ordering::SeqCst);
+        }
+        if let Some(status) = plan.early_exit_status {
+            return Ok(OwnedChild::from_killable(Box::new(FakeExitedChild {
+                status,
+            })));
         }
         Ok(OwnedChild::from_killable(Box::new(FakeKillable {
             label: DAEMON,
@@ -359,6 +382,10 @@ fn missing_artifacts_triggers_spawn() {
         args.iter().any(|a| a == INSTANCE_NAME),
         "spawned with --name {INSTANCE_NAME}: {args:?}",
     );
+    assert!(
+        args.iter().any(|a| a == "--skip-update-check"),
+        "app-owned daemon must suppress every self-update path: {args:?}",
+    );
 }
 
 // ── Readiness timeout kills/reaps the owned child (error mapping) ───────────
@@ -377,6 +404,26 @@ fn daemon_readiness_timeout_kills_owned_child() {
     assert!(f.spawner.spawn_calls.load(Ordering::SeqCst) >= 1);
     // The spawned child is dropped on the timeout path and reaped exactly once.
     assert_eq!(snapshot(&f.kill_log), vec![DAEMON]);
+}
+
+#[test]
+fn daemon_early_exit_is_reported_with_status_and_log_path() {
+    let f = harness(false);
+    {
+        let mut plan = lock(&f.spawner.plan);
+        plan.write_artifacts = false;
+        plan.boot_daemon = false;
+        plan.early_exit_status = Some("exit status: 23".to_string());
+    }
+    let sup = supervisor(&f);
+    let err = err_of(sup.bring_up(), "early daemon exit must fail startup");
+    let message = err.to_string();
+    assert!(message.contains("exit status: 23"), "{message}");
+    assert!(message.contains("x0xd.log"), "{message}");
+    assert!(
+        snapshot(&f.kill_log).is_empty(),
+        "an already-reaped child must not be killed again",
+    );
 }
 
 // ── Shutdown idempotency & ownership ────────────────────────────────────────
