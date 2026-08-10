@@ -45,6 +45,38 @@ export const CLI_ACP_INTERNAL_ERROR_COPY =
 const EMBEDDED_CODE_RE = /^Agent reported error \(code (-?\d+)\): /;
 /** Bare form of the standard JSON-RPC -32603 message (after stripping the ACP wrapper prefix). */
 const BARE_INTERNAL_ERROR = "Internal error";
+const NATIVE_PARALLELISM_ERROR_RE =
+  /^native x0x ACP supports exactly one worker; set agent parallelism to 1 \(stored value is \d+\)$/;
+
+type NativeParallelismRecoveryInput = {
+  backendType: "local" | "provider";
+  lastError: string | null;
+  personaParallelism?: number | null;
+  recordParallelism: number;
+};
+
+/**
+ * Whether retrying a stopped native agent will repair its saved parallelism.
+ *
+ * Native start snapshots an explicit linked-persona parallelism before it
+ * validates the one-worker contract. A record that was already edited to one
+ * is equally safe to retry. Keep this deliberately narrow so unrelated launch
+ * failures continue to render as errors instead of becoming Start controls.
+ */
+export function isNativeParallelismErrorRecoverableOnStart({
+  backendType,
+  lastError,
+  personaParallelism,
+  recordParallelism,
+}: NativeParallelismRecoveryInput): boolean {
+  if (backendType !== "local" || lastError == null) return false;
+
+  const effectiveParallelism = personaParallelism ?? recordParallelism;
+  return (
+    effectiveParallelism === 1 &&
+    NATIVE_PARALLELISM_ERROR_RE.test(lastError.trim())
+  );
+}
 
 function recoverEmbeddedCode(trimmed: string): {
   code: number;

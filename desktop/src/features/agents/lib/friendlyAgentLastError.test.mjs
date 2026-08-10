@@ -2,12 +2,80 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CLI_ACP_INTERNAL_ERROR_COPY,
+  COMPUTE_ACCESS_DENIED_COPY,
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
-  CLI_ACP_INTERNAL_ERROR_COPY,
+  isNativeParallelismErrorRecoverableOnStart,
   MODEL_NOT_FOUND_COPY,
-  COMPUTE_ACCESS_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
+
+const NATIVE_PARALLELISM_ERROR =
+  "native x0x ACP supports exactly one worker; set agent parallelism to 1 (stored value is 24)";
+
+test("linked persona parallelism makes a stale native error recoverable", () => {
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "local",
+      lastError: NATIVE_PARALLELISM_ERROR,
+      personaParallelism: 1,
+      recordParallelism: 24,
+    }),
+    true,
+  );
+});
+
+test("a corrected record makes its stale native error recoverable", () => {
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "local",
+      lastError: `  ${NATIVE_PARALLELISM_ERROR}\n`,
+      recordParallelism: 1,
+    }),
+    true,
+  );
+});
+
+test("invalid effective native parallelism keeps the error visible", () => {
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "local",
+      lastError: NATIVE_PARALLELISM_ERROR,
+      recordParallelism: 24,
+    }),
+    false,
+  );
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "local",
+      lastError: NATIVE_PARALLELISM_ERROR,
+      personaParallelism: 2,
+      recordParallelism: 1,
+    }),
+    false,
+  );
+});
+
+test("provider and unrelated errors remain genuine error states", () => {
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "provider",
+      lastError: NATIVE_PARALLELISM_ERROR,
+      personaParallelism: 1,
+      recordParallelism: 24,
+    }),
+    false,
+  );
+  assert.equal(
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: "local",
+      lastError: "harness exited with status 1",
+      personaParallelism: 1,
+      recordParallelism: 24,
+    }),
+    false,
+  );
+});
 
 test("null lastError → null", () => {
   assert.equal(friendlyAgentLastError(null), null);

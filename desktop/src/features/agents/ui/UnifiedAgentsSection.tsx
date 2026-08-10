@@ -2,7 +2,10 @@ import * as React from "react";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
-import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
+import {
+  friendlyAgentLastError,
+  isNativeParallelismErrorRecoverableOnStart,
+} from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
@@ -270,9 +273,18 @@ function AgentPersonaCard({
   const avatarUrl = agent
     ? firstAvatarUrl(persona.avatarUrl, profileQuery.data?.avatarUrl)
     : persona.avatarUrl;
-  const friendlyError = agent
-    ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
-    : null;
+  const nativeParallelismRecoversOnStart = agent
+    ? isNativeParallelismErrorRecoverableOnStart({
+        backendType: agent.backend.type,
+        lastError: agent.lastError,
+        personaParallelism: persona.parallelism,
+        recordParallelism: agent.parallelism,
+      })
+    : false;
+  const friendlyError =
+    agent && !nativeParallelismRecoversOnStart
+      ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
+      : null;
   const opensRuntimeTab = Boolean(agent && friendlyError && !isActive);
 
   return (
@@ -355,8 +367,15 @@ function StandaloneAgentCard({
     agent.lastError,
     agent.lastErrorCode,
   )?.copy;
+  const nativeParallelismRecoversOnStart =
+    isNativeParallelismErrorRecoverableOnStart({
+      backendType: agent.backend.type,
+      lastError: agent.lastError,
+      recordParallelism: agent.parallelism,
+    });
   const isActive = isManagedAgentActive(agent);
-  const opensRuntimeTab = Boolean(friendlyError && !isActive);
+  const visibleError = nativeParallelismRecoversOnStart ? null : friendlyError;
+  const opensRuntimeTab = Boolean(visibleError && !isActive);
 
   return (
     <AgentIdentityCard
@@ -365,7 +384,7 @@ function StandaloneAgentCard({
         <AgentRuntimeAvatarControl
           activeTestId={`agent-runtime-active-${agent.pubkey}`}
           avatarUrl={profileQuery.data?.avatarUrl}
-          errorLabel={friendlyError}
+          errorLabel={visibleError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
           isStarting={startingAgentPubkey === agent.pubkey}
