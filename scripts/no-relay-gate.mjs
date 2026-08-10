@@ -46,6 +46,7 @@ const PACKAGING_FILES = [
   "desktop/scripts/verify-macos-entitlements.sh",
   "scripts/dist.sh",
   "scripts/run-tic-tac-toe.sh",
+  "scripts/sidecar-validation.sh",
   "scripts/stage-sidecars.sh",
   "justfile",
 ];

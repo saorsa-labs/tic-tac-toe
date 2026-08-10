@@ -14,12 +14,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-X0X_DIR="$ROOT/../x0x"
+X0X_DIR="${X0X_DIR:-$ROOT/../x0x}"
 DESKTOP_DIR="$ROOT/desktop"
 DIST_DIR="$ROOT/dist"
 APP_BUNDLE_NAME="tic-tac-toe.app"
 TARGET_TRIPLE="$(rustc -vV | awk '/^host:/ { print $2 }')"
 SKIP_NOTARIZATION=false
+
+# shellcheck source=sidecar-validation.sh
+source "$ROOT/scripts/sidecar-validation.sh"
 
 usage() {
     echo "Usage: $0 [--skip-notarization]"
@@ -86,8 +89,8 @@ if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
     exit 1
 fi
 
-echo "Building x0xd release sidecar"
-cargo build --manifest-path "$X0X_DIR/Cargo.toml" --release --bin x0xd
+echo "Validating managed-agent sidecars and building x0xd release sidecar"
+PROFILE=release X0X_DIR="$X0X_DIR" "$ROOT/scripts/stage-sidecars.sh"
 
 X0XD_OUT="$X0X_DIR/target/release/x0xd"
 if [[ ! -x "$X0XD_OUT" ]]; then
@@ -103,9 +106,6 @@ else
     exit 1
 fi
 
-SIDECAR_PATH="$DESKTOP_DIR/src-tauri/binaries/x0xd-$TARGET_TRIPLE"
-install -m 755 "$X0XD_OUT" "$SIDECAR_PATH"
-
 echo "Building and signing the Tauri application"
 (
     cd "$DESKTOP_DIR"
@@ -117,6 +117,8 @@ if [[ ! -d "$APP_BUNDLE" ]]; then
     echo "Tauri app bundle not found: $APP_BUNDLE" >&2
     exit 1
 fi
+
+validate_managed_agent_sidecars "$APP_BUNDLE/Contents/MacOS" "$TARGET_TRIPLE" ""
 
 BUNDLED_X0XD="$APP_BUNDLE/Contents/MacOS/x0xd"
 if [[ "$($BUNDLED_X0XD --version)" != "$X0XD_VERSION" ]]; then
