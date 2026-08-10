@@ -146,7 +146,7 @@ test("all Welcome starters use the onboarding runtime preference", async () => {
       {
         id: starter.personaId,
         displayName: starter.name,
-        systemPrompt: `${starter.name} prompt`,
+        systemPrompt: "Previous built-in prompt",
         model: null,
         provider: null,
         runtime: null,
@@ -166,6 +166,8 @@ test("all Welcome starters use the onboarding runtime preference", async () => {
     assert.equal(input.teamId, WELCOME_TEAM_ID);
     assert.equal(input.spawnAfterCreate, false);
     assert.equal(input.startOnAppLaunch, false);
+    assert.match(input.systemPrompt, new RegExp(`You are ${starter.name}`));
+    assert.notEqual(input.systemPrompt, "Previous built-in prompt");
   }
 });
 
@@ -183,21 +185,24 @@ test("existing Welcome starter rematerializes runtime-specific fields atomically
 
   assert.deepEqual(
     welcomeStarterRuntimeUpdate(existing, {
-      name: "Fizz",
+      name: "Guide",
       agentCommand: "codex-acp",
       agentArgs: ["--new"],
       mcpCommand: "buzz-dev-mcp",
       model: "gpt-5.6-sol",
       provider: null,
+      systemPrompt: null,
     }),
     {
       pubkey: PUB_A,
+      name: "Guide",
       agentCommand: "codex-acp",
       harnessOverride: true,
       agentArgs: ["--new"],
       mcpCommand: "buzz-dev-mcp",
       model: "gpt-5.6-sol",
       provider: null,
+      systemPrompt: null,
     },
   );
 });
@@ -213,19 +218,21 @@ test("existing Welcome starter clears stale model and provider for Claude", () =
 
   assert.deepEqual(
     welcomeStarterRuntimeUpdate(existing, {
-      name: "Fizz",
+      name: "Guide",
       agentCommand: "claude-agent-acp",
       agentArgs: [],
       mcpCommand: "",
     }),
     {
       pubkey: PUB_A,
+      name: "Guide",
       agentCommand: "claude-agent-acp",
       harnessOverride: true,
       agentArgs: [],
       mcpCommand: "",
       model: null,
       provider: null,
+      systemPrompt: null,
     },
   );
 });
@@ -239,7 +246,7 @@ test("existing Welcome starter needs no update when runtime already matches", ()
 
   assert.equal(
     welcomeStarterRuntimeUpdate(existing, {
-      name: "Fizz",
+      name: "Guide",
       agentCommand: "codex-acp",
       agentArgs: ["--same"],
       mcpCommand: "buzz-dev-mcp",
@@ -250,12 +257,45 @@ test("existing Welcome starter needs no update when runtime already matches", ()
   );
 });
 
+test("existing Welcome starter adopts the neutral name when runtime matches", () => {
+  const existing = makeAgent({
+    name: "Previous guide name",
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    agentCommand: "codex-acp",
+    agentArgs: ["--same"],
+    systemPrompt: "Previous built-in prompt",
+  });
+
+  assert.deepEqual(
+    welcomeStarterRuntimeUpdate(existing, {
+      name: "Guide",
+      agentCommand: "codex-acp",
+      agentArgs: ["--same"],
+      mcpCommand: "buzz-dev-mcp",
+      model: null,
+      provider: null,
+      systemPrompt: "You are Guide.",
+    }),
+    {
+      pubkey: PUB_A,
+      name: "Guide",
+      agentCommand: "codex-acp",
+      harnessOverride: true,
+      agentArgs: ["--same"],
+      mcpCommand: "buzz-dev-mcp",
+      model: null,
+      provider: null,
+      systemPrompt: "You are Guide.",
+    },
+  );
+});
+
 test("welcome team starter definitions and role identities are stable", () => {
   assert.equal(WELCOME_TEAM_ID, "builtin-team:welcome");
   assert.deepEqual(WELCOME_TEAM_STARTERS, [
-    { name: "Fizz", personaId: "builtin:fizz", role: "lead" },
-    { name: "Honey", personaId: "builtin:honey", role: "teammate" },
-    { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
+    { name: "Guide", personaId: "builtin:fizz", role: "lead" },
+    { name: "X", personaId: "builtin:honey", role: "teammate" },
+    { name: "O", personaId: "builtin:bumble", role: "teammate" },
   ]);
 });
 

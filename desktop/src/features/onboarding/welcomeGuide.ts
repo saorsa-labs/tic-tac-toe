@@ -20,7 +20,7 @@ import type {
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
-export const WELCOME_GUIDE_AGENT_NAME = "Fizz";
+export const WELCOME_GUIDE_AGENT_NAME = "Guide";
 export const WELCOME_GUIDE_PERSONA_ID = "builtin:fizz";
 export const WELCOME_TEAM_ID = "builtin-team:welcome";
 export const WELCOME_GUIDE_INTRO_MARKER = "buzz-welcome-intro.v1";
@@ -28,7 +28,7 @@ const LEGACY_WELCOME_GUIDE_AGENT_NAME = "Kit";
 export const LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT =
   "You are Kit, Sprout's friendly welcome guide. Help new users understand the community, channels, messages, and agents. Keep introductions concise, practical, and warm.";
 export const WELCOME_GUIDE_INTRO_MESSAGE =
-  "Hi, I'm Fizz. Welcome to tic-tac-toe, an x0x app.\n\nI can help you get oriented, answer questions, and make the first few steps feel less mysterious.\n\nFeel free to ask me what else you can do here, or just talk through what you want to build.";
+  "Hi, I'm Guide. Welcome to tic-tac-toe, an x0x app.\n\nI can help you get oriented, answer questions, and make the first few steps feel less mysterious.\n\nFeel free to ask me what else you can do here, or just talk through what you want to build.";
 
 export type WelcomeTeamRole = "lead" | "teammate";
 
@@ -40,10 +40,19 @@ export type WelcomeTeamStarterDefinition = Readonly<{
 
 /** Stable identities used to provision the Rust-seeded Welcome Team. */
 export const WELCOME_TEAM_STARTERS = [
-  { name: "Fizz", personaId: "builtin:fizz", role: "lead" },
-  { name: "Honey", personaId: "builtin:honey", role: "teammate" },
-  { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
+  { name: "Guide", personaId: "builtin:fizz", role: "lead" },
+  { name: "X", personaId: "builtin:honey", role: "teammate" },
+  { name: "O", personaId: "builtin:bumble", role: "teammate" },
 ] as const satisfies readonly WelcomeTeamStarterDefinition[];
+
+const WELCOME_TEAM_SYSTEM_PROMPTS: Readonly<Record<string, string>> = {
+  "builtin:fizz":
+    "You are Guide, a practical teammate who helps people turn ideas into action. Be upbeat, clear, collaborative, and concise.",
+  "builtin:honey":
+    "You are X, a thoughtful teammate who helps people write clearly, organize ideas, brainstorm, and prepare for conversations. Be kind, creative, and concise.",
+  "builtin:bumble":
+    "You are O, a curious teammate who researches questions, compares options, checks assumptions, and explains useful evidence clearly. Be candid when uncertain.",
+};
 
 export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
@@ -109,7 +118,7 @@ export async function getWelcomeTeamAgentPubkeys() {
     .map((agent) => agent.pubkey);
 }
 
-/** Legacy Fizz/Kit lookup retained for existing channel reuse checks. */
+/** Legacy built-in/Kit lookup retained for existing channel reuse checks. */
 export async function getWelcomeGuideAgentPubkeys() {
   return (await listManagedAgents())
     .filter(isWelcomeGuideAgent)
@@ -191,6 +200,8 @@ export async function buildWelcomeStarterCreateInput(
   return {
     ...(await buildInstanceInputForDefinition(persona, runtime)),
     name: starter.name,
+    systemPrompt:
+      WELCOME_TEAM_SYSTEM_PROMPTS[starter.personaId] ?? persona.systemPrompt,
     teamId: WELCOME_TEAM_ID,
     spawnAfterCreate: false,
     startOnAppLaunch: false,
@@ -208,24 +219,29 @@ export function welcomeStarterRuntimeUpdate(
   const desiredModel = desired.model ?? null;
   const desiredProvider = desired.provider ?? null;
   const desiredMcpCommand = desired.mcpCommand ?? "";
+  const desiredSystemPrompt = desired.systemPrompt ?? null;
   if (
+    existing.name === desired.name &&
     existing.agentCommand === desired.agentCommand &&
     existing.agentArgs.join(",") === desiredArgs.join(",") &&
     existing.model === desiredModel &&
     existing.provider === desiredProvider &&
-    existing.mcpCommand === desiredMcpCommand
+    existing.mcpCommand === desiredMcpCommand &&
+    existing.systemPrompt === desiredSystemPrompt
   ) {
     return null;
   }
 
   return {
     pubkey: existing.pubkey,
+    name: desired.name,
     agentCommand: desired.agentCommand,
     harnessOverride: true,
     agentArgs: desiredArgs,
     mcpCommand: desiredMcpCommand,
     model: desiredModel,
     provider: desiredProvider,
+    systemPrompt: desiredSystemPrompt,
   };
 }
 
@@ -275,11 +291,11 @@ async function provisionWelcomeTeam(
     const created = await createManagedAgent(desired);
     agents.push(created.agent);
   }
-  const [lead, honey, bumble] = agents;
-  if (!lead || !honey || !bumble) {
+  const [lead, cross, circle] = agents;
+  if (!lead || !cross || !circle) {
     throw new Error("Welcome Team provisioning did not return every starter.");
   }
-  const welcomeAgents: WelcomeTeamAgents = [lead, honey, bumble];
+  const welcomeAgents: WelcomeTeamAgents = [lead, cross, circle];
   const leadPubkey = lead.pubkey;
   for (const index of [1, 2] as const) {
     const teammate = welcomeAgents[index];

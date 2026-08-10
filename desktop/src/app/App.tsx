@@ -428,7 +428,7 @@ function CommunityApp({
   const isEnteringCurtain = transaction?.stage === "entering";
 
   // The app mounts (and starts loading data) beneath the splash overlay; the
-  // overlay just keeps the bee on screen long enough to be seen, then fades.
+  // overlay keeps the product mark on screen long enough to be seen, then fades.
   // Community switches keep their quiet gate.
   const showBootSplashOverlay =
     bootSplashPhase !== "done" && !isCommunitySwitch;

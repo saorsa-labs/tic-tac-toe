@@ -5,31 +5,23 @@ import {
   type WelcomeKickoffStagePhase,
 } from "@/features/onboarding/useWelcomeKickoffStage";
 import { cn } from "@/shared/lib/cn";
-
-type StageCharacter = {
-  name: string;
-  animationUrl: string;
-};
-
-/** Same animated APNGs the "Meet your starter team" onboarding step uses. */
-const STAGE_CHARACTERS: readonly StageCharacter[] = [
-  { name: "Fizz", animationUrl: "/onboarding/starter-team/fizz.png" },
-  { name: "Honey", animationUrl: "/onboarding/starter-team/honey.png" },
-  { name: "Bumble", animationUrl: "/onboarding/starter-team/bumble.png" },
-];
+import {
+  STARTER_TEAM_PRESENTATION,
+  StarterTeamMark,
+} from "./StarterTeamPresentation";
 
 const STAGE_EXIT_ANIMATION = "motion-kickoff-stage-exit";
 
 /**
- * The welcome team characters standing on top of the Welcome composer banner
+ * The Welcome Team marks standing on top of the Welcome composer banner
  * while the team is being set up. Positioned relative to the banner wrapper
  * (`bottom-full` = feet on the banner's top edge) and purely decorative —
  * the banner's own copy carries the setup status for screen readers.
  *
- * Placeholder choreography: staggered rise-from-below entrance per character
- * (CSS `motion-kickoff-character-enter`, delay via `--stagger-index`), whole
+ * Placeholder choreography: staggered rise-from-below entrance per mark (CSS
+ * `motion-kickoff-character-enter`, delay via `--stagger-index`), whole
  * row crossfades out on either resolution — the first agent message landing,
- * or the wait timing out. The characters must not linger after a timeout: a
+ * or the wait timing out. The marks must not linger after a timeout: a
  * stage that stays up implies a team is still coming when none is.
  */
 export function WelcomeKickoffStage({
@@ -61,15 +53,15 @@ export function WelcomeKickoffStage({
       data-testid="welcome-kickoff-stage"
       onAnimationEnd={handleAnimationEnd}
     >
-      {STAGE_CHARACTERS.map((character, index) => (
-        <img
-          alt=""
-          className="motion-kickoff-character-enter h-16 w-16 object-contain"
-          data-testid={`welcome-kickoff-stage-${character.name.toLowerCase()}`}
-          key={character.name}
-          src={character.animationUrl}
+      {STARTER_TEAM_PRESENTATION.map((member, index) => (
+        <div
+          className="motion-kickoff-character-enter"
+          data-testid={`welcome-kickoff-stage-${member.id}`}
+          key={member.id}
           style={{ "--stagger-index": index } as React.CSSProperties}
-        />
+        >
+          <StarterTeamMark className="h-16 w-16" mark={member.mark} />
+        </div>
       ))}
     </div>
   );

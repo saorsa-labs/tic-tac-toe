@@ -17,8 +17,6 @@ import {
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { setNativeGroupDisplayName } from "@/features/profile/nativeSocialApi";
 import { getIdentity } from "@/shared/api/tauriIdentity";
-import { listPersonas } from "@/shared/api/tauriPersonas";
-import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
@@ -31,6 +29,10 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
+import {
+  STARTER_TEAM_PRESENTATION,
+  StarterTeamMark,
+} from "./StarterTeamPresentation";
 
 function isGroupMembershipDeniedError(error: unknown): boolean {
   return (
@@ -39,12 +41,6 @@ function isGroupMembershipDeniedError(error: unknown): boolean {
       error.message.includes("membership required"))
   );
 }
-
-const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
-  Fizz: "/onboarding/starter-team/fizz.png",
-  Honey: "/onboarding/starter-team/honey.png",
-  Bumble: "/onboarding/starter-team/bumble.png",
-};
 
 /** Fade duration for the "entering" curtain over the mounting app. */
 const ENTERING_CURTAIN_FADE_MS = 500;
@@ -142,9 +138,6 @@ export function CommunityOnboardingFlow({
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
-  const [starterPersonas, setStarterPersonas] = React.useState<AgentPersona[]>(
-    [],
-  );
   const [isPending, setIsPending] = React.useState(false);
   const [starterChannelFailureCount, setStarterChannelFailureCount] =
     React.useState(0);
@@ -157,28 +150,6 @@ export function CommunityOnboardingFlow({
   const avatarEditorContentRef = React.useRef<HTMLDivElement | null>(null);
   const [avatarEditorDialogHeight, setAvatarEditorDialogHeight] =
     React.useState<number | null>(null);
-
-  // Also fetch on "entering": the curtain is a fresh mount of this component,
-  // so the team-intro fetch from the pre-curtain instance isn't in this state.
-  const isTeamIntroVisible =
-    transaction?.stage === "team-intro" ||
-    transaction?.stage === "finalizing" ||
-    transaction?.stage === "entering";
-  React.useEffect(() => {
-    if (!isTeamIntroVisible) return;
-    void listPersonas()
-      .then((personas) =>
-        setStarterPersonas(
-          ["Fizz", "Honey", "Bumble"].flatMap((name) => {
-            const persona = personas.find(
-              (candidate) => candidate.displayName === name,
-            );
-            return persona ? [persona] : [];
-          }),
-        ),
-      )
-      .catch(() => setStarterPersonas([]));
-  }, [isTeamIntroVisible]);
 
   React.useEffect(() => {
     if (transaction?.stage === "connecting") onConnect();
@@ -534,38 +505,23 @@ export function CommunityOnboardingFlow({
                 Your starter team will help you get oriented.
               </p>
               <div className="flex w-full flex-1 items-center justify-center py-10">
-                {starterPersonas.length > 0 ? (
-                  <div className="flex flex-wrap justify-center gap-8">
-                    {starterPersonas.map((persona) => {
-                      const animationUrl =
-                        STARTER_PERSONA_ANIMATIONS[persona.displayName];
-                      return (
-                        <div
-                          className="flex w-40 flex-col items-center gap-3"
-                          key={persona.id}
-                        >
-                          {animationUrl ? (
-                            <img
-                              alt={`${persona.displayName} animated character`}
-                              className="h-40 w-40 object-contain"
-                              data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
-                              src={animationUrl}
-                            />
-                          ) : (
-                            <ProfileAvatar
-                              avatarUrl={persona.avatarUrl}
-                              className="h-28 w-28 text-3xl"
-                              label={persona.displayName}
-                            />
-                          )}
-                          <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
-                            {persona.displayName}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
+                <div className="flex flex-wrap justify-center gap-8">
+                  {STARTER_TEAM_PRESENTATION.map((member) => (
+                    <div
+                      className="flex w-40 flex-col items-center gap-3"
+                      data-testid={`starter-team-${member.id}`}
+                      key={member.id}
+                    >
+                      <StarterTeamMark
+                        className="h-28 w-28"
+                        mark={member.mark}
+                      />
+                      <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
+                        {member.label}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
               {transaction.error ? (
                 <p className="text-sm text-destructive">
