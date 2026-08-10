@@ -166,9 +166,13 @@ pub(super) async fn start_local_agent_with_preflight(
         .map_err(|e| e.to_string())?
         .clone()
         .ok_or_else(|| "no native community is active".to_string())?;
-    let native_launch =
-        crate::managed_agents::prepare_managed_agent_launch(app, &record_snapshot, &group_id)
-            .await?;
+    let native_launch = crate::managed_agents::prepare_managed_agent_launch(
+        app,
+        &record_snapshot,
+        &group_id,
+        crate::managed_agents::GroupBindIntent::EnsureAttached,
+    )
+    .await?;
 
     let _store_guard = state
         .managed_agents_store_lock

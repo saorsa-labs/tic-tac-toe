@@ -22,8 +22,9 @@ use commands::*;
 use deep_link::handle_deep_link_url;
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, restart_managed_agent_runtime,
-    start_managed_agent_runtime, stop_managed_agent_runtime, try_regenerate_nest,
+    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
+    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
+    try_regenerate_nest,
 };
 use shutdown::shut_down_app;
 use std::sync::{
@@ -364,14 +365,13 @@ pub fn run() {
                 });
             }
 
-            // Defer launch-time agent restoration until the frontend binds the
-            // daemon's active named group. Starting here would race native
-            // identity/group initialization. Preserve boot-time repository and
-            // identity recovery gates by marking restoration pending only when
-            // both allow it.
+            // Allow frontend-driven launch reconciliation only after the
+            // boot-time repository and identity-recovery gates pass. This is a
+            // session-long permission, not a one-shot pending bit: each
+            // explicit community-list refresh may safely retry failed pairs.
             if restore_agents && !recovery_mode {
                 state
-                    .managed_agent_restore_pending
+                    .managed_agent_auto_restore_allowed
                     .store(true, Ordering::Release);
             }
 
@@ -454,6 +454,7 @@ pub fn run() {
             copy_text_to_clipboard,
             list_managed_agents,
             list_managed_agent_runtimes,
+            reconcile_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
             restart_managed_agent_runtime,

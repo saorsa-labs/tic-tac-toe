@@ -267,6 +267,66 @@ fn banned_child_is_rejected_on_owner_roster() {
 }
 
 #[test]
+fn startup_membership_eligibility_requires_exact_active_child() {
+    let child_id = "bb".repeat(32);
+    let other_id = "cc".repeat(32);
+
+    assert!(owner_group_has_existing_active_member(
+        &group_json(&child_id, 7, "active"),
+        "group",
+        &child_id,
+    )
+    .expect("parse active roster"));
+    assert!(!owner_group_has_existing_active_member(
+        &group_json(&other_id, 7, "active"),
+        "group",
+        &child_id,
+    )
+    .expect("parse absent child"));
+    for state in ["invited", "banned", "removed"] {
+        assert!(!owner_group_has_existing_active_member(
+            &group_json(&child_id, 7, state),
+            "group",
+            &child_id,
+        )
+        .expect("parse non-active child"));
+    }
+}
+
+#[test]
+fn startup_membership_eligibility_fails_on_malformed_group_shape() {
+    let child_id = "bb".repeat(32);
+    let missing_members = json!({
+        "policy": { "confidentiality": "signed_public" },
+    });
+    assert!(owner_group_has_existing_active_member(&missing_members, "group", &child_id).is_err());
+
+    let malformed_member = json!({
+        "policy": { "confidentiality": "signed_public" },
+        "members": [{ "agent_id": child_id, "state": 7 }],
+    });
+    assert!(owner_group_has_existing_active_member(&malformed_member, "group", &child_id).is_err());
+
+    let unsupported = json!({
+        "policy": { "confidentiality": "secure" },
+        "members": [],
+    });
+    assert!(owner_group_has_existing_active_member(&unsupported, "group", &child_id).is_err());
+}
+
+#[test]
+fn existing_only_never_allows_owner_roster_mutation() {
+    assert!(owner_roster_mutation_allowed(
+        &GroupBindIntent::EnsureAttached
+    ));
+    assert!(!owner_roster_mutation_allowed(
+        &GroupBindIntent::ExistingOnly {
+            expected_child_agent_id: "bb".repeat(32),
+        }
+    ));
+}
+
+#[test]
 fn banned_legacy_member_is_not_an_active_cleanup_target() {
     let legacy_id = "aa".repeat(32);
     let group = json!({

@@ -107,6 +107,17 @@ pub struct ManagedAgentRuntimeLifecycleObserverPayload {
     pub error: Option<String>,
 }
 
+/// Explicit native group requested by frontend startup reconciliation.
+///
+/// Reconciliation never falls back to `AppState.active_group_id`: a caller
+/// must submit every group it wants warmed so multi-community startup is
+/// deterministic and auditable.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentCommunityTarget {
+    pub group_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeReceipt {

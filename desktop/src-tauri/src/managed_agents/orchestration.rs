@@ -1,14 +1,8 @@
-//! Managed-agent native identity binding for community-scoped runtimes.
-//!
-//! A managed-agent record pubkey is a desktop record key, not an x0x AgentId.
-//! Before the ACP harness starts, this module provisions the record's dedicated
-//! x0xd child, establishes mutual
-//! contact consent with the owner daemon, adds the child's actual AgentId to
-//! the requested community, and waits until the child has installed that
-//! community state.
-
+//! Native identity binding for community-scoped managed-agent runtimes.
+//! Record pubkeys are desktop keys, so launch uses each agent's dedicated x0xd
+//! child AgentId and waits for the requested community to converge there.
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use reqwest::{Method, StatusCode};
@@ -16,8 +10,8 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use super::agent_identity::{
-    extract_agent_id, provision_managed_agent_child, read_child_port, read_child_token,
-    ManagedAgentChild,
+    extract_agent_id, managed_agent_child_identity, provision_managed_agent_child, read_child_port,
+    read_child_token, ManagedAgentChild,
 };
 use super::{load_managed_agents, ManagedAgentRecord, RespondTo};
 use crate::local_stack::loopback_api_base;
@@ -25,6 +19,12 @@ use crate::x0x_client::{X0xClient, X0xClientError};
 
 #[path = "orchestration_catchup.rs"]
 mod catchup;
+#[path = "orchestration_existing.rs"]
+mod existing;
+pub(crate) use existing::{
+    owner_group_has_existing_active_member, GroupBindIntent, ManagedAgentLaunchContext,
+};
+use existing::{owner_roster_mutation_allowed, require_signed_public_group, resolve_launch_child};
 
 const CHILD_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const GROUP_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -33,21 +33,6 @@ const GROUP_CONVERGENCE_POLL: Duration = Duration::from_millis(250);
 /// communities are visible. Never rewrite an already-active owner roster on
 /// that first transient gap; give the child a bounded restore window first.
 const CHILD_GROUP_RESTORE_GRACE: Duration = Duration::from_secs(3);
-
-/// Native launch values that are safe to pass to the ACP harness.
-///
-/// The bearer token is deliberately absent. The harness resolves it
-/// transiently from `child_data_dir`, exactly as the desktop does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ManagedAgentLaunchContext {
-    pub(crate) child_agent_id: String,
-    pub(crate) owner_agent_id: String,
-    pub(crate) child_data_dir: PathBuf,
-    pub(crate) group_id: String,
-    /// Spawn-effective inbound AgentIds. Managed-record pubkeys are translated
-    /// to their dedicated child identities without mutating persisted records.
-    pub(crate) effective_respond_to_allowlist: Vec<String>,
-}
 
 #[derive(Debug)]
 struct ChildHttpError {
@@ -69,19 +54,16 @@ pub(crate) async fn prepare_managed_agent_launch(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     group_id: &str,
+    intent: GroupBindIntent,
 ) -> Result<ManagedAgentLaunchContext, String> {
     if group_id.trim().is_empty() {
         return Err("managed-agent launch requires a native community group id".to_string());
     }
 
-    let pubkey = record.pubkey.clone();
-    let child = tokio::task::spawn_blocking(move || provision_managed_agent_child(&pubkey))
-        .await
-        .map_err(|error| format!("managed-agent child provisioning task failed: {error}"))?
-        .map_err(|error| format!("managed-agent child provisioning failed: {error}"))?;
+    let child = resolve_launch_child(record.pubkey.clone(), intent.clone()).await?;
 
     let effective_respond_to_allowlist =
-        resolve_effective_respond_to_allowlist(app, record, &child).await?;
+        resolve_effective_respond_to_allowlist(app, record, &child, &intent).await?;
 
     let loopback_http = loopback_http_client()?;
     let owner_client = X0xClient::new(loopback_http.clone());
@@ -100,6 +82,7 @@ pub(crate) async fn prepare_managed_agent_launch(
         &child,
         &owner_agent_id,
         group_id,
+        &intent,
     )
     .await?;
 
@@ -128,6 +111,7 @@ async fn resolve_effective_respond_to_allowlist(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     current_child: &ManagedAgentChild,
+    intent: &GroupBindIntent,
 ) -> Result<Vec<String>, String> {
     let normalized = super::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
     if record.respond_to != RespondTo::Allowlist {
@@ -148,13 +132,23 @@ async fn resolve_effective_respond_to_allowlist(
             current_child.agent_id.clone()
         } else {
             let teammate_pubkey = managed_record.pubkey.clone();
-            tokio::task::spawn_blocking(move || provision_managed_agent_child(&teammate_pubkey))
-                .await
-                .map_err(|error| format!("managed-agent allowlist identity task failed: {error}"))?
-                .map_err(|error| {
-                    format!("managed-agent allowlist identity provisioning failed: {error}")
-                })?
-                .agent_id
+            let allowlist_intent = intent.clone();
+            tokio::task::spawn_blocking(move || match allowlist_intent {
+                GroupBindIntent::EnsureAttached => provision_managed_agent_child(&teammate_pubkey)
+                    .map_err(|error| {
+                        format!("managed-agent allowlist identity provisioning failed: {error}")
+                    }),
+                GroupBindIntent::ExistingOnly { .. } => {
+                    managed_agent_child_identity(&teammate_pubkey).ok_or_else(|| {
+                        format!(
+                            "managed-agent allowlist entry {teammate_pubkey} has no durable native identity"
+                        )
+                    })
+                }
+            })
+            .await
+            .map_err(|error| format!("managed-agent allowlist identity task failed: {error}"))??
+            .agent_id
         };
         translated.insert(entry.clone(), child_agent_id);
     }
@@ -255,6 +249,7 @@ async fn bind_child_to_group(
     child: &ManagedAgentChild,
     owner_agent_id: &str,
     group_id: &str,
+    intent: &GroupBindIntent,
 ) -> Result<(), String> {
     let binding = membership_binding(&record.pubkey, &child.agent_id, owner_agent_id);
     let encoded_group = crate::path_segment(group_id)?;
@@ -263,13 +258,13 @@ async fn bind_child_to_group(
         .get_json(&group_path, &[])
         .await
         .map_err(|error| format!("community lookup failed: {error}"))?;
-    if owner_group
-        .pointer("/policy/confidentiality")
-        .and_then(Value::as_str)
-        != Some("signed_public")
+    require_signed_public_group(&owner_group, group_id)?;
+    if !owner_roster_mutation_allowed(intent)
+        && !owner_group_has_existing_active_member(&owner_group, group_id, binding.attach_agent_id)?
     {
         return Err(format!(
-            "community {group_id} is not signed_public; managed-agent direct attachment is unsupported"
+            "managed-agent child {} is no longer active in owner community {group_id}; startup reconciliation will not attach it",
+            binding.attach_agent_id
         ));
     }
 
@@ -328,6 +323,12 @@ async fn bind_child_to_group(
                         child.agent_id
                     ));
                 }
+                ActiveOwnerAction::RepairMissing if !owner_roster_mutation_allowed(intent) => {
+                    return Err(format!(
+                        "managed-agent community {group_id} is absent on child {}; startup reconciliation will not rewrite the active owner roster",
+                        child.agent_id
+                    ));
+                }
                 ActiveOwnerAction::RepairMissing => {
                     // Only a group that remained absent for the entire restore
                     // grace can use the legacy bootstrap repair. Re-read the
@@ -356,6 +357,12 @@ async fn bind_child_to_group(
                 }
             }
         }
+        GroupMemberState::Absent if !owner_roster_mutation_allowed(intent) => {
+            return Err(format!(
+                "managed-agent child {} is not active in owner community {group_id}; startup reconciliation will not attach it",
+                binding.attach_agent_id
+            ));
+        }
         GroupMemberState::Absent => true,
         GroupMemberState::Banned => {
             return Err(format!(
@@ -370,6 +377,11 @@ async fn bind_child_to_group(
             ));
         }
     };
+    if needs_attach && !owner_roster_mutation_allowed(intent) {
+        return Err(format!(
+            "managed-agent community {group_id} requires an owner roster mutation that startup reconciliation forbids"
+        ));
+    }
     if needs_attach {
         let members_path = format!("{group_path}/members");
         let add_body = group_member_body(binding.attach_agent_id, &record.name);
@@ -417,61 +429,50 @@ async fn bind_child_to_group(
     // assumption that it was the AgentId. Remove that stale roster entry only
     // after the actual child is confirmed installed, so migration cannot leave
     // the community without a working managed-agent member.
-    if let Some(legacy_agent_id) = binding.remove_legacy_agent_id {
-        owner_group = owner_client
-            .get_json(&group_path, &[])
-            .await
-            .map_err(|error| format!("community migration lookup failed: {error}"))?;
-        if group_member_state(&owner_group, legacy_agent_id) == GroupMemberState::Active {
-            remove_owner_member(owner_client, &encoded_group, legacy_agent_id).await?;
+    if owner_roster_mutation_allowed(intent) {
+        if let Some(legacy_agent_id) = binding.remove_legacy_agent_id {
             owner_group = owner_client
                 .get_json(&group_path, &[])
                 .await
-                .map_err(|error| format!("community post-migration lookup failed: {error}"))?;
-            require_active_member(
-                &owner_group,
-                binding.attach_agent_id,
-                "owner community roster after migration",
-            )?;
-            expected_roster_revision = roster_revision(&owner_group)?;
-            owner_state = read_owner_group_state(
-                owner_client,
-                &OwnerGroupExpectation {
-                    group_path: &group_path,
+                .map_err(|error| format!("community migration lookup failed: {error}"))?;
+            if group_member_state(&owner_group, legacy_agent_id) == GroupMemberState::Active {
+                remove_owner_member(owner_client, &encoded_group, legacy_agent_id).await?;
+                owner_group = owner_client
+                    .get_json(&group_path, &[])
+                    .await
+                    .map_err(|error| format!("community post-migration lookup failed: {error}"))?;
+                require_active_member(
+                    &owner_group,
+                    binding.attach_agent_id,
+                    "owner community roster after migration",
+                )?;
+                expected_roster_revision = roster_revision(&owner_group)?;
+                owner_state = read_owner_group_state(
+                    owner_client,
+                    &OwnerGroupExpectation {
+                        group_path: &group_path,
+                        group_id,
+                        roster_revision: expected_roster_revision,
+                        required_agent_id: binding.attach_agent_id,
+                        required_member_state: GroupMemberState::Active,
+                        forbidden_agent_id: Some(legacy_agent_id),
+                    },
+                )
+                .await?;
+                wait_for_child_group(
+                    loopback_http,
+                    child,
+                    &group_path,
                     group_id,
-                    roster_revision: expected_roster_revision,
-                    required_agent_id: binding.attach_agent_id,
-                    required_member_state: GroupMemberState::Active,
-                    forbidden_agent_id: Some(legacy_agent_id),
-                },
-            )
-            .await?;
-            wait_for_child_group(
-                loopback_http,
-                child,
-                &group_path,
-                group_id,
-                &owner_state,
-                Some(legacy_agent_id),
-            )
-            .await?;
+                    &owner_state,
+                    Some(legacy_agent_id),
+                )
+                .await?;
+            }
         }
     }
 
     Ok(())
-}
-
-fn require_signed_public_group(group: &Value, group_id: &str) -> Result<(), String> {
-    if group
-        .pointer("/policy/confidentiality")
-        .and_then(Value::as_str)
-        == Some("signed_public")
-    {
-        return Ok(());
-    }
-    Err(format!(
-        "community {group_id} is not signed_public; managed-agent direct attachment is unsupported"
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

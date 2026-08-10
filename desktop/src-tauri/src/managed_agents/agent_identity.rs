@@ -709,6 +709,74 @@ pub(crate) fn provision_managed_agent_child(
     Ok(identity)
 }
 
+/// Bring up a managed-agent child only when its durable identity already
+/// exists and still matches the identity observed by startup reconciliation.
+///
+/// Unlike [`provision_managed_agent_child`], this path never creates the data
+/// directory and performs a second key-file recovery immediately before the
+/// daemon is started. The exact AgentId is checked again after bring-up, so a
+/// stale or replaced key can never be accepted as the intended group member.
+pub(crate) fn bring_up_existing_managed_agent_child(
+    pubkey: &str,
+    expected_agent_id: &str,
+) -> Result<ManagedAgentChild, AgentChildError> {
+    let instance = managed_agent_instance(pubkey);
+    let mut children = MANAGED_AGENT_CHILDREN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(handle) = children.get(&instance) {
+        if handle.agent_id != expected_agent_id
+            || handle.agent_id == instance
+            || !is_canonical_lower_hex_id(&handle.agent_id)
+        {
+            return Err(AgentChildError::InvalidAgentCard {
+                reason: "running child identity no longer matches the durable startup identity"
+                    .to_string(),
+            });
+        }
+        return Ok(ManagedAgentChild {
+            agent_id: handle.agent_id.clone(),
+            data_dir: handle.data_dir.clone(),
+        });
+    }
+
+    let bounded_instance = bounded_agent_child_instance(&instance);
+    let home_dir = dirs::home_dir().ok_or(AgentChildError::NoDataDir)?;
+    let key_path = agent_child_identity_dir(&home_dir, &bounded_instance).join("agent.key");
+    let data_dir = agent_child_data_dir(&bounded_instance).ok_or(AgentChildError::NoDataDir)?;
+    let recovered = recover_managed_agent_child_identity(&instance, &key_path, data_dir.clone())
+        .filter(|identity| identity.agent_id == expected_agent_id)
+        .ok_or_else(|| AgentChildError::InvalidAgentCard {
+            reason: "durable managed-agent identity disappeared or changed before startup"
+                .to_string(),
+        })?;
+
+    let cfg = AgentChildConfig::resolve(&instance)?;
+    if cfg.data_dir != recovered.data_dir {
+        return Err(AgentChildError::InvalidAgentCard {
+            reason: "durable managed-agent identity resolved to an unexpected data directory"
+                .to_string(),
+        });
+    }
+    let supervisor = std_supervisor(cfg);
+    let handle = supervisor.bring_up()?;
+    if handle.agent_id != expected_agent_id
+        || handle.agent_id == instance
+        || !is_canonical_lower_hex_id(&handle.agent_id)
+    {
+        return Err(AgentChildError::InvalidAgentCard {
+            reason: "started child identity does not match the durable startup identity"
+                .to_string(),
+        });
+    }
+    let identity = ManagedAgentChild {
+        agent_id: handle.agent_id.clone(),
+        data_dir: handle.data_dir.clone(),
+    };
+    children.insert(instance, handle);
+    Ok(identity)
+}
+
 /// Look up the native identity for a managed agent. A live handle is the
 /// authoritative fast path; after stop/desktop restart, recover the same
 /// identity without spawning by reading the bounded named-instance key file.

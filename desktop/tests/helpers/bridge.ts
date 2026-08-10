@@ -185,10 +185,10 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
-  /** Per agent+relay runtime rows for pair-scoped lifecycle commands. */
+  /** Per agent+native-group runtime rows for pair-scoped lifecycle commands. */
   managedAgentRuntimes?: Array<{
     pubkey: string;
-    relayUrl: string;
+    groupId: string;
     lifecycle?:
       | "starting"
       | "listening"

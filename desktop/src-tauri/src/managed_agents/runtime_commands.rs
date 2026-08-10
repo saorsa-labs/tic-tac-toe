@@ -5,14 +5,16 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    prepare_managed_agent_launch, process_is_running, record_agent_command,
-    resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    owner_group_has_existing_active_member, prepare_managed_agent_launch, process_is_running,
+    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
     spawn_native_lifecycle_monitor, stabilize_started_agent_process, terminate_process,
     terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
-    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
-    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
+    GroupBindIntent, ManagedAgentCommunityTarget, ManagedAgentPairRuntime, ManagedAgentRecord,
+    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
+    ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
+use crate::managed_agents::agent_identity::managed_agent_child_identity;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
@@ -225,7 +227,15 @@ pub(crate) async fn start_managed_agent_runtime_pair_lazy(
     group_id: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, group_id, true, None, app).await
+    start_pair(
+        pubkey,
+        group_id,
+        true,
+        None,
+        GroupBindIntent::EnsureAttached,
+        app,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -242,6 +252,7 @@ async fn start_pair(
     group_id: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
+    bind_intent: GroupBindIntent,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
@@ -263,7 +274,8 @@ async fn start_pair(
     if expected_updated_at.is_some_and(|expected| record_snapshot.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
-    let native_launch = prepare_managed_agent_launch(&app, &record_snapshot, &group_id).await?;
+    let native_launch =
+        prepare_managed_agent_launch(&app, &record_snapshot, &group_id, bind_intent).await?;
 
     let _transition = state
         .managed_agent_runtime_transition
@@ -423,12 +435,268 @@ pub async fn restart_managed_agent_runtime(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     stop_managed_agent_runtime(pubkey.clone(), group_id.clone(), app.clone())?;
-    start_pair(pubkey, group_id, true, None, app).await
+    start_pair(
+        pubkey,
+        group_id,
+        true,
+        None,
+        GroupBindIntent::EnsureAttached,
+        app,
+    )
+    .await
+}
+
+fn auto_restore_allowed(state: &AppState) -> bool {
+    state
+        .managed_agent_auto_restore_allowed
+        .load(Ordering::Acquire)
+}
+
+fn reconcile_jobs<F>(
+    records: &[ManagedAgentRecord],
+    group_ids: &[String],
+    mut child_identity: F,
+) -> Vec<(ManagedAgentRecord, String, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut jobs = Vec::new();
+    for group_id in group_ids {
+        for record in records
+            .iter()
+            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+        {
+            if let Some(child_agent_id) = child_identity(&record.pubkey) {
+                jobs.push((record.clone(), group_id.clone(), child_agent_id));
+            }
+        }
+    }
+    jobs
+}
+
+fn normalize_reconcile_group_ids(
+    communities: &[ManagedAgentCommunityTarget],
+) -> Result<Vec<String>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut group_ids = Vec::with_capacity(communities.len());
+    for community in communities {
+        let group_id = community.group_id.trim();
+        if group_id.is_empty() {
+            return Err("managed-agent reconciliation requires non-empty group ids".to_string());
+        }
+        if seen.insert(group_id.to_string()) {
+            group_ids.push(group_id.to_string());
+        }
+    }
+    Ok(group_ids)
+}
+
+async fn probe_existing_pair_membership(
+    app: &AppHandle,
+    group_id: &str,
+    child_agent_id: &str,
+) -> Result<bool, String> {
+    let encoded_group = crate::path_segment(group_id)?;
+    let group_path = format!("/groups/{encoded_group}");
+    let state = app.state::<AppState>();
+    let owner_group: serde_json::Value = state
+        .x0x_client
+        .get_json(&group_path, &[])
+        .await
+        .map_err(|error| format!("community {group_id} lookup failed: {error}"))?;
+    owner_group_has_existing_active_member(&owner_group, group_id, child_agent_id)
+}
+
+fn failed_reconcile_status(
+    app: &AppHandle,
+    record: &ManagedAgentRecord,
+    requested_group_id: String,
+    error: String,
+    personas: &[super::AgentDefinition],
+    global: &super::GlobalAgentConfig,
+) -> ManagedAgentRuntimeStatus {
+    let status = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_group_id)
+        .ok()
+        .map(|key| {
+            status_for_with(
+                app,
+                record,
+                &key,
+                None,
+                Some(requested_group_id.clone()),
+                StatusInputs { personas, global },
+            )
+        });
+    let mut status = status.unwrap_or_else(|| {
+        let command = record_agent_command(record, personas);
+        let metadata = super::known_acp_runtime(&command);
+        let effective = resolve_effective_agent_env(record, personas, metadata, global);
+        ManagedAgentRuntimeStatus {
+            pubkey: record.pubkey.clone(),
+            group_id: requested_group_id.clone(),
+            requested_group_id: Some(requested_group_id),
+            local_setup: matches!(agent_readiness(&effective), AgentReadiness::Ready),
+            lifecycle: ManagedAgentRuntimeLifecycle::Failed,
+            pid: None,
+            error: None,
+            log_path: None,
+        }
+    });
+    status.lifecycle = ManagedAgentRuntimeLifecycle::Failed;
+    status.error = Some(error);
+    status
+}
+
+/// Warm one lazy native harness for every eligible `(agent, group)` pair.
+///
+/// The caller supplies all group IDs explicitly. Only local auto-start records
+/// with an already-persisted child identity and ACTIVE owner membership are
+/// considered. The membership check is repeated by `ExistingOnly` launch
+/// preparation, which may catch up child-local history but never changes the
+/// owner's roster.
+#[tauri::command]
+pub async fn reconcile_managed_agent_runtimes(
+    communities: Vec<ManagedAgentCommunityTarget>,
+    app: AppHandle,
+) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
+    use futures_util::{stream, StreamExt as _};
+
+    let state = app.state::<AppState>();
+    if !auto_restore_allowed(&state) {
+        return Ok(Vec::new());
+    }
+
+    let group_ids = normalize_reconcile_group_ids(&communities)?;
+    let records = load_managed_agents(&app)?;
+    let jobs = reconcile_jobs(&records, &group_ids, |pubkey| {
+        managed_agent_child_identity(pubkey).map(|child| child.agent_id)
+    });
+    let probes: Vec<_> = stream::iter(jobs)
+        .map(|(record, requested_group_id, child_agent_id)| {
+            let probe_app = app.clone();
+            async move {
+                match probe_existing_pair_membership(
+                    &probe_app,
+                    &requested_group_id,
+                    &child_agent_id,
+                )
+                .await
+                {
+                    Ok(true) => Ok(Some((record, requested_group_id, child_agent_id))),
+                    Ok(false) => Ok(None),
+                    Err(error) => Err((record, requested_group_id, error)),
+                }
+            }
+        })
+        .buffer_unordered(6)
+        .collect()
+        .await;
+
+    let personas = load_personas(&app).unwrap_or_default();
+    let global = load_global_agent_config(&app).unwrap_or_default();
+    let mut rows = Vec::with_capacity(probes.len());
+    for probe in probes {
+        match probe {
+            Ok(Some((record, requested_group_id, child_agent_id))) => {
+                match start_pair(
+                    record.pubkey.clone(),
+                    requested_group_id.clone(),
+                    true,
+                    Some(&record.updated_at),
+                    GroupBindIntent::ExistingOnly {
+                        expected_child_agent_id: child_agent_id,
+                    },
+                    app.clone(),
+                )
+                .await
+                {
+                    Ok(mut status) => {
+                        status.requested_group_id = Some(requested_group_id);
+                        rows.push(status);
+                    }
+                    Err(error) => rows.push(failed_reconcile_status(
+                        &app,
+                        &record,
+                        requested_group_id,
+                        error,
+                        &personas,
+                        &global,
+                    )),
+                }
+            }
+            Ok(None) => {}
+            Err((record, requested_group_id, error)) => rows.push(failed_reconcile_status(
+                &app,
+                &record,
+                requested_group_id,
+                error,
+                &personas,
+                &global,
+            )),
+        }
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(
+        pubkey_byte: char,
+        start_on_app_launch: bool,
+        backend: BackendKind,
+    ) -> ManagedAgentRecord {
+        ManagedAgentRecord {
+            pubkey: pubkey_byte.to_string().repeat(64),
+            name: format!("agent-{pubkey_byte}"),
+            persona_id: None,
+            team_id: None,
+            avatar_url: None,
+            acp_command: "buzz-agent".into(),
+            agent_command: "goose".into(),
+            agent_command_override: None,
+            agent_args: Vec::new(),
+            mcp_command: String::new(),
+            turn_timeout_seconds: 320,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 1,
+            system_prompt: None,
+            model: None,
+            provider: None,
+            persona_source_version: None,
+            env_vars: std::collections::BTreeMap::new(),
+            start_on_app_launch,
+            auto_restart_on_config_change: true,
+            runtime_pid: None,
+            backend,
+            backend_agent_id: None,
+            provider_binary_path: None,
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            last_error_code: None,
+            respond_to: super::super::RespondTo::OwnerOnly,
+            respond_to_allowlist: Vec::new(),
+            display_name: None,
+            slug: None,
+            runtime: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_parallelism: None,
+        }
+    }
 
     fn payload(
         group_id: &str,
@@ -442,6 +710,79 @@ mod tests {
             lifecycle,
             error: error.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn group_targets_trim_reject_empty_and_exact_dedupe() {
+        let targets = vec![
+            ManagedAgentCommunityTarget {
+                group_id: " group-a ".into(),
+            },
+            ManagedAgentCommunityTarget {
+                group_id: "group-a".into(),
+            },
+            ManagedAgentCommunityTarget {
+                group_id: "Group-A".into(),
+            },
+            ManagedAgentCommunityTarget {
+                group_id: "group-b".into(),
+            },
+        ];
+        assert_eq!(
+            normalize_reconcile_group_ids(&targets).unwrap(),
+            vec!["group-a", "Group-A", "group-b"]
+        );
+        assert!(
+            normalize_reconcile_group_ids(&[ManagedAgentCommunityTarget {
+                group_id: "  ".into(),
+            }])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn planner_only_fans_out_local_auto_records_with_durable_identities() {
+        let eligible = record('a', true, BackendKind::Local);
+        let manual = record('b', false, BackendKind::Local);
+        let provider = record(
+            'c',
+            true,
+            BackendKind::Provider {
+                id: "provider".into(),
+                config: serde_json::json!({}),
+            },
+        );
+        let missing_identity = record('d', true, BackendKind::Local);
+        let records = vec![eligible.clone(), manual, provider, missing_identity];
+        let submitted = vec!["group-one".to_string(), "Group-Two".to_string()];
+
+        let jobs = reconcile_jobs(&records, &submitted, |pubkey| {
+            (pubkey != "d".repeat(64)).then(|| "e".repeat(64))
+        });
+
+        assert_eq!(jobs.len(), 2);
+        assert!(
+            jobs.iter()
+                .all(|(record, _, child)| record.pubkey == eligible.pubkey
+                    && child == &"e".repeat(64))
+        );
+        assert_eq!(
+            jobs.into_iter()
+                .map(|(_, group, _)| group)
+                .collect::<Vec<_>>(),
+            submitted
+        );
+    }
+
+    #[test]
+    fn auto_restore_gate_is_fail_closed_and_session_long() {
+        let state = crate::app_state::build_app_state();
+        assert!(!auto_restore_allowed(&state));
+        state
+            .managed_agent_auto_restore_allowed
+            .store(true, Ordering::Release);
+        assert!(auto_restore_allowed(&state));
+        assert!(auto_restore_allowed(&state));
     }
 
     #[test]

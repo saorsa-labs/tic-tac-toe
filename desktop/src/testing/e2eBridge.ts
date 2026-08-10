@@ -77,7 +77,7 @@ type MockManagedAgentSeed = {
 
 type MockManagedAgentRuntimeSeed = {
   pubkey: string;
-  relayUrl: string;
+  groupId: string;
   lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
 };
 
@@ -717,7 +717,7 @@ type MockManagedAgent = RawManagedAgent & {
 // pair-scoped lifecycle commands.
 type MockManagedAgentRuntimeRow = {
   pubkey: string;
-  relayUrl: string;
+  groupId: string;
   localSetup: boolean;
   lifecycle:
     | "starting"
@@ -1933,7 +1933,7 @@ function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
     (seed) => ({
       pubkey: seed.pubkey,
-      relayUrl: seed.relayUrl,
+      groupId: seed.groupId,
       localSetup: true,
       lifecycle: seed.lifecycle ?? "ready",
       pid: seed.lifecycle === "stopped" ? null : 43000,
@@ -7392,17 +7392,16 @@ function getMockManagedAgent(pubkey: string): MockManagedAgent {
 
 function upsertMockManagedAgentRuntime(
   pubkey: string,
-  relayUrl: string,
+  groupId: string,
   lifecycle: MockManagedAgentRuntimeRow["lifecycle"],
 ): MockManagedAgentRuntimeRow {
   let row = mockManagedAgentRuntimes.find(
-    (candidate) =>
-      candidate.pubkey === pubkey && candidate.relayUrl === relayUrl,
+    (candidate) => candidate.pubkey === pubkey && candidate.groupId === groupId,
   );
   if (!row) {
     row = {
       pubkey,
-      relayUrl,
+      groupId,
       localSetup: true,
       lifecycle,
       pid: null,
@@ -7421,10 +7420,10 @@ function upsertMockManagedAgentRuntime(
 }
 
 // Pair-scoped lifecycle, mirroring `runtime_commands.rs`: the command touches
-// exactly one agent+relay runtime and rejects non-local agents.
+// exactly one agent+native-group runtime and rejects non-local agents.
 function handleManagedAgentRuntimeAction(
   action: "start" | "stop" | "restart",
-  args: { pubkey: string; relayUrl: string },
+  args: { pubkey: string; groupId: string },
 ): MockManagedAgentRuntimeRow {
   const agent = getMockManagedAgent(args.pubkey);
   if (agent.backend.type !== "local") {
@@ -7433,7 +7432,7 @@ function handleManagedAgentRuntimeAction(
   return {
     ...upsertMockManagedAgentRuntime(
       args.pubkey,
-      args.relayUrl,
+      args.groupId,
       action === "stop" ? "stopped" : "ready",
     ),
   };
@@ -9896,20 +9895,20 @@ export function maybeInstallE2eTauriMocks() {
       case "start_managed_agent_runtime":
         return handleManagedAgentRuntimeAction(
           "start",
-          payload as { pubkey: string; relayUrl: string },
+          payload as { pubkey: string; groupId: string },
         );
       case "stop_managed_agent_runtime":
         return handleManagedAgentRuntimeAction(
           "stop",
-          payload as { pubkey: string; relayUrl: string },
+          payload as { pubkey: string; groupId: string },
         );
       case "restart_managed_agent_runtime":
         return handleManagedAgentRuntimeAction(
           "restart",
-          payload as { pubkey: string; relayUrl: string },
+          payload as { pubkey: string; groupId: string },
         );
       case "reconcile_managed_agent_runtimes":
-        // Post-create bootstrap reconcile: no new pairs in the mock world.
+        // Native membership-gated reconcile: no new pairs in the mock world.
         return [];
       case "set_agent_managed_profiles":
         return undefined;
