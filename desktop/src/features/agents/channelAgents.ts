@@ -15,6 +15,7 @@ import {
 } from "@/shared/api/tauri";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
 import { x0xAddGroupMember } from "@/shared/api/tauriNativeX0x";
+import { getManagedAgentNativeIdentity } from "@/shared/api/observerRelay";
 import type {
   AcpRuntime,
   ChannelRole,
@@ -36,8 +37,24 @@ export type AttachManagedAgentToChannelInput = {
 
 export type AttachManagedAgentToChannelResult = {
   agent: ManagedAgent;
+  /** Canonical x0xd child AgentId used in the native group roster. */
+  memberAgentId: string;
   membershipAdded: boolean;
   started: boolean;
+};
+
+type AttachManagedAgentDependencies = {
+  getChannelMembers: typeof getChannelMembers;
+  getManagedAgentNativeIdentity: typeof getManagedAgentNativeIdentity;
+  startManagedAgent: typeof startManagedAgent;
+  x0xAddGroupMember: typeof x0xAddGroupMember;
+};
+
+const defaultAttachManagedAgentDependencies: AttachManagedAgentDependencies = {
+  getChannelMembers,
+  getManagedAgentNativeIdentity,
+  startManagedAgent,
+  x0xAddGroupMember,
 };
 
 export type EnsureChannelAgentPresetInput = {
@@ -107,25 +124,9 @@ export type CreateChannelManagedAgentsResult = {
 export async function attachManagedAgentToChannel(
   channelId: string,
   input: AttachManagedAgentToChannelInput,
+  dependencies: AttachManagedAgentDependencies = defaultAttachManagedAgentDependencies,
 ) {
   const ensureRunning = input.ensureRunning ?? true;
-  const agentId = input.agent.pubkey;
-
-  // Native group roster add, keyed by group id (== channel id) and the
-  // agent's AgentId (== pubkey). The relay nip29 `add_channel_members` batch
-  // path and its per-pubkey added/errors result are gone; the native add
-  // takes a single agent and either adds it or throws. The legacy relay "bot"
-  // role has no native equivalent (native roles are owner/admin/member, set
-  // via a separate command), so `input.role` is advisory and not forwarded.
-  // Detect an existing member first so a re-attach reports "already in
-  // channel" rather than erroring on a duplicate add.
-  const existingMembers = await getChannelMembers(channelId);
-  const membershipAdded = !existingMembers.some(
-    (member) => normalizePubkey(member.pubkey) === normalizePubkey(agentId),
-  );
-  if (membershipAdded) {
-    await x0xAddGroupMember({ groupId: channelId, agentId });
-  }
   let agent = input.agent;
   let started = false;
 
@@ -140,20 +141,46 @@ export async function attachManagedAgentToChannel(
     // another community's.
     const isRemote = input.agent.backend.type === "provider";
     if (isRemote && input.agent.status !== "deployed") {
-      agent = await startManagedAgent(input.agent.pubkey);
+      agent = await dependencies.startManagedAgent(input.agent.pubkey);
       started = true;
     } else if (
       !isRemote &&
       input.agent.status !== "running" &&
       input.agent.status !== "deployed"
     ) {
-      agent = await startManagedAgent(input.agent.pubkey);
+      agent = await dependencies.startManagedAgent(input.agent.pubkey);
       started = true;
     }
   }
 
+  // Persisted managed-agent pubkeys are opaque lifecycle record keys, never
+  // native x0x identities. Starting first provisions the dedicated child; all
+  // roster reads/writes must then use that child's canonical AgentId. Failing
+  // closed prevents the legacy record key from ever polluting a native roster.
+  const memberAgentId = normalizePubkey(
+    (await dependencies.getManagedAgentNativeIdentity(agent.pubkey)) ?? "",
+  );
+  if (!/^[0-9a-f]{64}$/.test(memberAgentId)) {
+    throw new Error(
+      `Managed agent "${agent.name}" has no native identity. Start or restart it before adding it to a community.`,
+    );
+  }
+
+  const existingMembers = await dependencies.getChannelMembers(channelId);
+  const membershipAdded = !existingMembers.some(
+    (member) =>
+      normalizePubkey(member.pubkey) === normalizePubkey(memberAgentId),
+  );
+  if (membershipAdded) {
+    await dependencies.x0xAddGroupMember({
+      groupId: channelId,
+      agentId: memberAgentId,
+    });
+  }
+
   return {
     agent,
+    memberAgentId,
     membershipAdded,
     started,
   } satisfies AttachManagedAgentToChannelResult;

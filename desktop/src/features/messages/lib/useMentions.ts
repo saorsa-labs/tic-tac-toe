@@ -29,7 +29,6 @@ import type {
   AgentPersona,
   ChannelMember,
   ChannelType,
-  UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
@@ -37,12 +36,15 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { hasMention } from "./hasMention";
+import { useManagedAgentMemberPubkeys } from "./useManagedAgentMemberPubkeys";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
+  formatSearchUserDisplayName,
+  formatSearchUserSecondaryLabel,
   globalSearchIdentityKey,
   type MentionCandidate,
   mentionCandidateLabel,
@@ -56,17 +58,6 @@ export type PersonaMentionTarget = {
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
-function formatSearchUserDisplayName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
-}
-function formatSearchUserSecondaryLabel(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return null;
-}
 function appendUniqueName(current: string[], name: string): string[] {
   return current.some(
     (candidate) => candidate.toLowerCase() === name.toLowerCase(),
@@ -104,6 +95,10 @@ export function useMentions(
   const members = externalMembers ?? membersQuery.data;
   const isArchivedDiscovery = useIsArchivedPredicate();
   const managedAgentsQuery = useManagedAgentsQuery();
+  const memberPubkeys = useManagedAgentMemberPubkeys(
+    managedAgentsQuery.data ?? [],
+    members ?? [],
+  );
   const relayAgentsQuery = useRelayAgentsQuery();
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
@@ -233,11 +228,6 @@ export function useMentions(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
   );
-  const memberPubkeys = React.useMemo(
-    () =>
-      new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
-    [members],
-  );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
 
@@ -347,11 +337,12 @@ export function useMentions(
     }
 
     for (const agent of managedAgentsQuery.data ?? []) {
+      const pubkey = normalizePubkey(agent.pubkey);
       addCandidate({
         kind: "identity",
-        pubkey: agent.pubkey,
+        pubkey,
         displayName: agent.name,
-        isMember: false,
+        isMember: memberPubkeys.has(pubkey),
         isAgent: true,
         isManagedAgent: true,
         personaId: agent.personaId ?? undefined,

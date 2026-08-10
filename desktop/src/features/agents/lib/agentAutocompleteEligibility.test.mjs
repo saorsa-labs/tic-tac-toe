@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { expandManagedAgentMemberPubkeys } from "../../../shared/api/managedAgentMentionIdentity.ts";
 import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
@@ -160,6 +161,35 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
     ),
     false,
   );
+});
+
+test("a native child roster entry yields exactly one in-channel managed record suggestion", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+  const memberPubkeys = expandManagedAgentMemberPubkeys([PUB_B], {
+    [PUB_A]: PUB_B,
+  });
+  const candidates = [
+    makeAgent({ pubkey: PUB_B, displayName: "child", isMember: true }),
+    makeAgent({
+      pubkey: PUB_A,
+      displayName: "Guide",
+      isManagedAgent: true,
+      isMember: memberPubkeys.has(PUB_A),
+      ownerPubkey: CURRENT_PUBKEY,
+    }),
+  ].filter((candidate) =>
+    isAgentIdentityInManagedList(candidate, managedAgentPubkeys),
+  );
+
+  assert.deepEqual(candidates, [
+    makeAgent({
+      pubkey: PUB_A,
+      displayName: "Guide",
+      isManagedAgent: true,
+      isMember: true,
+      ownerPubkey: CURRENT_PUBKEY,
+    }),
+  ]);
 });
 
 test("shouldHideAgentFromMentions: never hides non-agents", () => {

@@ -1,5 +1,10 @@
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
-import type { AgentPersona, AgentTeam, ChannelRole } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  AgentTeam,
+  ChannelRole,
+  UserSearchResult,
+} from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export type TeamMentionMember = {
@@ -26,6 +31,16 @@ export type MentionCandidate = {
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
 };
+
+export function formatSearchUserDisplayName(user: UserSearchResult) {
+  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
+}
+
+export function formatSearchUserSecondaryLabel(user: UserSearchResult) {
+  const displayName = user.displayName?.trim();
+  const nip05Handle = user.nip05Handle?.trim();
+  return displayName && nip05Handle ? nip05Handle : null;
+}
 
 export function mentionCandidateLabel(candidate: MentionCandidate) {
   return (

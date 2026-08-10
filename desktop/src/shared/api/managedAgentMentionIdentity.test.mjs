@@ -8,9 +8,11 @@ globalThis.window.__TAURI_INTERNALS__ = {
   unregisterCallback: () => {},
 };
 
-const { resolveNativeMentionAgentIds } = await import(
-  "./managedAgentMentionIdentity.ts"
-);
+const {
+  expandManagedAgentMemberPubkeys,
+  resolveManagedAgentNativeIdentityMap,
+  resolveNativeMentionAgentIds,
+} = await import("./managedAgentMentionIdentity.ts");
 
 const recordPubkey = "a".repeat(64);
 const childAgentId = "b".repeat(64);
@@ -54,4 +56,45 @@ test("translation deduplicates a legacy record key and its child AgentId", async
   );
 
   assert.deepEqual(mentions, [childAgentId]);
+});
+
+test("native identity map resolves live children without letting one failure hide the rest", async () => {
+  const secondRecord = "d".repeat(64);
+  const thirdRecord = "e".repeat(64);
+  const identities = await resolveManagedAgentNativeIdentityMap(
+    [
+      { name: "Guide", pubkey: recordPubkey },
+      { name: "Offline", pubkey: secondRecord },
+      { name: "Broken", pubkey: thirdRecord },
+    ],
+    async (pubkey) => {
+      if (pubkey === recordPubkey) return childAgentId.toUpperCase();
+      if (pubkey === secondRecord) return null;
+      throw new Error("lookup unavailable");
+    },
+  );
+
+  assert.deepEqual(identities, { [recordPubkey]: childAgentId });
+});
+
+test("native child roster membership expands to its managed record alias", () => {
+  const humanAgentId = "c".repeat(64);
+  const expanded = expandManagedAgentMemberPubkeys(
+    [childAgentId.toUpperCase(), humanAgentId],
+    { [recordPubkey.toUpperCase()]: childAgentId },
+  );
+
+  assert.deepEqual(
+    expanded,
+    new Set([childAgentId, humanAgentId, recordPubkey]),
+  );
+});
+
+test("managed record alias is not added when its child is absent from the roster", () => {
+  const humanAgentId = "c".repeat(64);
+  const expanded = expandManagedAgentMemberPubkeys([humanAgentId], {
+    [recordPubkey]: childAgentId,
+  });
+
+  assert.deepEqual(expanded, new Set([humanAgentId]));
 });
