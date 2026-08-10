@@ -148,6 +148,23 @@ fn deploy_resolver_falls_back_to_global_when_persona_and_record_have_none() {
 }
 
 #[test]
+fn launch_snapshot_replaces_stale_parallelism_before_native_validation() {
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    record.parallelism = 24;
+    record.updated_at = "stale-record".to_string();
+    let mut persona = persona_record("p1", None, None);
+    persona.parallelism = Some(1);
+
+    assert!(apply_persona_launch_snapshot(&mut record, &[persona]));
+    assert_eq!(record.parallelism, 1);
+    assert_ne!(record.updated_at, "stale-record");
+    assert!(
+        crate::managed_agents::validate_native_agent_parallelism(record.parallelism).is_ok(),
+        "the current persona snapshot must pass the native one-worker launch gate"
+    );
+}
+
+#[test]
 fn created_avatar_prefers_explicit_input() {
     let resolved = resolve_created_avatar_url(
         Some(" https://x/input.png "),

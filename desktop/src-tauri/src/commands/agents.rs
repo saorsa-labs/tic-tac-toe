@@ -39,6 +39,30 @@ fn resolve_created_avatar_url(
         .or_else(|| managed_agent_avatar_url(agent_command))
 }
 
+/// Apply the linked persona fields that are effective for the next native
+/// launch. Behavioral defaults are normally copied at mint time, but native
+/// x0x ACP has an exact-one-worker contract. When a persona supplies a current
+/// parallelism value, it is the recoverable UI intent for a stale materialized
+/// value that native launch cannot accept.
+fn apply_persona_launch_snapshot(
+    record: &mut crate::managed_agents::ManagedAgentRecord,
+    personas: &[crate::managed_agents::AgentDefinition],
+) -> bool {
+    let Some(persona_id) = record.persona_id.as_deref() else {
+        return false;
+    };
+    let Some(persona) = personas.iter().find(|persona| persona.id == persona_id) else {
+        return false;
+    };
+
+    crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
+    if let Some(parallelism) = persona.parallelism {
+        record.parallelism = parallelism;
+    }
+    record.updated_at = crate::util::now_iso();
+    true
+}
+
 pub(super) async fn start_local_agent_pairs_with_preflight(
     app: &AppHandle,
     state: &AppState,
@@ -67,13 +91,9 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         let mut records = load_managed_agents(app)?;
         let record = find_managed_agent_mut(&mut records, pubkey)?;
         let personas = load_personas(app).unwrap_or_default();
-        if let Some(persona_id) = record.persona_id.clone() {
-            if let Some(persona) = personas.iter().find(|persona| persona.id == persona_id) {
-                crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
-                record.updated_at = crate::util::now_iso();
-            }
+        if apply_persona_launch_snapshot(record, &personas) {
+            save_managed_agents(app, &records)?;
         }
-        save_managed_agents(app, &records)?;
     }
 
     let mut errors = Vec::new();
@@ -117,22 +137,28 @@ pub(super) async fn start_local_agent_with_preflight(
     state: &AppState,
     pubkey: &str,
 ) -> Result<ManagedAgentSummary, String> {
-    let record_snapshot = {
+    let (record_snapshot, personas) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|e| e.to_string())?;
-        let records = load_managed_agents(app)?;
-        records
+        let mut records = load_managed_agents(app)?;
+        let personas = load_personas(app).unwrap_or_default();
+        let record = find_managed_agent_mut(&mut records, pubkey)?;
+        if record.backend != BackendKind::Local {
+            return Err(format!("agent {pubkey} is not a local agent"));
+        }
+        if apply_persona_launch_snapshot(record, &personas) {
+            save_managed_agents(app, &records)?;
+        }
+        let record_snapshot = records
             .iter()
             .find(|record| record.pubkey == pubkey)
             .cloned()
-            .ok_or_else(|| format!("agent {pubkey} not found"))?
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        (record_snapshot, personas)
     };
-
-    if record_snapshot.backend != BackendKind::Local {
-        return Err(format!("agent {pubkey} is not a local agent"));
-    }
+    crate::managed_agents::validate_native_agent_parallelism(record_snapshot.parallelism)?;
 
     let group_id = state
         .active_group_id
@@ -157,19 +183,10 @@ pub(super) async fn start_local_agent_with_preflight(
     if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
-    // Re-snapshot the persona onto the record at every spawn so the agent always
-    // starts with the current persona config (system_prompt, model, provider,
-    // runtime). This clears the "out of date" drift badge without requiring a
-    // delete+recreate. See `apply_persona_snapshot` for the precedence and
-    // env-override self-heal rules.
-    // Load personas once: used for snapshot application below and summary build
-    // at the end — avoids a second disk read for the same file in the same call.
-    let personas = load_personas(app).unwrap_or_default();
-    if let Some(persona_id) = record.persona_id.clone() {
-        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
-            record.updated_at = crate::util::now_iso();
-        }
+    if record.updated_at != record_snapshot.updated_at {
+        return Err(
+            "managed agent changed while native launch preflight was in flight".to_string(),
+        );
     }
     if let Err(start_error) =
         start_managed_agent_process(app, record, &mut runtimes, &native_launch)
