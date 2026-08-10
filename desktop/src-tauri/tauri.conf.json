@@ -55,8 +55,7 @@
     "externalBin": [
       "binaries/buzz-acp",
       "binaries/buzz-agent",
-      "binaries/buzz-dev-mcp",
-      "binaries/buzz",
+      "binaries/buzz-x0x-mcp",
       "binaries/x0xd"
     ],
     "icon": [

@@ -13,7 +13,7 @@ FAKE_FILE_BIN="$TEST_ROOT/fake-file-bin"
 BASE_PATH="$PATH"
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 mkdir -p "$REPO_ROOT/desktop/src-tauri/binaries" "$X0X_ROOT/target/release" \
-  "$FAKE_BIN" "$FAKE_FILE_BIN"
+  "$REPO_ROOT/target/release" "$FAKE_BIN" "$FAKE_FILE_BIN"
 
 printf '#!/bin/sh\nexit 0\n' > "$FAKE_BIN/cargo"
 printf '#!/bin/sh\necho x0xd-test\n' > "$X0X_ROOT/target/release/x0xd"
@@ -37,9 +37,9 @@ if [[ -z "$NATIVE_FIXTURE" || ! -x "$NATIVE_FIXTURE" ]]; then
   exit 1
 fi
 
-for name in buzz-acp buzz-agent buzz-dev-mcp buzz; do
-  cp "$NATIVE_FIXTURE" "$REPO_ROOT/desktop/src-tauri/binaries/$name-$TRIPLE"
-  chmod +x "$REPO_ROOT/desktop/src-tauri/binaries/$name-$TRIPLE"
+for name in buzz-acp buzz-agent buzz-x0x-mcp; do
+  cp "$NATIVE_FIXTURE" "$REPO_ROOT/target/release/$name"
+  chmod +x "$REPO_ROOT/target/release/$name"
 done
 
 run_stage() {
@@ -55,11 +55,13 @@ run_stage
 
 # Acceptance uses only the host's native system executable as an isolated
 # fixture; no binary from an installed or previous Buzz build is imported.
-for name in buzz-acp buzz-agent buzz-dev-mcp buzz; do
+for name in buzz-acp buzz-agent buzz-x0x-mcp; do
   path="$REPO_ROOT/desktop/src-tauri/binaries/$name-$TRIPLE"
   cmp "$NATIVE_FIXTURE" "$path"
   [[ -x "$path" ]]
 done
+[[ ! -e "$REPO_ROOT/desktop/src-tauri/binaries/buzz-dev-mcp-$TRIPLE" ]]
+[[ ! -e "$REPO_ROOT/desktop/src-tauri/binaries/buzz-$TRIPLE" ]]
 cmp "$X0X_ROOT/target/release/x0xd" \
   "$REPO_ROOT/desktop/src-tauri/binaries/x0xd-$TRIPLE"
 
@@ -69,7 +71,7 @@ run_stage
 # Sole-catching placeholder mutation: shadow `file` with a matching native
 # description so executability, presence, and target checks all pass. The exact
 # 17-byte content predicate must independently reject the inert sidecar.
-mutated="$REPO_ROOT/desktop/src-tauri/binaries/buzz-agent-$TRIPLE"
+mutated="$REPO_ROOT/target/release/buzz-agent"
 printf '#!/bin/sh\nexit 0\n' > "$mutated"
 chmod +x "$mutated"
 if FAKE_FILE_DESCRIPTION="$MATCHING_DESCRIPTION" \

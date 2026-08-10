@@ -1,7 +1,7 @@
 // Focused invariant tests for the hardened Rust scan in no-relay-gate.mjs.
 //
 // Each case feeds a synthetic production source through findNoRelayViolations
-// against an isolated temp tree (mirroring desktop/src-tauri/src layout) and
+// against an isolated temp tree (mirroring desktop and native sidecar layouts) and
 // asserts the exact category the gate must assign — or, for the allowlist
 // cases, that it stays silent. These lock the newly-caught relay/Nostr
 // patterns so a regression (a production caller sneaking back in) turns the
@@ -17,6 +17,7 @@ import { findNoRelayViolations } from "./no-relay-gate.mjs";
 // Fixtures live under a production path the gate treats as live code, unless
 // the case is specifically exercising an allowlist (relay lib / test basename).
 const SRC = "desktop/src-tauri/src";
+const ACP_SRC = "crates/buzz-acp/src";
 
 const FIXTURES = [
   // ── relay transport — newly caught callers ──────────────────────────────
@@ -89,6 +90,11 @@ pub fn compat_signer() -> Keys {
     event.verify();
     Ok(())
 }
+`,
+  ],
+  [
+    `${ACP_SRC}/injected_relay.rs`,
+    `pub async fn leak() { crate::relay::query_relay(); }
 `,
   ],
 
@@ -255,6 +261,13 @@ describe("no-relay-gate — hardened Rust scan", () => {
 
   it("flags inbound nostr::Event verify as nostr identity/transport", () => {
     assert.equal(has(violations, "nostr_inbound_verify.rs", "nostr"), true);
+  });
+
+  it("scans the packaged native ACP source tree", () => {
+    assert.equal(
+      hasCat(violations, `${ACP_SRC}/injected_relay.rs`, "relay"),
+      true,
+    );
   });
 
   // ── allowlist — native x0x WebSocket stays allowed ─────────────────────

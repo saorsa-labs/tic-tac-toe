@@ -1,12 +1,14 @@
 [workspace]
 # tic-tac-toe Stage 0.1 (see FORK.md): members pruned from upstream block/buzz
-# to the five crates desktop/src-tauri path-depends on. The
+# to the desktop crates plus the native managed-agent bridge crates. The
 # [workspace.package] and [workspace.dependencies] tables below are preserved
 # verbatim from upstream so the imported crates' `workspace = true`
 # inheritance keeps resolving identically.
 members = [
     "crates/buzz-core",
+    "crates/buzz-acp",
     "crates/buzz-agent",
+    "crates/buzz-x0x",
     "crates/buzz-sdk",
     "crates/buzz-persona",
     "crates/buzz-media",

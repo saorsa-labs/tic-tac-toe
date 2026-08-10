@@ -44,6 +44,8 @@ const PACKAGING_FILES = [
   "desktop/src-tauri/capabilities/default.json",
   "desktop/src-tauri/src/lib.rs",
   "desktop/scripts/verify-macos-entitlements.sh",
+  "crates/buzz-acp/Cargo.toml",
+  "crates/buzz-x0x/Cargo.toml",
   "scripts/dist.sh",
   "scripts/run-tic-tac-toe.sh",
   "scripts/sidecar-validation.sh",
@@ -339,8 +341,14 @@ export async function findNoRelayViolations(repoRoot = REPO_ROOT) {
   }
 
   // 3. Rust production sources — relay transport + Nostr identity/transport.
-  const rustSrcDir = path.join(repoRoot, "desktop/src-tauri/src");
-  if (await directoryExists(rustSrcDir)) {
+  const rustSourceDirs = [
+    "desktop/src-tauri/src",
+    "crates/buzz-acp/src",
+    "crates/buzz-x0x/src",
+  ];
+  for (const relativeRustDir of rustSourceDirs) {
+    const rustSrcDir = path.join(repoRoot, relativeRustDir);
+    if (!(await directoryExists(rustSrcDir))) continue;
     const rustFiles = await listFiles(rustSrcDir, [".rs"]);
     for (const file of rustFiles) {
       const r = relp(file);

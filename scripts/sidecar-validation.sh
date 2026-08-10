@@ -24,7 +24,7 @@ validate_managed_agent_sidecars() {
     *-windows-*) extension=".exe" ;;
   esac
 
-  local -a required_names=(buzz-acp buzz-agent buzz-dev-mcp buzz)
+  local -a required_names=(buzz-acp buzz-agent buzz-x0x-mcp)
   local name candidate size description
   for name in "${required_names[@]}"; do
     candidate="$directory/$name$name_suffix$extension"

@@ -19,9 +19,3 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
-
-# Keep this crate directly testable until the packaging lane adds it to the
-# repository workspace. Remove this table when adding `crates/buzz-x0x` to the
-# root workspace members.
-[workspace]
-
