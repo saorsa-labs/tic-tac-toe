@@ -2,10 +2,6 @@ import * as React from "react";
 import { useQueryClient, type QueryStatus } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import {
-  managedAgentsQueryKey,
-  relayAgentsQueryKey,
-} from "@/features/agents/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   ensureStarterChannels,
@@ -16,7 +12,6 @@ import {
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
 import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
-import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery, useRecoveryStateQuery } from "@/shared/api/hooks";
@@ -35,34 +30,6 @@ const STARTER_CHANNEL_SETUP_TOAST_ID = "starter-channel-setup-error";
 export type ChannelInitResult =
   | { ok: true; focusChannelId?: string }
   | { ok: false; reason: string; focusChannelId?: string };
-
-const welcomeSeedPromises = new Map<string, Promise<void>>();
-
-function seedWelcomeExperience(
-  queryClient: ReturnType<typeof useQueryClient>,
-  channelId: string,
-  pubkey: string | null,
-  communityScope: string | null,
-) {
-  const key = `${communityScope ?? ""}:${channelId}`;
-  const current = welcomeSeedPromises.get(key);
-  if (current) return current;
-
-  const promise = (async () => {
-    try {
-      await ensureWelcomeTeam(channelId, communityScope);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-      ]);
-      markWelcomeChannelEnsured(pubkey, communityScope);
-    } catch (error) {
-      console.warn("Failed to seed the Welcome experience.", error);
-    }
-  })().finally(() => welcomeSeedPromises.delete(key));
-  welcomeSeedPromises.set(key, promise);
-  return promise;
-}
 
 export async function initializeStarterChannels(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -118,12 +85,10 @@ export async function initializeStarterChannels(
         ...channels.filter((channel) => !ensuredIds.has(channel.id)),
       ];
     });
-    void seedWelcomeExperience(
-      queryClient,
-      welcomeChannel.id,
-      pubkey,
-      communityScope,
-    );
+    // Provisioning is deliberately deferred until Welcome is focused and its
+    // native group has been acknowledged by the backend. Seeding here races
+    // the route transition and can bind managed children to the prior group.
+    markWelcomeChannelEnsured(pubkey, communityScope);
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {
       // Refreshing can briefly replace the optimistic cache with an older relay

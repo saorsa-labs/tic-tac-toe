@@ -15,12 +15,13 @@ import {
   WELCOME_TEAM_STARTERS,
   type WelcomeTeamStarterDefinition,
 } from "@/features/onboarding/welcomeGuide";
+import { withAcknowledgedWelcomeGroup } from "@/features/onboarding/welcomeGroupActivation";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import {
-  startManagedAgent,
-  stopManagedAgent,
+  restartManagedAgentRuntime,
+  startManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
@@ -439,17 +440,35 @@ export function buildWelcomeKickoffOpenerSendInput(
 
 export async function restartWelcomeTeammate(
   agent: ManagedAgent,
+  groupId: string,
   options: {
-    stopAgent?: typeof stopManagedAgent;
-    startAgent?: typeof startManagedAgent;
+    restartAgent?: typeof restartManagedAgentRuntime;
   } = {},
 ) {
-  const stopAgent = options.stopAgent ?? stopManagedAgent;
-  const startAgent = options.startAgent ?? startManagedAgent;
-  if (agent.status === "running") {
-    await stopAgent(agent.pubkey);
+  return (options.restartAgent ?? restartManagedAgentRuntime)(
+    agent.pubkey,
+    groupId,
+  );
+}
+
+export async function startWelcomeAgentForGroup(
+  agent: ManagedAgent,
+  groupId: string,
+  options: {
+    restart: boolean;
+    startAgent?: typeof startManagedAgentRuntime;
+    restartAgent?: typeof restartManagedAgentRuntime;
+  },
+) {
+  if (options.restart) {
+    return restartWelcomeTeammate(agent, groupId, {
+      restartAgent: options.restartAgent,
+    });
   }
-  return startAgent(agent.pubkey);
+  return (options.startAgent ?? startManagedAgentRuntime)(
+    agent.pubkey,
+    groupId,
+  );
 }
 
 async function sendWelcomeKickoffCloser({
@@ -557,10 +576,11 @@ export function useWelcomeKickoff(
       focusedWelcomeChannelRef.current !== channelId;
     void (async () => {
       try {
-        const welcomeTeam = await ensureWelcomeTeam(
-          channelId,
-          activeCommunity?.groupId,
+        const welcomeTeam = await withAcknowledgedWelcomeGroup(
+          { groupId: channelId, isCancelled },
+          () => ensureWelcomeTeam(channelId, channelId),
         );
+        if (!welcomeTeam || isCancelled()) return;
         await queryClient.invalidateQueries({
           queryKey: managedAgentsQueryKey,
         });
@@ -597,15 +617,17 @@ export function useWelcomeKickoff(
                 normalizePubkey(teammate.pubkey) ===
                 normalizePubkey(agent.pubkey),
             );
-            if (
-              isTeammate &&
-              welcomeTeammateNeedsRestart(agent, resolvedAgentSet.lead.pubkey)
-            ) {
-              return restartWelcomeTeammate(agent);
-            }
-            return agent.status === "running" || agent.status === "deployed"
-              ? Promise.resolve(agent)
-              : startManagedAgent(agent.pubkey);
+            // Pair startup is idempotent for this exact group. Always call it:
+            // a record may be running in the channel the user just left while
+            // still having no child runtime or native membership in Welcome.
+            return startWelcomeAgentForGroup(agent, channelId, {
+              restart:
+                isTeammate &&
+                welcomeTeammateNeedsRestart(
+                  agent,
+                  resolvedAgentSet.lead.pubkey,
+                ),
+            });
           }),
         );
         for (const [index, result] of startResults.entries()) {
@@ -673,7 +695,6 @@ export function useWelcomeKickoff(
       }
     })();
   }, [
-    activeCommunity?.groupId,
     channelId,
     configLoading,
     isActiveWelcome,

@@ -11,6 +11,7 @@ import {
   mergeKickoffEvents,
   resolveWelcomeAgentSet,
   selectWelcomeKickoffIntroTeammates,
+  startWelcomeAgentForGroup,
   waitForWelcomeKickoffBeat,
   waitForWelcomeTeammatesOnline,
   welcomeTeammateNeedsRestart,
@@ -197,6 +198,23 @@ test("running teammates restart when their allowlist does not include the lead",
     ),
     true,
   );
+});
+
+test("a record running in the previous group still starts a Welcome runtime pair", async () => {
+  const calls = [];
+  await startWelcomeAgentForGroup(
+    { ...fizz, status: "running" },
+    "welcome-group",
+    {
+      restart: false,
+      startAgent: async (pubkey, groupId) => {
+        calls.push({ pubkey, groupId });
+        return { pubkey, groupId };
+      },
+    },
+  );
+
+  assert.deepEqual(calls, [{ pubkey: fizz.pubkey, groupId: "welcome-group" }]);
 });
 
 test("opener keeps partial-readiness warm and mentions only online teammates", () => {

@@ -8,10 +8,8 @@ import {
   WELCOME_TEAM_ID as WELCOME_TEAM_IDENTITY,
 } from "@/features/agents/lib/welcomeTeamIdentity";
 import {
-  addChannelMembers,
   createManagedAgent,
   discoverAcpRuntimes,
-  getChannelMembers,
   listManagedAgents,
   updateManagedAgent,
 } from "@/shared/api/tauri";
@@ -155,34 +153,6 @@ async function ensureWelcomeTeamPersonasActive() {
   );
 }
 
-async function ensureWelcomeTeamMembership(
-  channelId: string,
-  agents: WelcomeTeamAgents,
-) {
-  const members = await getChannelMembers(channelId).catch(() => []);
-  const memberPubkeys = new Set(
-    members.map((member) => normalizePubkey(member.pubkey)),
-  );
-  const missingAgents = agents.filter(
-    (agent) => !memberPubkeys.has(normalizePubkey(agent.pubkey)),
-  );
-  if (missingAgents.length === 0) {
-    return;
-  }
-
-  const result = await addChannelMembers({
-    channelId,
-    pubkeys: missingAgents.map((agent) => agent.pubkey),
-    role: "bot",
-  });
-  const unexpectedError = result.errors.find(
-    ({ error }) => !error.toLowerCase().includes("already"),
-  );
-  if (unexpectedError) {
-    throw new Error(unexpectedError.error);
-  }
-}
-
 export async function buildWelcomeStarterCreateInput(
   starter: WelcomeTeamStarterDefinition,
   persona: AgentPersona,
@@ -246,10 +216,12 @@ export function welcomeStarterRuntimeUpdate(
 }
 
 /**
- * missing instances, and adds all three to Welcome as bots.
+ * missing instances. Native roster membership is established during each
+ * child runtime's launch preflight, once its real x0x AgentId is available.
+ * Managed record pubkeys are local identifiers and must never enter a roster.
  */
 async function provisionWelcomeTeam(
-  channelId: string,
+  _channelId: string,
 ): Promise<WelcomeTeamAgents> {
   const existingAgents = await listManagedAgents();
   await ensureWelcomeTeamPersonasActive();
@@ -313,7 +285,6 @@ async function provisionWelcomeTeam(
       welcomeAgents[index] = updated.agent;
     }
   }
-  await ensureWelcomeTeamMembership(channelId, welcomeAgents);
   return welcomeAgents;
 }
 
