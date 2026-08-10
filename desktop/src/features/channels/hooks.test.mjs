@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createOpenDmCacheLifecycle,
   reconcileRefreshedCachedChannel,
   upsertCachedChannel,
   upsertCachedChannelMember,
@@ -130,4 +131,39 @@ test("reconcileRefreshedCachedChannel_preservesRefreshedDmRecency", () => {
     charliePubkey,
     ownerPubkey,
   ]);
+});
+
+test("profile Message keeps an empty native DM route resolvable after refresh", async () => {
+  const peerAgentId = "ab".repeat(32);
+  const openedDm = makeChannel(peerAgentId, "Direct message", "dm", {
+    participantPubkeys: [peerAgentId],
+    participants: ["Remote contact"],
+  });
+  const nativeChannelsWithoutHistory = [makeChannel("general", "General")];
+  const calls = [];
+  let cachedChannels;
+  const queryClient = {
+    async invalidateQueries() {
+      calls.push("invalidate");
+    },
+    async refetchQueries() {
+      calls.push("refresh");
+      cachedChannels = nativeChannelsWithoutHistory;
+    },
+    setQueryData(_key, update) {
+      calls.push("cache");
+      cachedChannels = update(cachedChannels);
+    },
+  };
+  const lifecycle = createOpenDmCacheLifecycle(queryClient);
+
+  lifecycle.onSuccess(openedDm);
+  await lifecycle.onSettled(openedDm);
+
+  assert.deepEqual(calls, ["cache", "refresh", "cache"]);
+  assert.strictEqual(
+    cachedChannels.find((channel) => channel.id === peerAgentId),
+    openedDm,
+    "the #/channels/<AgentId> target must still resolve to its native DM composer",
+  );
 });

@@ -147,6 +147,38 @@ export function reconcileRefreshedCachedChannel(
   return upsertCachedChannel(refreshed, refreshedChannel ?? channel);
 }
 
+/**
+ * Keeps a deterministic native DM projection in the shared channel cache after
+ * the active channel-list refresh settles. An empty native DM has no history
+ * yet, so that refresh cannot discover it and would otherwise erase the route
+ * target before the profile Message action finishes navigating.
+ */
+export function createOpenDmCacheLifecycle(
+  queryClient: ReturnType<typeof useQueryClient>,
+) {
+  return {
+    onSuccess: (openedChannel: Channel) => {
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        upsertCachedChannel(current, openedChannel),
+      );
+    },
+    onSettled: async (openedChannel: Channel | undefined) => {
+      if (!openedChannel) {
+        await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        return;
+      }
+
+      await queryClient.refetchQueries({
+        queryKey: channelsQueryKey,
+        type: "active",
+      });
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        reconcileRefreshedCachedChannel(current, openedChannel),
+      );
+    },
+  };
+}
+
 export async function invalidateChannelState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null | undefined,
@@ -243,14 +275,7 @@ export function useOpenDmMutation() {
 
   return useMutation({
     mutationFn: (input: OpenDmInput) => openDm(input),
-    onSuccess: (openedChannel) => {
-      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
-        upsertCachedChannel(current, openedChannel),
-      );
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
-    },
+    ...createOpenDmCacheLifecycle(queryClient),
   });
 }
 
