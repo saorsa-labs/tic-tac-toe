@@ -259,6 +259,15 @@ export function resolveAgentInstruction(
   );
 }
 
+export function resolveProfileAgentEditTarget(
+  managedAgent: ManagedAgent | undefined,
+  persona: AgentPersona | undefined,
+): "instance" | "persona" | null {
+  if (managedAgent) return "instance";
+  if (persona) return "persona";
+  return null;
+}
+
 export function personaManagedAgentUpdate(
   agent: ManagedAgent,
   persona: AgentPersona,
@@ -289,6 +298,33 @@ export function personaManagedAgentUpdate(
 
   if (!stringRecordEqual(persona.envVars, agent.envVars)) {
     input.envVars = persona.envVars;
+    hasChanges = true;
+  }
+
+  // A linked definition edit is also used by the profile surface for the
+  // concrete instance being viewed. Keep explicit behavioral defaults in
+  // sync so a successful definition save cannot leave that instance running
+  // an older value (notably legacy parallelism values greater than one).
+  // Unset definition fields remain instance-owned and are deliberately left
+  // alone.
+  if (
+    persona.parallelism != null &&
+    persona.parallelism !== agent.parallelism
+  ) {
+    input.parallelism = persona.parallelism;
+    hasChanges = true;
+  }
+
+  if (persona.respondTo != null && persona.respondTo !== agent.respondTo) {
+    input.respondTo = persona.respondTo;
+    hasChanges = true;
+  }
+
+  if (
+    persona.respondTo === "allowlist" &&
+    !stringArrayEqual(persona.respondToAllowlist, agent.respondToAllowlist)
+  ) {
+    input.respondToAllowlist = [...persona.respondToAllowlist];
     hasChanges = true;
   }
 

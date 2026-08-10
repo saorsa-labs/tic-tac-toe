@@ -7,6 +7,7 @@ import {
   personaManagedAgentUpdate,
   profilePanelTabFromSearch,
   profilePanelViewFromSearch,
+  resolveProfileAgentEditTarget,
 } from "./UserProfilePanelUtils.ts";
 
 function agent(overrides = {}) {
@@ -58,6 +59,9 @@ function persona(overrides = {}) {
     isBuiltIn: false,
     isActive: true,
     envVars: { NEW_KEY: "2" },
+    respondTo: null,
+    respondToAllowlist: [],
+    parallelism: null,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -90,6 +94,55 @@ test("personaManagedAgentUpdate syncs edited persona identity to linked agent", 
     model: "new-model",
     envVars: { NEW_KEY: "2" },
   });
+});
+
+test("profile Edit targets a linked managed instance before its persona", () => {
+  assert.equal(resolveProfileAgentEditTarget(agent(), persona()), "instance");
+  assert.equal(resolveProfileAgentEditTarget(undefined, persona()), "persona");
+  assert.equal(resolveProfileAgentEditTarget(undefined, undefined), null);
+});
+
+test("personaManagedAgentUpdate patches linked parallelism from 24 to 1", () => {
+  const linkedAgent = agent({
+    name: "Fizz Prime",
+    systemPrompt: "New prompt",
+    model: "new-model",
+    envVars: { NEW_KEY: "2" },
+    parallelism: 24,
+  });
+
+  assert.deepEqual(
+    personaManagedAgentUpdate(linkedAgent, persona({ parallelism: 1 })),
+    {
+      pubkey: "deadbeef".repeat(8),
+      parallelism: 1,
+    },
+  );
+});
+
+test("personaManagedAgentUpdate syncs explicit response behavior", () => {
+  const allowlisted = ["a".repeat(64)];
+  const linkedAgent = agent({
+    name: "Fizz Prime",
+    systemPrompt: "New prompt",
+    model: "new-model",
+    envVars: { NEW_KEY: "2" },
+  });
+
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      linkedAgent,
+      persona({
+        respondTo: "allowlist",
+        respondToAllowlist: allowlisted,
+      }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      respondTo: "allowlist",
+      respondToAllowlist: allowlisted,
+    },
+  );
 });
 
 test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {
