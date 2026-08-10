@@ -7,9 +7,10 @@ use super::agent_env::build_buzz_agent_provider_defaults;
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
-        ManagedAgentRuntimeLifecycle, ManagedAgentSummary,
+        mark_agent_start_failure, missing_command_message, normalize_agent_args, open_log_file,
+        prepare_native_harness_lifecycle, resolve_command, stabilize_started_agent_process,
+        validate_native_agent_parallelism, KnownAcpRuntime, ManagedAgentPairRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -1950,19 +1951,8 @@ pub fn spawn_agent_child(
 
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
-    let lifecycle_path = native_launch.child_data_dir.join(format!(
-        "buzz-acp-{}.lifecycle.json",
-        native_launch.group_id
-    ));
-    match std::fs::remove_file(&lifecycle_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "failed to clear stale native harness lifecycle receipt: {error}"
-            ));
-        }
-    }
+    let lifecycle_path =
+        prepare_native_harness_lifecycle(&native_launch.child_data_dir, &native_launch.group_id)?;
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
@@ -2044,141 +2034,12 @@ pub fn spawn_agent_child(
     })
 }
 
-fn validate_native_agent_parallelism(parallelism: u32) -> Result<(), String> {
-    if parallelism == 1 {
-        Ok(())
-    } else {
-        Err(format!(
-            "native x0x ACP supports exactly one worker; set agent parallelism to 1 (stored value is {parallelism})"
-        ))
-    }
-}
-
 fn child_rust_log_filter() -> String {
     match std::env::var("RUST_LOG") {
         Ok(existing) if existing.contains("buzz_acp") => existing,
         Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
         _ => "buzz_acp=info".to_string(),
     }
-}
-
-const AGENT_START_STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
-const AGENT_START_STABILITY_POLL_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(10);
-const NATIVE_AGENT_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-pub(crate) fn mark_agent_start_failure(
-    record: &mut ManagedAgentRecord,
-    message: &str,
-    exit_code: Option<i32>,
-) {
-    let now = now_iso();
-    record.runtime_pid = None;
-    record.updated_at = now.clone();
-    record.last_stopped_at = Some(now);
-    record.last_exit_code = exit_code;
-    record.last_error = Some(message.to_string());
-    record.last_error_code = None;
-}
-
-/// Refuse to register a harness that exits during its initial stabilization
-/// window. ACP harnesses are persistent processes, so even a successful exit
-/// here means startup failed rather than completed successfully.
-pub(crate) fn stabilize_started_agent_process(
-    process: &mut crate::managed_agents::ManagedAgentProcess,
-    record: &mut ManagedAgentRecord,
-) -> Result<ManagedAgentRuntimeLifecycle, String> {
-    let started = std::time::Instant::now();
-    let readiness_required = process.lifecycle_path.is_some();
-    let timeout = if readiness_required {
-        NATIVE_AGENT_READINESS_TIMEOUT
-    } else {
-        AGENT_START_STABILITY_WINDOW
-    };
-    loop {
-        match process.child.try_wait() {
-            Ok(Some(status)) => {
-                let message = match status.code() {
-                    Some(code) => format!(
-                        "agent harness `{}` for {} exited immediately with code {code}",
-                        record.acp_command, record.name
-                    ),
-                    None => format!(
-                        "agent harness `{}` for {} exited immediately ({status})",
-                        record.acp_command, record.name
-                    ),
-                };
-                mark_agent_start_failure(record, &message, status.code());
-                return Err(message);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let message = format!(
-                    "failed to inspect newly-started agent harness for {}: {error}",
-                    record.name
-                );
-                mark_agent_start_failure(record, &message, None);
-                return Err(message);
-            }
-        }
-
-        if let Some(path) = process.lifecycle_path.as_deref() {
-            match read_native_harness_lifecycle(path, &process.start_nonce) {
-                Ok(Some((ManagedAgentRuntimeLifecycle::Failed, error))) => {
-                    let message = error.unwrap_or_else(|| {
-                        "native agent harness reported startup failure".to_string()
-                    });
-                    return fail_started_agent_process(process, record, &message);
-                }
-                Ok(Some((lifecycle, _))) => return Ok(lifecycle),
-                Ok(None) => {}
-                Err(error) => return fail_started_agent_process(process, record, &error),
-            }
-        }
-
-        let elapsed = started.elapsed();
-        if elapsed >= timeout {
-            if readiness_required {
-                let message = format!(
-                    "native agent harness for {} did not publish a matching readiness receipt within {} seconds",
-                    record.name,
-                    NATIVE_AGENT_READINESS_TIMEOUT.as_secs()
-                );
-                return fail_started_agent_process(process, record, &message);
-            }
-            return Ok(ManagedAgentRuntimeLifecycle::Starting);
-        }
-        std::thread::sleep(AGENT_START_STABILITY_POLL_INTERVAL.min(timeout - elapsed));
-    }
-}
-
-pub(crate) fn read_native_harness_lifecycle(
-    path: &std::path::Path,
-    expected_nonce: &str,
-) -> Result<Option<(ManagedAgentRuntimeLifecycle, Option<String>)>, String> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "failed to read native harness lifecycle receipt: {error}"
-            ));
-        }
-    };
-    let receipt: super::ManagedAgentHarnessLifecycleReceipt = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("invalid native harness lifecycle receipt: {error}"))?;
-    super::validate_harness_lifecycle_receipt(receipt, expected_nonce)
-}
-
-fn fail_started_agent_process<T>(
-    process: &mut crate::managed_agents::ManagedAgentProcess,
-    record: &mut ManagedAgentRecord,
-    message: &str,
-) -> Result<T, String> {
-    let _ = terminate_process(process.child.id());
-    let exit_code = process.child.wait().ok().and_then(|status| status.code());
-    mark_agent_start_failure(record, message, exit_code);
-    Err(message.to_string())
 }
 
 pub fn start_managed_agent_process(

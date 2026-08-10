@@ -81,40 +81,6 @@ impl ManagedAgentPairRuntime {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ManagedAgentHarnessLifecycleReceipt {
-    pub start_nonce: String,
-    pub lifecycle: ManagedAgentRuntimeLifecycle,
-    pub error: Option<String>,
-}
-
-pub(crate) fn validate_harness_lifecycle_receipt(
-    receipt: ManagedAgentHarnessLifecycleReceipt,
-    expected_nonce: &str,
-) -> Result<Option<(ManagedAgentRuntimeLifecycle, Option<String>)>, String> {
-    if receipt.start_nonce != expected_nonce {
-        return Ok(None);
-    }
-    if matches!(
-        receipt.lifecycle,
-        ManagedAgentRuntimeLifecycle::Starting | ManagedAgentRuntimeLifecycle::Stopped
-    ) {
-        return Err("native harness authored an invalid lifecycle state".into());
-    }
-    let has_error = receipt
-        .error
-        .as_ref()
-        .is_some_and(|error| !error.is_empty());
-    if receipt.lifecycle == ManagedAgentRuntimeLifecycle::Failed && !has_error {
-        return Err("failed native harness lifecycle requires an error".into());
-    }
-    if receipt.lifecycle != ManagedAgentRuntimeLifecycle::Failed && receipt.error.is_some() {
-        return Err("native harness lifecycle error is only valid for failed".into());
-    }
-    Ok(Some((receipt.lifecycle, receipt.error)))
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeStatus {
@@ -148,37 +114,4 @@ pub struct ManagedAgentRuntimeReceipt {
     pub pid: u32,
     pub desktop_instance_id: String,
     pub started_at: String,
-}
-
-#[cfg(test)]
-mod lifecycle_receipt_tests {
-    use super::*;
-
-    #[test]
-    fn stale_generation_receipt_cannot_change_current_lifecycle() {
-        let receipt = ManagedAgentHarnessLifecycleReceipt {
-            start_nonce: "old-generation".to_string(),
-            lifecycle: ManagedAgentRuntimeLifecycle::Ready,
-            error: None,
-        };
-        assert_eq!(
-            validate_harness_lifecycle_receipt(receipt, "current-generation")
-                .expect("stale receipt is ignored"),
-            None
-        );
-    }
-
-    #[test]
-    fn matching_forged_starting_receipt_fails_closed() {
-        let receipt = ManagedAgentHarnessLifecycleReceipt {
-            start_nonce: "current-generation".to_string(),
-            lifecycle: ManagedAgentRuntimeLifecycle::Starting,
-            error: None,
-        };
-        assert!(
-            validate_harness_lifecycle_receipt(receipt, "current-generation")
-                .expect_err("harness cannot self-author starting")
-                .contains("invalid lifecycle")
-        );
-    }
 }

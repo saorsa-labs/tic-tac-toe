@@ -982,15 +982,6 @@ fn invalid_pubkey_resolves_no_pair_key() {
     assert!(super::resolve_workspace_pair_key("not-a-key", "group-a").is_none());
 }
 
-#[test]
-fn native_agent_parallelism_fails_closed_above_one() {
-    assert!(super::validate_native_agent_parallelism(1).is_ok());
-    let error = super::validate_native_agent_parallelism(24)
-        .expect_err("native adapter must not pretend to provide 24 workers");
-    assert!(error.contains("exactly one worker"));
-    assert!(error.contains("stored value is 24"));
-}
-
 #[cfg(unix)]
 #[test]
 fn immediate_successful_harness_exit_is_a_persisted_start_failure() {
@@ -1019,52 +1010,4 @@ fn immediate_successful_harness_exit_is_a_persisted_start_failure() {
     assert_eq!(record.last_error.as_deref(), Some(error.as_str()));
     assert!(error.contains("Guide"));
     assert!(error.contains("exited immediately with code 0"));
-}
-
-#[cfg(unix)]
-#[test]
-fn native_start_waits_until_watermark_readiness_receipt_exists() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let lifecycle_path = directory.path().join("lifecycle.json");
-    let nonce = "0123456789abcdef0123456789abcdef".to_string();
-    let child = std::process::Command::new("sh")
-        .args(["-c", "sleep 5"])
-        .spawn()
-        .expect("spawn persistent harness");
-    let mut process = crate::managed_agents::ManagedAgentProcess {
-        child,
-        log_path: directory.path().join("agent.log"),
-        spawn_config_hash: 0,
-        setup_mode: false,
-        adapter_availability: None,
-        start_nonce: nonce.clone(),
-        lifecycle_path: Some(lifecycle_path.clone()),
-    };
-    let writer = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(75));
-        std::fs::write(
-            lifecycle_path,
-            serde_json::json!({
-                "startNonce": nonce,
-                "lifecycle": "listening",
-                "error": null
-            })
-            .to_string(),
-        )
-        .expect("write readiness receipt");
-    });
-    let mut record = fixture(RespondTo::Anyone, Vec::new());
-    let started = std::time::Instant::now();
-
-    let lifecycle = super::stabilize_started_agent_process(&mut process, &mut record)
-        .expect("matching listening receipt permits registration");
-
-    assert_eq!(
-        lifecycle,
-        crate::managed_agents::ManagedAgentRuntimeLifecycle::Listening
-    );
-    assert!(started.elapsed() >= std::time::Duration::from_millis(50));
-    writer.join().expect("receipt writer");
-    let _ = super::terminate_process(process.child.id());
-    let _ = process.child.wait();
 }

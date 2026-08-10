@@ -5,18 +5,18 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    prepare_managed_agent_launch, process_is_running, read_native_harness_lifecycle,
-    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
-    stabilize_started_agent_process, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    prepare_managed_agent_launch, process_is_running, record_agent_command,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    spawn_native_lifecycle_monitor, stabilize_started_agent_process, terminate_process,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
-fn status_for(
+pub(crate) fn status_for(
     app: &AppHandle,
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
@@ -74,89 +74,8 @@ fn status_for_with(
     }
 }
 
-fn emit_status(app: &AppHandle, status: &ManagedAgentRuntimeStatus) {
+pub(crate) fn emit_status(app: &AppHandle, status: &ManagedAgentRuntimeStatus) {
     let _ = app.emit(STATUS_EVENT, status);
-}
-
-pub(crate) fn spawn_native_lifecycle_monitor(
-    app: AppHandle,
-    key: ManagedAgentRuntimeKey,
-    path: std::path::PathBuf,
-    start_nonce: String,
-) {
-    let _ = std::thread::Builder::new()
-        .name(format!("buzz-lifecycle-{}", &key.pubkey[..8]))
-        .spawn(move || monitor_native_lifecycle(app, key, path, start_nonce));
-}
-
-fn monitor_native_lifecycle(
-    app: AppHandle,
-    key: ManagedAgentRuntimeKey,
-    path: std::path::PathBuf,
-    start_nonce: String,
-) {
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let (update, invalid_receipt) = match read_native_harness_lifecycle(&path, &start_nonce) {
-            Ok(Some(update)) => (update, false),
-            Ok(None) => continue,
-            Err(error) => ((ManagedAgentRuntimeLifecycle::Failed, Some(error)), true),
-        };
-        let state = app.state::<AppState>();
-        let mut runtimes = match state.managed_agent_processes.lock() {
-            Ok(runtimes) => runtimes,
-            Err(_) => return,
-        };
-        let Some(runtime) = runtimes.get_mut(&key) else {
-            return;
-        };
-        if runtime.start_nonce != start_nonce {
-            return;
-        }
-        match runtime.child.try_wait() {
-            Ok(None) => {}
-            Ok(Some(_)) | Err(_) => return,
-        }
-        if runtime.lifecycle == update.0 && runtime.error == update.1 {
-            if runtime.lifecycle == ManagedAgentRuntimeLifecycle::Failed {
-                return;
-            }
-            continue;
-        }
-        if invalid_receipt {
-            let _ = terminate_process(runtime.child.id());
-        }
-        runtime.lifecycle = update.0;
-        runtime.error = update.1;
-        let failed = runtime.lifecycle == ManagedAgentRuntimeLifecycle::Failed;
-        drop(runtimes);
-        let records = match load_managed_agents(&app) {
-            Ok(records) => records,
-            Err(_) => return,
-        };
-        let Some(record) = records
-            .iter()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
-        else {
-            return;
-        };
-        let runtimes = match state.managed_agent_processes.lock() {
-            Ok(runtimes) => runtimes,
-            Err(_) => return,
-        };
-        let Some(runtime) = runtimes
-            .get(&key)
-            .filter(|runtime| runtime.start_nonce == start_nonce)
-        else {
-            return;
-        };
-        let status = status_for(&app, record, &key, Some(runtime), None);
-        drop(runtimes);
-        emit_status(&app, &status);
-        if failed {
-            return;
-        }
-    }
 }
 
 fn observer_lifecycle_key(
