@@ -65,6 +65,15 @@ function appendUniqueName(current: string[], name: string): string[] {
     ? current
     : [...current, name];
 }
+
+export function isMentionCandidateManagedOrMember(
+  candidate: MentionCandidate & { pubkey: string },
+  managedAgentPubkeys: ReadonlySet<string>,
+) {
+  if (candidate.isMember === true) return true;
+  return isAgentIdentityInManagedList(candidate, managedAgentPubkeys);
+}
+
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -236,7 +245,7 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (!isMentionCandidateManagedOrMember(candidate, managedAgentPubkeys)) {
         return;
       }
       if (
