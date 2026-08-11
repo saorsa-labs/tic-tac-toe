@@ -1007,6 +1007,11 @@ pub async fn wake_managed_agent_from_mention(
             "managed mention author is not authorized by the target response policy".into(),
         );
     }
+    crate::managed_agents::ensure_native_causal_message_not_completed(
+        &native_launch.child_data_dir,
+        &group_id,
+        &msg_id,
+    )?;
 
     // The child independently revalidates the same delegation chain. Establish
     // its exact owner root first, then the exact causal mention; never inject
@@ -1034,7 +1039,7 @@ pub async fn wake_managed_agent_from_mention(
 
     crate::managed_agents::start_managed_agent_runtime_pair_for_causal_message(
         target_record_pubkey,
-        transport.stable_group_id,
+        group_id,
         msg_id,
         app,
     )

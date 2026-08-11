@@ -137,5 +137,24 @@ pub struct ManagedAgentPendingCausalMessage {
     pub start_nonce: String,
     pub group_id: String,
     pub msg_id: String,
-    pub state: String,
+    pub state: ManagedAgentPendingCausalState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedAgentPendingCausalState {
+    Pending,
+    Claimed,
+    Executing,
+}
+
+/// Durable proof that the exact group/message handoff completed. The harness
+/// writes this before deleting the pending file; desktop refuses to recreate a
+/// completed handoff after the pair stops.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentCompletedCausalMessage {
+    pub version: u8,
+    pub group_id: String,
+    pub msg_id: String,
 }

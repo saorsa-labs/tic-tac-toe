@@ -1,5 +1,4 @@
-use std::path::{Path, PathBuf};
-use std::{fs::OpenOptions, io::Write as _};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -32,9 +31,7 @@ impl LifecyclePublisher {
     pub fn new(config: &Config) -> Self {
         Self {
             path: config.start_nonce.as_ref().map(|_| {
-                config
-                    .data_dir
-                    .join(format!("buzz-acp-{}.lifecycle.json", config.group_id))
+                crate::storage::scoped_path(&config.data_dir, &config.group_id, "lifecycle.json")
             }),
             start_nonce: config.start_nonce.clone(),
         }
@@ -49,26 +46,11 @@ impl LifecyclePublisher {
             lifecycle,
             error,
         };
-        write_atomic(
+        crate::storage::write_atomic(
             path,
             &serde_json::to_vec(&receipt).map_err(std::io::Error::other)?,
         )
     }
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)
 }
 
 #[cfg(test)]
@@ -100,11 +82,15 @@ mod tests {
         LifecyclePublisher::new(&config)
             .publish(Lifecycle::Ready, None)
             .expect("publish receipt");
-        let value: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(directory.path().join("buzz-acp-group.lifecycle.json"))
-                .expect("read receipt"),
-        )
-        .expect("decode receipt");
+        let path = crate::storage::scoped_path(directory.path(), "group", "lifecycle.json");
+        assert!(!path
+            .file_name()
+            .expect("lifecycle filename")
+            .to_string_lossy()
+            .contains("group"));
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read receipt"))
+                .expect("decode receipt");
         assert_eq!(value["startNonce"], "0123456789abcdef0123456789abcdef");
         assert_eq!(value["lifecycle"], "ready");
     }

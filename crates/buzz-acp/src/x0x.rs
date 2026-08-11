@@ -236,7 +236,7 @@ impl X0xClient {
     pub async fn history_get(&self, msg_id: &str) -> Result<Option<HistoryRow>, X0xError> {
         let path = format!("/history/message/{msg_id}");
         match self.get_json::<HistoryMessageResponse>(&path, &[]).await {
-            Ok(response) => Ok(response.record),
+            Ok(response) => exact_history_record(msg_id, response.record),
             Err(X0xError::Status { status: 404, .. }) => Ok(None),
             Err(error) => Err(error),
         }
@@ -392,6 +392,21 @@ impl X0xClient {
     }
 }
 
+fn exact_history_record(
+    requested_msg_id: &str,
+    record: Option<HistoryRow>,
+) -> Result<Option<HistoryRow>, X0xError> {
+    if record
+        .as_ref()
+        .is_some_and(|row| row.msg_id != requested_msg_id)
+    {
+        return Err(X0xError::Decode(
+            "point history response returned a different msg_id".to_string(),
+        ));
+    }
+    Ok(record)
+}
+
 async fn decode_response<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
     path: &str,
@@ -465,6 +480,16 @@ mod tests {
     fn invalid_payload_is_not_a_message() {
         let row = test_row("plain text");
         assert!(row.envelope().is_none());
+    }
+
+    #[test]
+    fn point_history_rejects_a_different_returned_message_id() {
+        let requested = "a".repeat(64);
+        let mut row = test_row("{}");
+        row.msg_id = "b".repeat(64);
+        let error = exact_history_record(&requested, Some(row))
+            .expect_err("point lookup must echo the requested msg id");
+        assert!(matches!(error, X0xError::Decode(_)));
     }
 
     #[test]
