@@ -6,7 +6,6 @@ import type {
 } from "@/shared/api/types";
 import {
   buildChannelMessagePayload,
-  decodeChannelMessageEnvelope,
   historyRowToRelayEvent,
 } from "@/shared/api/nativeMessageAdapter";
 import {
@@ -404,13 +403,13 @@ export async function fetchNativeMessagesById(
 }
 
 function rowToSearchHit(row: X0xHistoryRow, channel: Channel) {
-  const envelope = decodeChannelMessageEnvelope(row.payload);
-  if (!envelope) return null;
+  const event = historyRowToRelayEvent(row, channel.id);
+  if (!event) return null;
   return {
     eventId: row.msgId,
-    content: envelope.text,
+    content: event.content,
     kind: 9,
-    pubkey: row.authorAgent ?? "",
+    pubkey: event.pubkey,
     channelId: channel.id,
     channelName: channel.name,
     createdAt: Math.floor(row.seenAtMs / 1_000),

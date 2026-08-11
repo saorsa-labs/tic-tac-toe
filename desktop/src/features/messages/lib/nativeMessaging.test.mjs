@@ -190,6 +190,46 @@ test("native scoped search maps x0xd rows to the existing SearchHit result", asy
   assert.equal(result.hits[0].channelId, "group-1");
 });
 
+test("native scoped search returns literal text/plain DM rows from x0xd", async () => {
+  const peer = "c".repeat(64);
+  const marker = "cutest-769f-dm-b2a-20260811T2227BST";
+  const msgId = "7".repeat(64);
+  response = {
+    rows: [
+      {
+        id: 8,
+        msg_id: msgId,
+        scope: `dm:${peer}`,
+        author_agent: peer,
+        author_machine: null,
+        sent_at_ms: 1_700_000_000_000,
+        seen_at_ms: 1_700_000_003_000,
+        direction: "Inbound",
+        content_type: "text/plain",
+        payload: btoa(marker),
+        signed: true,
+        provenance: "VerifiedEnvelope",
+        replace_key: null,
+        thread_root: null,
+        thread_parent: null,
+      },
+    ],
+    has_more: false,
+  };
+
+  const result = await searchNativeMessages(
+    marker,
+    [channel({ id: peer, channelType: "dm" })],
+    12,
+  );
+
+  assert.equal(calls[0].cmd, "x0x_history_search");
+  assert.equal(calls[0].args.scope, `dm:${peer}`);
+  assert.equal(result.found, 1);
+  assert.equal(result.hits[0].eventId, msgId);
+  assert.equal(result.hits[0].content, marker);
+});
+
 test("unsupported native mutations expose exact blockers instead of relay fallback", () => {
   for (const blocker of [
     NATIVE_EDIT_BLOCKER,
