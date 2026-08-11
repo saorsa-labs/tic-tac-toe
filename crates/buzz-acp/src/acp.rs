@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -34,6 +35,53 @@ pub enum AcpError {
     Protocol(String),
     #[error("ACP agent error {code}: {message}")]
     Agent { code: i64, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcpTurnOutcome {
+    pub(crate) stop_reason: String,
+    pub(crate) assistant_text: String,
+    pub(crate) completed_tool_call_ids: Vec<String>,
+}
+
+impl AcpTurnOutcome {
+    pub(crate) fn has_visible_text(&self) -> bool {
+        !self.assistant_text.is_empty()
+    }
+
+    pub(crate) fn has_completed_tool(&self) -> bool {
+        !self.completed_tool_call_ids.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallStatus {
+    Completed,
+    Other,
+}
+
+#[derive(Debug, Default)]
+struct TurnProgress {
+    assistant_text: String,
+    tool_statuses: HashMap<String, ToolCallStatus>,
+}
+
+impl TurnProgress {
+    fn finish(self, stop_reason: String) -> AcpTurnOutcome {
+        let mut completed_tool_call_ids = self
+            .tool_statuses
+            .into_iter()
+            .filter_map(|(tool_call_id, status)| {
+                (status == ToolCallStatus::Completed).then_some(tool_call_id)
+            })
+            .collect::<Vec<_>>();
+        completed_tool_call_ids.sort();
+        AcpTurnOutcome {
+            stop_reason,
+            assistant_text: self.assistant_text.trim().to_string(),
+            completed_tool_call_ids,
+        }
+    }
 }
 
 pub struct AcpClient {
@@ -107,11 +155,11 @@ impl AcpClient {
         Ok(client)
     }
 
-    pub async fn prompt(&mut self, prompt: &str) -> Result<String, AcpError> {
+    pub async fn prompt(&mut self, prompt: &str) -> Result<AcpTurnOutcome, AcpError> {
         enforce_max_turn_duration(self.max_turn_duration, self.prompt_inner(prompt)).await
     }
 
-    async fn prompt_inner(&mut self, prompt: &str) -> Result<String, AcpError> {
+    async fn prompt_inner(&mut self, prompt: &str) -> Result<AcpTurnOutcome, AcpError> {
         let session_id = self.session_id.clone();
         let id = self
             .send_request(
@@ -122,9 +170,17 @@ impl AcpClient {
                 }),
             )
             .await?;
-        let mut output = String::new();
-        let _ = self.read_response(id, &mut output).await?;
-        Ok(output.trim().to_string())
+        let mut progress = TurnProgress::default();
+        let response = self.read_response(id, &mut progress).await?;
+        let stop_reason = response
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AcpError::Protocol("session/prompt response omitted stopReason".to_string())
+            })?
+            .to_string();
+        Ok(progress.finish(stop_reason))
     }
 
     pub async fn shutdown(&mut self) {
@@ -134,7 +190,7 @@ impl AcpClient {
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, AcpError> {
         let id = self.send_request(method, params).await?;
-        self.read_response(id, &mut String::new()).await
+        self.read_response(id, &mut TurnProgress::default()).await
     }
 
     async fn send_request(&mut self, method: &str, params: Value) -> Result<u64, AcpError> {
@@ -157,7 +213,7 @@ impl AcpClient {
     async fn read_response(
         &mut self,
         expected_id: u64,
-        output: &mut String,
+        progress: &mut TurnProgress,
     ) -> Result<Value, AcpError> {
         loop {
             let next = tokio::time::timeout(self.idle_timeout, self.stdout.next())
@@ -172,7 +228,7 @@ impl AcpClient {
                 None => return Err(AcpError::AgentExited),
             };
             let frame: Value = serde_json::from_str(&line)?;
-            collect_agent_text(&frame, output);
+            collect_turn_progress(&frame, progress);
             if frame.get("id").and_then(Value::as_u64) != Some(expected_id) {
                 continue;
             }
@@ -209,21 +265,62 @@ where
     future.await
 }
 
-fn collect_agent_text(frame: &Value, output: &mut String) {
+fn collect_turn_progress(frame: &Value, progress: &mut TurnProgress) {
     let update = match frame.get("params").and_then(|params| params.get("update")) {
         Some(update) => update,
         None => return,
     };
-    if update.get("sessionUpdate").and_then(Value::as_str) != Some("agent_message_chunk") {
-        return;
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        Some("agent_message_chunk") => {
+            if let Some(text) = update
+                .get("content")
+                .and_then(|content| content.get("text"))
+                .and_then(Value::as_str)
+            {
+                progress.assistant_text.push_str(text);
+            }
+        }
+        Some("tool_call" | "tool_call_update") => collect_tool_status(update, progress),
+        _ => {}
     }
-    if let Some(text) = update
-        .get("content")
-        .and_then(|content| content.get("text"))
+}
+
+fn collect_tool_status(update: &Value, progress: &mut TurnProgress) {
+    let Some(tool_call_id) = update
+        .get("toolCallId")
         .and_then(Value::as_str)
-    {
-        output.push_str(text);
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(status) = update.get("status").and_then(Value::as_str) else {
+        return;
+    };
+    let tool_reported_error = update
+        .get("rawOutput")
+        .and_then(|raw_output| raw_output.get("isError"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let status = if status == "completed" && !tool_reported_error {
+        ToolCallStatus::Completed
+    } else {
+        ToolCallStatus::Other
+    };
+    progress
+        .tool_statuses
+        .insert(tool_call_id.to_string(), status);
+}
+
+#[cfg(test)]
+pub(crate) fn test_turn_outcome(
+    updates: impl IntoIterator<Item = Value>,
+    stop_reason: &str,
+) -> AcpTurnOutcome {
+    let mut progress = TurnProgress::default();
+    for update in updates {
+        collect_turn_progress(&update, &mut progress);
     }
+    progress.finish(stop_reason.to_string())
 }
 
 fn native_mcp_server(config: &Config) -> Value {
@@ -282,8 +379,8 @@ mod tests {
 
     #[test]
     fn collects_only_agent_message_chunks() {
-        let mut output = String::new();
-        collect_agent_text(
+        let mut progress = TurnProgress::default();
+        collect_turn_progress(
             &json!({
                 "method": "session/update",
                 "params": { "update": {
@@ -291,9 +388,9 @@ mod tests {
                     "content": { "type": "text", "text": "hello" }
                 }}
             }),
-            &mut output,
+            &mut progress,
         );
-        collect_agent_text(
+        collect_turn_progress(
             &json!({
                 "method": "session/update",
                 "params": { "update": {
@@ -301,9 +398,110 @@ mod tests {
                     "content": { "type": "text", "text": "secret" }
                 }}
             }),
-            &mut output,
+            &mut progress,
         );
-        assert_eq!(output, "hello");
+        assert_eq!(progress.assistant_text, "hello");
+    }
+
+    #[test]
+    fn terminal_completed_tools_are_distinct_from_failed_tools() {
+        let mut progress = TurnProgress::default();
+        for update in [
+            json!({
+                "method": "session/update",
+                "params": { "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "completed-tool",
+                    "status": "in_progress"
+                }}
+            }),
+            json!({
+                "method": "session/update",
+                "params": { "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "completed-tool",
+                    "status": "completed"
+                }}
+            }),
+            json!({
+                "method": "session/update",
+                "params": { "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "failed-tool",
+                    "status": "failed"
+                }}
+            }),
+        ] {
+            collect_turn_progress(&update, &mut progress);
+        }
+
+        assert_eq!(
+            progress.tool_statuses.get("completed-tool"),
+            Some(&ToolCallStatus::Completed)
+        );
+        assert_eq!(
+            progress.tool_statuses.get("failed-tool"),
+            Some(&ToolCallStatus::Other)
+        );
+    }
+
+    #[test]
+    fn completed_tool_with_error_output_is_not_success_evidence() {
+        let mut progress = TurnProgress::default();
+        for (tool_call_id, raw_output) in [
+            ("error-tool", Some(json!({ "isError": true }))),
+            ("clean-tool", Some(json!({ "isError": false }))),
+            ("compatible-tool", None),
+        ] {
+            collect_turn_progress(
+                &json!({
+                    "method": "session/update",
+                    "params": { "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": tool_call_id,
+                        "status": "completed",
+                        "rawOutput": raw_output
+                    }}
+                }),
+                &mut progress,
+            );
+        }
+
+        assert_eq!(
+            progress.tool_statuses.get("error-tool"),
+            Some(&ToolCallStatus::Other)
+        );
+        assert_eq!(
+            progress.tool_statuses.get("clean-tool"),
+            Some(&ToolCallStatus::Completed)
+        );
+        assert_eq!(
+            progress.tool_statuses.get("compatible-tool"),
+            Some(&ToolCallStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn later_failure_revokes_completed_evidence_for_the_same_tool() {
+        let mut progress = TurnProgress::default();
+        for status in ["completed", "failed"] {
+            collect_turn_progress(
+                &json!({
+                    "method": "session/update",
+                    "params": { "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-1",
+                        "status": status
+                    }}
+                }),
+                &mut progress,
+            );
+        }
+
+        assert_eq!(
+            progress.tool_statuses.get("tool-1"),
+            Some(&ToolCallStatus::Other)
+        );
     }
 
     #[test]

@@ -6,11 +6,13 @@ mod lifecycle;
 mod x0x;
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use acp::{AcpClient, AcpError};
+use acp::{AcpClient, AcpError, AcpTurnOutcome};
 use config::{Config, ConfigError};
 use lifecycle::{Lifecycle, LifecyclePublisher};
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_CONTEXT_MESSAGES: usize = 100;
 const PROMPT_CONTEXT_MESSAGES: usize = 20;
 const EXPLICIT_REPLY_PREFIX: &str = "X0X_REPLY:";
+const MAX_SILENT_END_TURN_RETRIES: usize = 1;
 
 #[derive(Debug, Error)]
 pub enum HarnessError {
@@ -35,6 +38,25 @@ pub enum HarnessError {
     StateIo(#[from] std::io::Error),
     #[error("state JSON failed: {0}")]
     StateJson(#[from] serde_json::Error),
+    #[error(
+        "directed ACP turn ended without visible output or a completed tool after {attempts} attempt(s); stop reason: {stop_reason}"
+    )]
+    SilentDirectedTurn {
+        attempts: usize,
+        stop_reason: String,
+    },
+}
+
+type PromptFuture<'a> = Pin<Box<dyn Future<Output = Result<AcpTurnOutcome, AcpError>> + 'a>>;
+
+trait PromptAgent {
+    fn prompt<'a>(&'a mut self, prompt: &'a str) -> PromptFuture<'a>;
+}
+
+impl PromptAgent for AcpClient {
+    fn prompt<'a>(&'a mut self, prompt: &'a str) -> PromptFuture<'a> {
+        Box::pin(AcpClient::prompt(self, prompt))
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -279,33 +301,87 @@ async fn handle_directed_message(
     row: &HistoryRow,
     envelope: &ChannelEnvelope,
     context: &ConversationContext,
-    acp: &mut AcpClient,
+    acp: &mut impl PromptAgent,
 ) -> Result<(), HarnessError> {
     let author = row.author_agent.as_deref().unwrap_or_default();
     let is_owner = author.eq_ignore_ascii_case(&config.owner_agent_id);
     let prompt = build_prompt(config, row, envelope, context, is_owner);
-    let final_text = acp.prompt(&prompt).await?;
-    let Some(reply) = reply_for_author(&final_text, is_owner) else {
-        tracing::info!(
-            author,
-            msg_id = row.msg_id,
-            "agent chose not to post a group reply"
-        );
-        return Ok(());
-    };
-
-    let response_envelope = ChannelEnvelope {
-        text: reply,
-        created_at: now_millis(),
-        client_id: uuid::Uuid::new_v4().to_string(),
-        mentions: vec![author.to_string()],
-        agent_generated: true,
-    };
-    let body = serde_json::to_string(&response_envelope)?;
-    let thread_root = row.thread_root.as_deref().unwrap_or(&row.msg_id);
-    x0x.send_group_reply(&config.group_id, &body, thread_root, &row.msg_id)
-        .await?;
+    let outcome = prompt_directed_message(acp, &prompt).await?;
+    let sent = post_turn_reply(&outcome, is_owner, |reply| async move {
+        let response_envelope = ChannelEnvelope {
+            text: reply,
+            created_at: now_millis(),
+            client_id: uuid::Uuid::new_v4().to_string(),
+            mentions: vec![author.to_string()],
+            agent_generated: true,
+        };
+        let body = serde_json::to_string(&response_envelope)?;
+        let thread_root = row.thread_root.as_deref().unwrap_or(&row.msg_id);
+        x0x.send_group_reply(&config.group_id, &body, thread_root, &row.msg_id)
+            .await?;
+        Ok(())
+    })
+    .await?;
+    if !sent {
+        if outcome.has_completed_tool() {
+            tracing::info!(
+                author,
+                msg_id = row.msg_id,
+                completed_tools = outcome.completed_tool_call_ids.len(),
+                "agent completed a tool without posting a group reply"
+            );
+        } else {
+            tracing::info!(
+                author,
+                msg_id = row.msg_id,
+                "agent chose not to post a group reply"
+            );
+        }
+    }
     Ok(())
+}
+
+async fn prompt_directed_message(
+    acp: &mut impl PromptAgent,
+    prompt: &str,
+) -> Result<AcpTurnOutcome, HarnessError> {
+    let mut attempts = 0_usize;
+    loop {
+        attempts = attempts.saturating_add(1);
+        let outcome = acp.prompt(prompt).await?;
+        if outcome.has_visible_text() || outcome.has_completed_tool() {
+            return Ok(outcome);
+        }
+        let may_retry =
+            outcome.stop_reason == "end_turn" && attempts <= MAX_SILENT_END_TURN_RETRIES;
+        if !may_retry {
+            return Err(HarnessError::SilentDirectedTurn {
+                attempts,
+                stop_reason: outcome.stop_reason,
+            });
+        }
+        tracing::warn!(
+            attempt = attempts,
+            max_retries = MAX_SILENT_END_TURN_RETRIES,
+            "directed ACP turn ended silently; retrying once"
+        );
+    }
+}
+
+async fn post_turn_reply<F, Fut>(
+    outcome: &AcpTurnOutcome,
+    is_owner: bool,
+    send: F,
+) -> Result<bool, HarnessError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<(), HarnessError>>,
+{
+    let Some(reply) = reply_for_author(&outcome.assistant_text, is_owner) else {
+        return Ok(false);
+    };
+    send(reply).await?;
+    Ok(true)
 }
 
 fn build_prompt(
@@ -399,11 +475,36 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use base64::Engine as _;
 
     use super::*;
     use crate::config::RespondTo;
+
+    struct ScriptedPrompter {
+        outcomes: VecDeque<AcpTurnOutcome>,
+        calls: usize,
+    }
+
+    impl ScriptedPrompter {
+        fn new(outcomes: impl IntoIterator<Item = AcpTurnOutcome>) -> Self {
+            Self {
+                outcomes: outcomes.into_iter().collect(),
+                calls: 0,
+            }
+        }
+    }
+
+    impl PromptAgent for ScriptedPrompter {
+        fn prompt<'a>(&'a mut self, _prompt: &'a str) -> PromptFuture<'a> {
+            self.calls = self.calls.saturating_add(1);
+            let outcome = self.outcomes.pop_front().ok_or_else(|| {
+                AcpError::Protocol("scripted ACP outcome was not provided".to_string())
+            });
+            Box::pin(std::future::ready(outcome))
+        }
+    }
 
     #[test]
     fn directed_trigger_requires_verified_exact_mention_and_owner() {
@@ -465,6 +566,143 @@ mod tests {
                 .last_seen_id,
             42
         );
+    }
+
+    #[tokio::test]
+    async fn blank_or_failed_tool_end_turn_gets_one_bounded_retry() {
+        for first_turn in [
+            silent_turn(),
+            completed_tool_wire_turn("failed-tool", Some(true)),
+        ] {
+            let mut acp = ScriptedPrompter::new([first_turn, visible_turn("recovered")]);
+            let outcome = prompt_directed_message(&mut acp, "directed prompt")
+                .await
+                .expect("one retry should recover");
+
+            assert_eq!(outcome.assistant_text, "recovered");
+            assert_eq!(acp.calls, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_tool_does_not_retry_or_duplicate_a_harness_reply() {
+        for is_error in [Some(false), None] {
+            let mut acp = ScriptedPrompter::new([
+                completed_tool_wire_turn("space-send-1", is_error),
+                visible_turn("must remain unused"),
+            ]);
+            let outcome = prompt_directed_message(&mut acp, "directed prompt")
+                .await
+                .expect("completed tool is a successful turn");
+            let sends = AtomicUsize::new(0);
+            let posted = post_turn_reply(&outcome, true, |_reply| {
+                sends.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            })
+            .await
+            .expect("no harness reply needed");
+
+            assert_eq!(acp.calls, 1);
+            assert!(!posted);
+            assert_eq!(sends.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn silent_then_answer_posts_exactly_once() {
+        let mut acp = ScriptedPrompter::new([silent_turn(), visible_turn("one answer")]);
+        let outcome = prompt_directed_message(&mut acp, "directed prompt")
+            .await
+            .expect("retry should recover");
+        let sends = AtomicUsize::new(0);
+        let posted = post_turn_reply(&outcome, true, |reply| {
+            assert_eq!(reply, "one answer");
+            sends.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .expect("reply should post");
+
+        assert!(posted);
+        assert_eq!(acp.calls, 2);
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn silent_retry_exhaustion_is_failure_after_durable_claim() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState::default();
+        let mut acp = ScriptedPrompter::new([
+            silent_turn(),
+            completed_tool_wire_turn("failed-tool", Some(true)),
+        ]);
+
+        let error = after_durable_claim(&state_path, &mut state, 42, || async {
+            prompt_directed_message(&mut acp, "directed prompt")
+                .await
+                .map(|_| ())
+        })
+        .await
+        .expect_err("exhaustion must not become success");
+
+        assert!(matches!(
+            error,
+            HarnessError::SilentDirectedTurn {
+                attempts: 2,
+                ref stop_reason
+            } if stop_reason == "end_turn"
+        ));
+        assert_eq!(acp.calls, 2);
+        assert_eq!(
+            load_state(&state_path)
+                .expect("reload state")
+                .expect("claimed state remains")
+                .last_seen_id,
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_non_end_turn_fails_without_retry() {
+        let mut acp = ScriptedPrompter::new([
+            AcpTurnOutcome {
+                stop_reason: "max_tokens".to_string(),
+                assistant_text: String::new(),
+                completed_tool_call_ids: Vec::new(),
+            },
+            visible_turn("must remain unused"),
+        ]);
+
+        let error = prompt_directed_message(&mut acp, "directed prompt")
+            .await
+            .expect_err("only end_turn is retryable");
+
+        assert!(matches!(
+            error,
+            HarnessError::SilentDirectedTurn {
+                attempts: 1,
+                ref stop_reason
+            } if stop_reason == "max_tokens"
+        ));
+        assert_eq!(acp.calls, 1);
+    }
+
+    #[test]
+    fn passive_row_remains_claim_only_without_an_acp_turn() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let config = test_config(RespondTo::OwnerOnly);
+        let row = test_row(&config.owner_agent_id, &"c".repeat(64));
+        let envelope = row.envelope().expect("valid envelope");
+        let acp = ScriptedPrompter::new([visible_turn("must remain unused")]);
+        let mut state = DurableState::default();
+
+        assert!(!should_trigger(&config, "stable", &row, &envelope));
+        claim_row(&state_path, &mut state, row.id).expect("claim passive row");
+
+        assert_eq!(acp.calls, 0);
+        assert_eq!(state.last_seen_id, row.id);
     }
 
     #[test]
@@ -529,6 +767,37 @@ mod tests {
             parallelism: 1,
             start_nonce: None,
         }
+    }
+
+    fn silent_turn() -> AcpTurnOutcome {
+        AcpTurnOutcome {
+            stop_reason: "end_turn".to_string(),
+            assistant_text: String::new(),
+            completed_tool_call_ids: Vec::new(),
+        }
+    }
+
+    fn visible_turn(text: &str) -> AcpTurnOutcome {
+        AcpTurnOutcome {
+            stop_reason: "end_turn".to_string(),
+            assistant_text: text.to_string(),
+            completed_tool_call_ids: Vec::new(),
+        }
+    }
+
+    fn completed_tool_wire_turn(tool_call_id: &str, is_error: Option<bool>) -> AcpTurnOutcome {
+        let mut update = serde_json::json!({
+            "method": "session/update",
+            "params": { "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": tool_call_id,
+                "status": "completed"
+            }}
+        });
+        if let Some(is_error) = is_error {
+            update["params"]["update"]["rawOutput"] = serde_json::json!({ "isError": is_error });
+        }
+        crate::acp::test_turn_outcome([update], "end_turn")
     }
 
     fn test_row(author: &str, mention: &str) -> HistoryRow {
