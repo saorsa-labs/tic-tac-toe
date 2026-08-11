@@ -42,10 +42,16 @@ pub struct ChannelEnvelope {
     #[serde(default)]
     pub mentions: Vec<String>,
     /// Authenticated by the signed x0x envelope. Harness-authored replies set
-    /// this marker so mutually allowlisted agents cannot recursively wake one
-    /// another. User-authored clients omit it.
+    /// this marker. User-authored clients omit it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent_generated: bool,
+    /// Server-derived hop number for an intentional, thread-correlated agent
+    /// delegation. Legacy and ordinary harness replies omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_generation: Option<u8>,
+    /// Owner-authored root that authorized the bounded delegation chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

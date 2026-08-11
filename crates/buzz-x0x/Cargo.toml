@@ -11,6 +11,7 @@ name = "buzz-x0x-mcp"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

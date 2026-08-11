@@ -24,6 +24,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_CONTEXT_MESSAGES: usize = 100;
 const PROMPT_CONTEXT_MESSAGES: usize = 20;
 const EXPLICIT_REPLY_PREFIX: &str = "X0X_REPLY:";
+const MAX_AGENT_WAKE_GENERATION: u8 = 1;
 const MAX_SILENT_END_TURN_RETRIES: usize = 1;
 const SILENT_RECONCILE_BACKOFFS: [Duration; 3] = [
     Duration::from_secs(5),
@@ -116,6 +117,8 @@ struct ContextMessage {
     author: String,
     text: String,
     msg_id: String,
+    mentions: Vec<String>,
+    agent_generated: bool,
 }
 
 #[derive(Default)]
@@ -144,6 +147,8 @@ impl ConversationContext {
                 .unwrap_or_else(|| "unknown".to_string()),
             text: envelope.text.clone(),
             msg_id: row.msg_id.clone(),
+            mentions: envelope.mentions.clone(),
+            agent_generated: envelope.agent_generated,
         });
         while self.messages.len() > MAX_CONTEXT_MESSAGES {
             self.messages.pop_front();
@@ -328,8 +333,8 @@ async fn reconcile(
             context.push(&row, envelope);
         }
 
-        if let Some(envelope) =
-            envelope.filter(|envelope| should_trigger(config, stable_group_id, &row, envelope))
+        if let Some(envelope) = envelope
+            .filter(|envelope| should_trigger(config, stable_group_id, &row, envelope, context))
         {
             after_durable_claim(state_path, state, row.id, || async {
                 harness.lifecycle.publish(Lifecycle::Waking, None)?;
@@ -383,18 +388,59 @@ fn should_trigger(
     stable_group_id: &str,
     row: &HistoryRow,
     envelope: &ChannelEnvelope,
+    context: &ConversationContext,
 ) -> bool {
     let Some(author) = row.author_agent.as_deref() else {
         return false;
     };
-    row.is_verified_inbound(stable_group_id)
+    let basic_gate = row.is_verified_inbound(stable_group_id)
         && !author.eq_ignore_ascii_case(&config.agent_id)
         && config.author_allowed(author)
-        && !envelope.agent_generated
         && envelope
             .mentions
             .iter()
-            .any(|mention| mention.eq_ignore_ascii_case(&config.agent_id))
+            .any(|mention| mention.eq_ignore_ascii_case(&config.agent_id));
+    if !basic_gate {
+        return false;
+    }
+    if !envelope.agent_generated {
+        return true;
+    }
+    intentional_agent_delegation(config, row, envelope, context)
+}
+
+fn intentional_agent_delegation(
+    config: &Config,
+    row: &HistoryRow,
+    envelope: &ChannelEnvelope,
+    context: &ConversationContext,
+) -> bool {
+    let (Some(generation), Some(delegation_root)) = (
+        envelope.agent_generation,
+        envelope.delegation_root.as_deref(),
+    ) else {
+        return false;
+    };
+    if generation == 0 || generation > MAX_AGENT_WAKE_GENERATION {
+        return false;
+    }
+    if row.thread_root.as_deref() != Some(delegation_root)
+        || row.thread_parent.as_deref() != Some(delegation_root)
+    {
+        return false;
+    }
+    let Some(delegate) = row.author_agent.as_deref() else {
+        return false;
+    };
+    context.messages.iter().any(|message| {
+        message.msg_id == delegation_root
+            && message.author.eq_ignore_ascii_case(&config.owner_agent_id)
+            && !message.agent_generated
+            && message
+                .mentions
+                .iter()
+                .any(|mention| mention.eq_ignore_ascii_case(delegate))
+    })
 }
 
 async fn handle_directed_message(
@@ -416,6 +462,8 @@ async fn handle_directed_message(
             client_id: uuid::Uuid::new_v4().to_string(),
             mentions: vec![author.to_string()],
             agent_generated: true,
+            agent_generation: None,
+            delegation_root: None,
         };
         let body = serde_json::to_string(&response_envelope)?;
         let thread_root = row.thread_root.as_deref().unwrap_or(&row.msg_id);
@@ -526,7 +574,9 @@ fn build_prompt(
          this sender. Use `space_send` only when the incoming request explicitly \
          asks you to delegate to or notify another member, and never duplicate \
          the sender reply through that tool; the harness preserves its verified \
-         thread root and parent.\n\n\
+         thread root and parent. For a delegated send, keep this Thread root and \
+         set `thread_parent` to this Message id so the native tool can derive its \
+         bounded delegation generation.\n\n\
          {peer_instruction}",
         config.group_id,
         row.author_agent.as_deref().unwrap_or("unknown"),
@@ -669,10 +719,22 @@ mod tests {
         let config = test_config(RespondTo::OwnerOnly);
         let mut row = test_row(&config.owner_agent_id, &config.agent_id);
         let envelope = row.envelope().expect("valid envelope");
-        assert!(should_trigger(&config, "stable", &row, &envelope));
+        assert!(should_trigger(
+            &config,
+            "stable",
+            &row,
+            &envelope,
+            &ConversationContext::default()
+        ));
 
         row.provenance = "LocalSend".to_string();
-        assert!(!should_trigger(&config, "stable", &row, &envelope));
+        assert!(!should_trigger(
+            &config,
+            "stable",
+            &row,
+            &envelope,
+            &ConversationContext::default()
+        ));
     }
 
     #[test]
@@ -680,7 +742,13 @@ mod tests {
         let config = test_config(RespondTo::OwnerOnly);
         let row = test_row(&config.owner_agent_id, &"c".repeat(64));
         let envelope = row.envelope().expect("valid envelope");
-        assert!(!should_trigger(&config, "stable", &row, &envelope));
+        assert!(!should_trigger(
+            &config,
+            "stable",
+            &row,
+            &envelope,
+            &ConversationContext::default()
+        ));
     }
 
     #[test]
@@ -695,7 +763,108 @@ mod tests {
             .encode(serde_json::to_vec(&envelope).expect("encode envelope"));
         let envelope = row.envelope().expect("valid generated envelope");
 
-        assert!(!should_trigger(&config, "stable", &row, &envelope));
+        assert!(!should_trigger(
+            &config,
+            "stable",
+            &row,
+            &envelope,
+            &ConversationContext::default()
+        ));
+    }
+
+    #[test]
+    fn owner_root_authorizes_one_allowlisted_agent_delegation() {
+        let guide = "c".repeat(64);
+        let mut config = test_config(RespondTo::Allowlist);
+        config.respond_to_allowlist.insert(guide.clone());
+
+        let root = test_row(&config.owner_agent_id, &guide);
+        let root_envelope = root.envelope().expect("valid owner root");
+        let mut context = ConversationContext::default();
+        context.push(&root, &root_envelope);
+
+        let mut delegated = test_row(&guide, &config.agent_id);
+        delegated.msg_id = "2".repeat(64);
+        delegated.thread_root = Some(root.msg_id.clone());
+        delegated.thread_parent = Some(root.msg_id.clone());
+        let mut delegated_envelope = delegated.envelope().expect("valid delegated envelope");
+        delegated_envelope.agent_generated = true;
+        delegated_envelope.agent_generation = Some(1);
+        delegated_envelope.delegation_root = Some(root.msg_id.clone());
+        set_row_envelope(&mut delegated, &delegated_envelope);
+        let delegated_envelope = delegated.envelope().expect("encoded delegation");
+
+        assert!(should_trigger(
+            &config,
+            "stable",
+            &delegated,
+            &delegated_envelope,
+            &context
+        ));
+    }
+
+    #[test]
+    fn second_generation_cannot_wake_another_agent() {
+        let guide = "c".repeat(64);
+        let x = "d".repeat(64);
+        let mut config = test_config(RespondTo::Allowlist);
+        config.respond_to_allowlist.insert(x.clone());
+
+        let root = test_row(&config.owner_agent_id, &guide);
+        let root_envelope = root.envelope().expect("valid owner root");
+        let mut context = ConversationContext::default();
+        context.push(&root, &root_envelope);
+
+        let mut delegated = test_row(&x, &config.agent_id);
+        delegated.msg_id = "3".repeat(64);
+        delegated.thread_root = Some(root.msg_id.clone());
+        delegated.thread_parent = Some("2".repeat(64));
+        let mut delegated_envelope = delegated.envelope().expect("valid delegated envelope");
+        delegated_envelope.agent_generated = true;
+        delegated_envelope.agent_generation = Some(2);
+        delegated_envelope.delegation_root = Some(root.msg_id.clone());
+        set_row_envelope(&mut delegated, &delegated_envelope);
+        let delegated_envelope = delegated.envelope().expect("encoded delegation");
+
+        assert!(!should_trigger(
+            &config,
+            "stable",
+            &delegated,
+            &delegated_envelope,
+            &context
+        ));
+    }
+
+    #[test]
+    fn forged_delegation_without_owner_correlation_is_rejected() {
+        let guide = "c".repeat(64);
+        let unrelated = "d".repeat(64);
+        let mut config = test_config(RespondTo::Allowlist);
+        config.respond_to_allowlist.insert(guide.clone());
+
+        let root = test_row(&config.owner_agent_id, &unrelated);
+        let root_envelope = root.envelope().expect("valid owner root");
+        let mut context = ConversationContext::default();
+        context.push(&root, &root_envelope);
+
+        let mut forged = test_row(&guide, &config.agent_id);
+        forged.msg_id = "4".repeat(64);
+        forged.thread_root = Some(root.msg_id.clone());
+        forged.thread_parent = Some(root.msg_id.clone());
+        let mut forged_envelope = forged.envelope().expect("valid forged envelope");
+        forged_envelope.agent_generated = true;
+        forged_envelope.agent_generation = Some(1);
+        forged_envelope.delegation_root = Some(root.msg_id.clone());
+        set_row_envelope(&mut forged, &forged_envelope);
+        let forged_envelope = forged.envelope().expect("encoded forged envelope");
+
+        assert!(!should_trigger(
+            &config,
+            "stable",
+            &forged,
+            &forged_envelope,
+            &context
+        ));
     }
 
     #[tokio::test]
@@ -1079,7 +1248,13 @@ mod tests {
         let acp = ScriptedPrompter::new([visible_turn("must remain unused")]);
         let mut state = DurableState::default();
 
-        assert!(!should_trigger(&config, "stable", &row, &envelope));
+        assert!(!should_trigger(
+            &config,
+            "stable",
+            &row,
+            &envelope,
+            &ConversationContext::default()
+        ));
         claim_row(&state_path, &mut state, row.id).expect("claim passive row");
 
         assert_eq!(acp.calls, 0);
@@ -1143,6 +1318,7 @@ mod tests {
         assert!(prompt.contains("`space_members`"));
         assert!(prompt.contains("`space_send`"));
         assert!(prompt.contains("explicitly asks you to delegate to or notify another member"));
+        assert!(prompt.contains("bounded delegation generation"));
         assert!(!prompt.contains("community_send"));
     }
 
@@ -1231,5 +1407,10 @@ mod tests {
             thread_root: None,
             thread_parent: None,
         }
+    }
+
+    fn set_row_envelope(row: &mut HistoryRow, envelope: &ChannelEnvelope) {
+        row.payload = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(envelope).expect("encode envelope"));
     }
 }
