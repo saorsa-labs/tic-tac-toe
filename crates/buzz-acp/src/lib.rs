@@ -119,6 +119,8 @@ struct ContextMessage {
     msg_id: String,
     mentions: Vec<String>,
     agent_generated: bool,
+    thread_root: Option<String>,
+    thread_parent: Option<String>,
 }
 
 #[derive(Default)]
@@ -149,6 +151,8 @@ impl ConversationContext {
             msg_id: row.msg_id.clone(),
             mentions: envelope.mentions.clone(),
             agent_generated: envelope.agent_generated,
+            thread_root: row.thread_root.clone(),
+            thread_parent: row.thread_parent.clone(),
         });
         while self.messages.len() > MAX_CONTEXT_MESSAGES {
             self.messages.pop_front();
@@ -436,6 +440,8 @@ fn intentional_agent_delegation(
         message.msg_id == delegation_root
             && message.author.eq_ignore_ascii_case(&config.owner_agent_id)
             && !message.agent_generated
+            && message.thread_root.is_none()
+            && message.thread_parent.is_none()
             && message
                 .mentions
                 .iter()
@@ -863,6 +869,40 @@ mod tests {
             "stable",
             &forged,
             &forged_envelope,
+            &context
+        ));
+    }
+
+    #[test]
+    fn threaded_owner_reply_cannot_be_rebased_as_a_delegation_root() {
+        let guide = "c".repeat(64);
+        let actual_root = "9".repeat(64);
+        let mut config = test_config(RespondTo::Allowlist);
+        config.respond_to_allowlist.insert(guide.clone());
+
+        let mut owner_reply = test_row(&config.owner_agent_id, &guide);
+        owner_reply.thread_root = Some(actual_root.clone());
+        owner_reply.thread_parent = Some(actual_root);
+        let owner_reply_envelope = owner_reply.envelope().expect("valid owner reply");
+        let mut context = ConversationContext::default();
+        context.push(&owner_reply, &owner_reply_envelope);
+
+        let mut rebased = test_row(&guide, &config.agent_id);
+        rebased.msg_id = "5".repeat(64);
+        rebased.thread_root = Some(owner_reply.msg_id.clone());
+        rebased.thread_parent = Some(owner_reply.msg_id.clone());
+        let mut rebased_envelope = rebased.envelope().expect("valid rebased envelope");
+        rebased_envelope.agent_generated = true;
+        rebased_envelope.agent_generation = Some(1);
+        rebased_envelope.delegation_root = Some(owner_reply.msg_id.clone());
+        set_row_envelope(&mut rebased, &rebased_envelope);
+        let rebased_envelope = rebased.envelope().expect("encoded rebased envelope");
+
+        assert!(!should_trigger(
+            &config,
+            "stable",
+            &rebased,
+            &rebased_envelope,
             &context
         ));
     }

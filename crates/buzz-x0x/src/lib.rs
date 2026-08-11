@@ -371,6 +371,8 @@ struct ToolHistoryRow {
     payload: String,
     #[serde(default)]
     thread_root: Option<String>,
+    #[serde(default)]
+    thread_parent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,7 +470,11 @@ fn derive_delegation(
     }
 
     if !envelope.agent_generated {
-        if author.eq_ignore_ascii_case(&config.owner_agent_id) && thread_root == parent.msg_id {
+        if author.eq_ignore_ascii_case(&config.owner_agent_id)
+            && thread_root == parent.msg_id
+            && parent.thread_root.is_none()
+            && parent.thread_parent.is_none()
+        {
             return Ok(Some(AgentDelegation {
                 generation: 1,
                 root: parent.msg_id.clone(),
@@ -483,17 +489,23 @@ fn derive_delegation(
     ) else {
         return Ok(None);
     };
-    if generation == 0 || parent.thread_root.as_deref() != Some(root) || thread_root != root {
+    if generation == 0 || thread_root != root {
+        return Ok(None);
+    }
+    if generation >= MAX_AGENT_GENERATION {
+        return Err(AppError::new(format!(
+            "agent delegation exceeds the maximum generation of {MAX_AGENT_GENERATION}"
+        )));
+    }
+    if generation != 1
+        || parent.thread_root.as_deref() != Some(root)
+        || parent.thread_parent.as_deref() != Some(root)
+    {
         return Ok(None);
     }
     let Some(next_generation) = generation.checked_add(1) else {
         return Err(AppError::new("agent delegation generation overflow"));
     };
-    if next_generation > MAX_AGENT_GENERATION {
-        return Err(AppError::new(format!(
-            "agent delegation exceeds the maximum generation of {MAX_AGENT_GENERATION}"
-        )));
-    }
     Ok(Some(AgentDelegation {
         generation: next_generation,
         root: root.to_owned(),
@@ -751,7 +763,8 @@ mod tests {
             "thread_parent": root
         }))
         .expect("first request");
-        let owner_parent = tool_history_row(&root, OWNER_ID, AGENT_ID, false, None, None, None);
+        let owner_parent =
+            tool_history_row(&root, OWNER_ID, AGENT_ID, false, None, None, None, None);
         assert_eq!(
             derive_delegation(&config, &first_request, &owner_parent).expect("first derivation"),
             Some(AgentDelegation {
@@ -774,6 +787,7 @@ mod tests {
             AGENT_ID,
             true,
             Some(1),
+            Some(&root),
             Some(&root),
             Some(&root),
         );
@@ -807,11 +821,54 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(
             derive_delegation(&config, &request, &unrelated_human).expect("safe rejection"),
             None
         );
+
+        let actual_root = "f".repeat(64);
+        let rebase_request = parse_send_arguments(json!({
+            "text": "rebase owner reply",
+            "mentions": [OWNER_ID],
+            "thread_root": parent_id,
+            "thread_parent": parent_id
+        }))
+        .expect("rebase request");
+        let threaded_owner = tool_history_row(
+            &parent_id,
+            OWNER_ID,
+            AGENT_ID,
+            false,
+            None,
+            None,
+            Some(&actual_root),
+            Some(&actual_root),
+        );
+        assert_eq!(
+            derive_delegation(&config, &rebase_request, &threaded_owner)
+                .expect("threaded owner rejection"),
+            None
+        );
+
+        for parent_thread in [None, Some(actual_root.as_str())] {
+            let malformed_first_parent = tool_history_row(
+                &parent_id,
+                &"f".repeat(64),
+                AGENT_ID,
+                true,
+                Some(1),
+                Some(&root),
+                Some(&root),
+                parent_thread,
+            );
+            assert_eq!(
+                derive_delegation(&config, &request, &malformed_first_parent)
+                    .expect("malformed first generation rejection"),
+                None
+            );
+        }
 
         let second_parent = tool_history_row(
             &parent_id,
@@ -819,6 +876,7 @@ mod tests {
             AGENT_ID,
             true,
             Some(2),
+            Some(&root),
             Some(&root),
             Some(&root),
         );
@@ -885,7 +943,7 @@ mod tests {
     async fn threaded_space_send_derives_server_owned_delegation_metadata() {
         let directory = tempfile::tempdir().expect("temp dir");
         let root = "d".repeat(64);
-        let server = spawn_threaded_send_server(&root);
+        let server = spawn_threaded_send_server(&root, None, true);
         write_endpoint(directory.path(), server.address, "thread-token");
         let tools = X0xTools::new(RuntimeConfig::for_test(
             directory.path().to_path_buf(),
@@ -907,6 +965,37 @@ mod tests {
             )
             .await
             .expect("threaded send");
+        assert_eq!(sent["msg_id"], "f".repeat(64));
+        server.join.join().expect("threaded server");
+    }
+
+    #[tokio::test]
+    async fn threaded_owner_reply_is_not_rebased_by_production_tool_path() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let parent_id = "d".repeat(64);
+        let actual_root = "e".repeat(64);
+        let server = spawn_threaded_send_server(&parent_id, Some(&actual_root), false);
+        write_endpoint(directory.path(), server.address, "thread-token");
+        let tools = X0xTools::new(RuntimeConfig::for_test(
+            directory.path().to_path_buf(),
+            AGENT_ID,
+            OWNER_ID,
+            GROUP_ID,
+        ))
+        .expect("tools");
+
+        let sent = tools
+            .call_tool(
+                "space_send",
+                json!({
+                    "text": "do not rebase",
+                    "mentions": ["f".repeat(64)],
+                    "thread_root": parent_id,
+                    "thread_parent": parent_id
+                }),
+            )
+            .await
+            .expect("safe unmarked send");
         assert_eq!(sent["msg_id"], "f".repeat(64));
         server.join.join().expect("threaded server");
     }
@@ -1002,6 +1091,7 @@ mod tests {
         agent_generation: Option<u8>,
         delegation_root: Option<&str>,
         thread_root: Option<&str>,
+        thread_parent: Option<&str>,
     ) -> ToolHistoryRow {
         let mut envelope = json!({
             "text": "delegation",
@@ -1025,6 +1115,7 @@ mod tests {
             signed: true,
             payload: base64::engine::general_purpose::STANDARD.encode(envelope.to_string()),
             thread_root: thread_root.map(str::to_owned),
+            thread_parent: thread_parent.map(str::to_owned),
         }
     }
 
@@ -1074,12 +1165,26 @@ mod tests {
         FakeServer { address, join }
     }
 
-    fn spawn_threaded_send_server(root: &str) -> FakeServer {
+    fn spawn_threaded_send_server(
+        parent_id: &str,
+        parent_ancestry: Option<&str>,
+        expect_delegation: bool,
+    ) -> FakeServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake x0xd");
         let address = listener.local_addr().expect("fake address");
-        let root = root.to_owned();
+        let parent_id = parent_id.to_owned();
+        let parent_ancestry = parent_ancestry.map(str::to_owned);
         let join = thread::spawn(move || {
-            let parent = tool_history_row(&root, OWNER_ID, AGENT_ID, false, None, None, None);
+            let parent = tool_history_row(
+                &parent_id,
+                OWNER_ID,
+                AGENT_ID,
+                false,
+                None,
+                None,
+                parent_ancestry.as_deref(),
+                parent_ancestry.as_deref(),
+            );
             let history = json!({
                 "ok": true,
                 "count": 1,
@@ -1093,6 +1198,7 @@ mod tests {
                     "signed": parent.signed,
                     "payload": parent.payload,
                     "thread_root": parent.thread_root,
+                    "thread_parent": parent.thread_parent,
                 }]
             });
             let (mut history_stream, _) = listener.accept().expect("accept history request");
@@ -1120,8 +1226,13 @@ mod tests {
                 serde_json::from_str(group_send["body"].as_str().expect("native envelope string"))
                     .expect("native envelope JSON");
             assert_eq!(envelope["agentGenerated"], true);
-            assert_eq!(envelope["agentGeneration"], 1);
-            assert_eq!(envelope["delegationRoot"], root);
+            if expect_delegation {
+                assert_eq!(envelope["agentGeneration"], 1);
+                assert_eq!(envelope["delegationRoot"], parent_id);
+            } else {
+                assert!(envelope.get("agentGeneration").is_none());
+                assert!(envelope.get("delegationRoot").is_none());
+            }
             write_json_response(
                 &mut send_stream,
                 &json!({"ok": true, "msg_id": "f".repeat(64)}),
