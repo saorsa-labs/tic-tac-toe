@@ -81,6 +81,41 @@ fn atomic_write_restricted(path: &Path, payload: &[u8]) -> Result<(), String> {
     result
 }
 
+fn atomic_write_new_restricted(path: &Path, payload: &[u8]) -> Result<(), std::io::Error> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| std::io::Error::other("native causal path has no UTF-8 filename"))?;
+    let temporary = path.with_file_name(format!("{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(payload)?;
+        file.sync_all()?;
+        std::fs::hard_link(&temporary, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        std::fs::remove_file(&temporary)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 pub(crate) fn validate_native_agent_parallelism(parallelism: u32) -> Result<(), String> {
     if parallelism == 1 {
         Ok(())
@@ -255,7 +290,22 @@ pub(crate) fn persist_native_pending_causal_message(
         state: ManagedAgentPendingCausalState::Pending,
     })
     .map_err(|error| format!("failed to serialize native pending causal message: {error}"))?;
-    atomic_write_restricted(&path, &payload)?;
+    match atomic_write_new_restricted(&path, &payload) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return adopt_existing_pending_causal_message(
+                &path,
+                group_id,
+                start_nonce,
+                &normalized_msg_id,
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to create native pending causal message: {error}"
+            ));
+        }
+    }
     if let Err(error) =
         ensure_native_causal_message_not_completed(data_dir, group_id, &normalized_msg_id)
     {
@@ -749,6 +799,20 @@ mod tests {
             serde_json::from_slice(&std::fs::read(final_path).expect("read final pending"))
                 .expect("final pending is complete JSON");
         assert_eq!(pending.msg_id, msg_id);
+    }
+
+    #[test]
+    fn concurrent_pending_stager_cannot_replace_an_existing_claim() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("claim.json");
+        atomic_write_new_restricted(&path, br#"{"state":"claimed"}"#).expect("create first claim");
+        let error = atomic_write_new_restricted(&path, br#"{"state":"pending"}"#)
+            .expect_err("concurrent stager cannot replace the claim");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(path).expect("read winning claim"),
+            br#"{"state":"claimed"}"#
+        );
     }
 
     #[cfg(unix)]

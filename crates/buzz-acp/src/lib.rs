@@ -173,6 +173,7 @@ struct ConversationContext {
 struct HarnessContext<'a> {
     config: &'a Config,
     lifecycle: &'a LifecyclePublisher,
+    causal_nonce: &'a str,
 }
 
 impl ConversationContext {
@@ -246,6 +247,10 @@ async fn async_main() -> Result<(), HarnessError> {
 }
 
 async fn run_harness(config: &Config, lifecycle: &LifecyclePublisher) -> Result<(), HarnessError> {
+    let causal_nonce = config
+        .start_nonce
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
     let x0x = X0xClient::new(config.data_dir.clone())?;
     x0x.verify_identity(&config.agent_id).await?;
     let stable_group_id = x0x.resolve_group(&config.group_id).await?;
@@ -303,7 +308,11 @@ async fn run_harness(config: &Config, lifecycle: &LifecyclePublisher) -> Result<
                 break;
             }
         }
-        let harness = HarnessContext { config, lifecycle };
+        let harness = HarnessContext {
+            config,
+            lifecycle,
+            causal_nonce: &causal_nonce,
+        };
         let mut attempt = LiveReconcileAttempt {
             harness: &harness,
             x0x: &x0x,
@@ -402,10 +411,10 @@ fn persist_completed_causal(config: &Config, msg_id: &str) -> Result<(), Harness
     Ok(())
 }
 
-fn load_pending_causal(config: &Config) -> Result<Vec<PendingCausalEntry>, HarnessError> {
-    let Some(start_nonce) = config.start_nonce.as_deref() else {
-        return Ok(Vec::new());
-    };
+fn load_pending_causal(
+    config: &Config,
+    start_nonce: &str,
+) -> Result<Vec<PendingCausalEntry>, HarnessError> {
     let dir = pending_causal_dir(config);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -472,6 +481,65 @@ fn load_pending_causal(config: &Config) -> Result<Vec<PendingCausalEntry>, Harne
     Ok(pending)
 }
 
+/// Put every directed row, including ordinary live/history delivery, through
+/// the same exact durable handoff used by a cold-wake redelivery. Creation is
+/// no-replace so a concurrent desktop wake cannot reset a claimed/executing
+/// row back to pending.
+fn stage_causal_message(
+    config: &Config,
+    start_nonce: &str,
+    msg_id: &str,
+) -> Result<Option<PendingCausalEntry>, HarnessError> {
+    let canonical_msg_id = msg_id.to_ascii_lowercase();
+    if canonical_msg_id.len() != 64
+        || !canonical_msg_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || start_nonce.len() != 32
+        || !start_nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(HarnessError::PendingCausalInvalid(msg_id.to_string()));
+    }
+    if completed_causal_exists(config, &canonical_msg_id)? {
+        return Ok(None);
+    }
+
+    let dir = pending_causal_dir(config);
+    crate::storage::ensure_dir(&dir)?;
+    let path = dir.join(format!("{canonical_msg_id}.json"));
+    let message = PendingCausalMessage {
+        version: 2,
+        start_nonce: start_nonce.to_ascii_lowercase(),
+        group_id: config.group_id.clone(),
+        msg_id: canonical_msg_id.clone(),
+        state: PendingCausalState::Pending,
+    };
+    let bytes = serde_json::to_vec(&message)?;
+    match crate::storage::write_atomic_new(&path, &bytes) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let staged = load_pending_causal(config, start_nonce)?
+        .into_iter()
+        .find(|entry| entry.message.msg_id == canonical_msg_id);
+    match staged {
+        Some(entry)
+            if entry.message.state == PendingCausalState::Pending
+                || (entry.message.version == 2
+                    && entry.message.state == PendingCausalState::Claimed) =>
+        {
+            Ok(Some(entry))
+        }
+        Some(_) => Ok(None),
+        None if completed_causal_exists(config, &canonical_msg_id)? => Ok(None),
+        None => Err(HarnessError::PendingCausalInvalid(
+            path.display().to_string(),
+        )),
+    }
+}
+
 fn persist_pending_causal(entry: &PendingCausalEntry) -> Result<(), HarnessError> {
     let bytes = serde_json::to_vec(&entry.message)?;
     crate::storage::write_atomic(&entry.path, &bytes)?;
@@ -527,6 +595,27 @@ where
     result
 }
 
+async fn after_durable_ordinary_claim<F, Fut>(
+    config: &Config,
+    start_nonce: &str,
+    state_path: &Path,
+    state: &mut DurableState,
+    row_id: i64,
+    msg_id: &str,
+    operation: F,
+) -> Result<(), HarnessError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), HarnessError>>,
+{
+    let Some(mut entry) = stage_causal_message(config, start_nonce, msg_id)? else {
+        // A completed or ambiguous exact claim is already authoritative. Move
+        // the ordinary history cursor past it without entering ACP again.
+        return claim_row(state_path, state, row_id);
+    };
+    after_durable_pending_claim(config, state_path, state, row_id, &mut entry, operation).await
+}
+
 async fn reconcile_pending_causal(
     harness: &HarnessContext<'_>,
     x0x: &X0xClient,
@@ -537,7 +626,7 @@ async fn reconcile_pending_causal(
     acp: &mut AcpClient,
 ) -> Result<(), HarnessError> {
     let mut pending_rows = Vec::new();
-    for entry in load_pending_causal(harness.config)? {
+    for entry in load_pending_causal(harness.config, harness.causal_nonce)? {
         if entry.message.state == PendingCausalState::Executing
             || (entry.message.version == 1 && entry.message.state == PendingCausalState::Claimed)
         {
@@ -637,12 +726,21 @@ async fn reconcile(
         if let Some(envelope) = envelope
             .filter(|envelope| should_trigger(config, stable_group_id, &row, envelope, context))
         {
-            after_durable_claim(state_path, state, row.id, || async {
-                harness.lifecycle.publish(Lifecycle::Waking, None)?;
-                handle_directed_message(config, x0x, &row, &envelope, context, acp).await?;
-                harness.lifecycle.publish(Lifecycle::Ready, None)?;
-                Ok(())
-            })
+            let msg_id = row.msg_id.clone();
+            after_durable_ordinary_claim(
+                config,
+                harness.causal_nonce,
+                state_path,
+                state,
+                row.id,
+                &msg_id,
+                || async {
+                    harness.lifecycle.publish(Lifecycle::Waking, None)?;
+                    handle_directed_message(config, x0x, &row, &envelope, context, acp).await?;
+                    harness.lifecycle.publish(Lifecycle::Ready, None)?;
+                    Ok(())
+                },
+            )
             .await?;
         } else {
             claim_row(state_path, state, row.id)?;
@@ -656,6 +754,7 @@ fn claim_row(state_path: &Path, state: &mut DurableState, row_id: i64) -> Result
     persist_state(state_path, state)
 }
 
+#[cfg(test)]
 async fn after_durable_claim<F, Fut>(
     state_path: &Path,
     state: &mut DurableState,
@@ -1333,7 +1432,7 @@ mod tests {
         // exact group+msg completion ledger and cannot trigger another turn.
         entry.message.state = PendingCausalState::Pending;
         persist_pending_causal(&entry).expect("recreate stale pending file");
-        assert!(load_pending_causal(&config)
+        assert!(load_pending_causal(&config, &"1".repeat(32))
             .expect("completion suppresses replay")
             .is_empty());
         assert!(!pending_path.exists());
@@ -1350,9 +1449,74 @@ mod tests {
         .expect("mutate completion group");
         persist_pending_causal(&entry).expect("recreate pending beside invalid completion");
         assert!(matches!(
-            load_pending_causal(&config),
+            load_pending_causal(&config, &"1".repeat(32)),
             Err(HarnessError::PendingCausalInvalid(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_completion_suppresses_a_later_staged_causal_replay() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(RespondTo::OwnerOnly);
+        config.data_dir = directory.path().to_path_buf();
+        let nonce = "1".repeat(32);
+        let msg_id = "c".repeat(64);
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+        let turns = AtomicUsize::new(0);
+
+        after_durable_ordinary_claim(
+            &config,
+            &nonce,
+            &state_path,
+            &mut state,
+            42,
+            &msg_id,
+            || {
+                turns.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("ordinary directed row completes");
+        assert_eq!(turns.load(Ordering::SeqCst), 1);
+        assert!(completed_causal_exists(&config, &msg_id).expect("read ordinary completion"));
+
+        // Model a stale wake artifact that appears after the ordinary live
+        // path completed. The exact shared tombstone removes it before ACP.
+        let pending_dir = pending_causal_dir(&config);
+        crate::storage::ensure_dir(&pending_dir).expect("create pending directory");
+        let stale = PendingCausalEntry {
+            path: pending_dir.join(format!("{msg_id}.json")),
+            message: PendingCausalMessage {
+                version: 2,
+                start_nonce: nonce.clone(),
+                group_id: config.group_id.clone(),
+                msg_id: msg_id.clone(),
+                state: PendingCausalState::Pending,
+            },
+        };
+        persist_pending_causal(&stale).expect("stage stale causal wake");
+        assert!(load_pending_causal(&config, &nonce)
+            .expect("shared completion suppresses stale wake")
+            .is_empty());
+
+        after_durable_ordinary_claim(
+            &config,
+            &nonce,
+            &state_path,
+            &mut state,
+            42,
+            &msg_id,
+            || {
+                turns.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("replayed ordinary row is consumed");
+        assert_eq!(turns.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
