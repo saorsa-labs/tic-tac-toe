@@ -41,6 +41,8 @@ pub enum AcpError {
 pub(crate) struct AcpTurnOutcome {
     pub(crate) stop_reason: String,
     pub(crate) assistant_text: String,
+    pub(crate) saw_any_tool_call: bool,
+    pub(crate) ambiguous_tool_activity: bool,
     pub(crate) completed_tool_call_ids: Vec<String>,
 }
 
@@ -52,22 +54,34 @@ impl AcpTurnOutcome {
     pub(crate) fn has_completed_tool(&self) -> bool {
         !self.completed_tool_call_ids.is_empty()
     }
+
+    pub(crate) fn has_ambiguous_tool_activity(&self) -> bool {
+        self.ambiguous_tool_activity
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolCallStatus {
     Completed,
-    Other,
+    Pending,
+    TerminalFailure,
 }
 
 #[derive(Debug, Default)]
 struct TurnProgress {
     assistant_text: String,
+    saw_any_tool_call: bool,
+    saw_unidentified_tool_call: bool,
     tool_statuses: HashMap<String, ToolCallStatus>,
 }
 
 impl TurnProgress {
     fn finish(self, stop_reason: String) -> AcpTurnOutcome {
+        let ambiguous_tool_activity = self.saw_unidentified_tool_call
+            || self
+                .tool_statuses
+                .values()
+                .any(|status| *status != ToolCallStatus::Completed);
         let mut completed_tool_call_ids = self
             .tool_statuses
             .into_iter()
@@ -79,6 +93,8 @@ impl TurnProgress {
         AcpTurnOutcome {
             stop_reason,
             assistant_text: self.assistant_text.trim().to_string(),
+            saw_any_tool_call: self.saw_any_tool_call,
+            ambiguous_tool_activity,
             completed_tool_call_ids,
         }
     }
@@ -280,7 +296,10 @@ fn collect_turn_progress(frame: &Value, progress: &mut TurnProgress) {
                 progress.assistant_text.push_str(text);
             }
         }
-        Some("tool_call" | "tool_call_update") => collect_tool_status(update, progress),
+        Some("tool_call" | "tool_call_update") => {
+            progress.saw_any_tool_call = true;
+            collect_tool_status(update, progress);
+        }
         _ => {}
     }
 }
@@ -291,8 +310,13 @@ fn collect_tool_status(update: &Value, progress: &mut TurnProgress) {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
     else {
+        progress.saw_unidentified_tool_call = true;
         return;
     };
+    progress
+        .tool_statuses
+        .entry(tool_call_id.to_string())
+        .or_insert(ToolCallStatus::Pending);
     let Some(status) = update.get("status").and_then(Value::as_str) else {
         return;
     };
@@ -301,14 +325,16 @@ fn collect_tool_status(update: &Value, progress: &mut TurnProgress) {
         .and_then(|raw_output| raw_output.get("isError"))
         .and_then(Value::as_bool)
         == Some(true);
-    let status = if status == "completed" && !tool_reported_error {
-        ToolCallStatus::Completed
-    } else {
-        ToolCallStatus::Other
+    let next_status = match status {
+        "completed" if !tool_reported_error => ToolCallStatus::Completed,
+        "completed" | "failed" | "cancelled" | "error" => ToolCallStatus::TerminalFailure,
+        _ => ToolCallStatus::Pending,
     };
-    progress
-        .tool_statuses
-        .insert(tool_call_id.to_string(), status);
+    if let Some(current_status) = progress.tool_statuses.get_mut(tool_call_id) {
+        if *current_status != ToolCallStatus::TerminalFailure {
+            *current_status = next_status;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -441,7 +467,7 @@ mod tests {
         );
         assert_eq!(
             progress.tool_statuses.get("failed-tool"),
-            Some(&ToolCallStatus::Other)
+            Some(&ToolCallStatus::TerminalFailure)
         );
     }
 
@@ -469,7 +495,7 @@ mod tests {
 
         assert_eq!(
             progress.tool_statuses.get("error-tool"),
-            Some(&ToolCallStatus::Other)
+            Some(&ToolCallStatus::TerminalFailure)
         );
         assert_eq!(
             progress.tool_statuses.get("clean-tool"),
@@ -500,8 +526,101 @@ mod tests {
 
         assert_eq!(
             progress.tool_statuses.get("tool-1"),
-            Some(&ToolCallStatus::Other)
+            Some(&ToolCallStatus::TerminalFailure)
         );
+    }
+
+    #[test]
+    fn terminal_tool_failure_is_sticky_across_later_clean_updates() {
+        for terminal_status in ["failed", "cancelled", "error"] {
+            let outcome = test_turn_outcome(
+                [
+                    json!({
+                        "method": "session/update",
+                        "params": { "update": {
+                            "sessionUpdate": "tool_call_update",
+                            "toolCallId": terminal_status,
+                            "status": terminal_status
+                        }}
+                    }),
+                    json!({
+                        "method": "session/update",
+                        "params": { "update": {
+                            "sessionUpdate": "tool_call_update",
+                            "toolCallId": terminal_status,
+                            "status": "completed",
+                            "rawOutput": { "isError": false }
+                        }}
+                    }),
+                ],
+                "end_turn",
+            );
+
+            assert!(outcome.saw_any_tool_call);
+            assert!(outcome.has_ambiguous_tool_activity());
+            assert!(!outcome.has_completed_tool());
+        }
+    }
+
+    #[test]
+    fn pending_tool_can_resolve_to_one_clean_completion() {
+        let outcome = test_turn_outcome(
+            [
+                json!({
+                    "method": "session/update",
+                    "params": { "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "status": "pending"
+                    }}
+                }),
+                json!({
+                    "method": "session/update",
+                    "params": { "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-1",
+                        "status": "completed",
+                        "rawOutput": { "isError": false }
+                    }}
+                }),
+            ],
+            "end_turn",
+        );
+
+        assert!(outcome.saw_any_tool_call);
+        assert!(!outcome.has_ambiguous_tool_activity());
+        assert_eq!(outcome.completed_tool_call_ids, ["tool-1"]);
+    }
+
+    #[test]
+    fn completed_error_output_remains_ambiguous_after_later_clean_completion() {
+        let outcome = test_turn_outcome(
+            [
+                json!({
+                    "method": "session/update",
+                    "params": { "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-1",
+                        "status": "completed",
+                        "rawOutput": { "isError": true }
+                    }}
+                }),
+                json!({
+                    "method": "session/update",
+                    "params": { "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-1",
+                        "status": "completed",
+                        "rawOutput": { "isError": false }
+                    }}
+                }),
+            ],
+            "end_turn",
+        );
+
+        assert!(outcome.saw_any_tool_call);
+        assert!(outcome.has_ambiguous_tool_activity());
+        assert!(!outcome.has_completed_tool());
     }
 
     #[test]

@@ -25,6 +25,11 @@ const MAX_CONTEXT_MESSAGES: usize = 100;
 const PROMPT_CONTEXT_MESSAGES: usize = 20;
 const EXPLICIT_REPLY_PREFIX: &str = "X0X_REPLY:";
 const MAX_SILENT_END_TURN_RETRIES: usize = 1;
+const SILENT_RECONCILE_BACKOFFS: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(120),
+];
 
 #[derive(Debug, Error)]
 pub enum HarnessError {
@@ -39,12 +44,18 @@ pub enum HarnessError {
     #[error("state JSON failed: {0}")]
     StateJson(#[from] serde_json::Error),
     #[error(
-        "directed ACP turn ended without visible output or a completed tool after {attempts} attempt(s); stop reason: {stop_reason}"
+        "tool-free directed ACP turn ended silently after {attempts} attempt(s); stop reason: {stop_reason}"
     )]
     SilentDirectedTurn {
         attempts: usize,
         stop_reason: String,
     },
+    #[error(
+        "directed ACP turn ended with ambiguous tool activity and cannot be retried safely; stop reason: {stop_reason}"
+    )]
+    AmbiguousDirectedToolTurn { stop_reason: String },
+    #[error("directed ACP turn ended without output before end_turn; stop reason: {stop_reason}")]
+    IncompleteDirectedTurn { stop_reason: String },
 }
 
 type PromptFuture<'a> = Pin<Box<dyn Future<Output = Result<AcpTurnOutcome, AcpError>> + 'a>>;
@@ -56,6 +67,42 @@ trait PromptAgent {
 impl PromptAgent for AcpClient {
     fn prompt<'a>(&'a mut self, prompt: &'a str) -> PromptFuture<'a> {
         Box::pin(AcpClient::prompt(self, prompt))
+    }
+}
+
+type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = Result<(), HarnessError>> + 'a>>;
+
+trait ReconcileAttempt {
+    fn run<'a>(&'a mut self) -> ReconcileFuture<'a>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileRecoveryOutcome {
+    Reconciled,
+    ShutdownRequested,
+}
+
+struct LiveReconcileAttempt<'a> {
+    harness: &'a HarnessContext<'a>,
+    x0x: &'a X0xClient,
+    stable_group_id: &'a str,
+    state_path: &'a Path,
+    state: &'a mut DurableState,
+    context: &'a mut ConversationContext,
+    acp: &'a mut AcpClient,
+}
+
+impl ReconcileAttempt for LiveReconcileAttempt<'_> {
+    fn run<'a>(&'a mut self) -> ReconcileFuture<'a> {
+        Box::pin(reconcile(
+            self.harness,
+            self.x0x,
+            self.stable_group_id,
+            self.state_path,
+            self.state,
+            self.context,
+            self.acp,
+        ))
     }
 }
 
@@ -83,6 +130,13 @@ struct HarnessContext<'a> {
 
 impl ConversationContext {
     fn push(&mut self, row: &HistoryRow, envelope: &ChannelEnvelope) {
+        if self
+            .messages
+            .iter()
+            .any(|message| message.msg_id == row.msg_id)
+        {
+            return;
+        }
         self.messages.push_back(ContextMessage {
             author: row
                 .author_agent
@@ -198,21 +252,58 @@ async fn run_harness(config: &Config, lifecycle: &LifecyclePublisher) -> Result<
                 break;
             }
         }
-        reconcile(
-            &HarnessContext { config, lifecycle },
-            &x0x,
-            &stable_group_id,
-            &state_path,
-            &mut state,
-            &mut context,
-            &mut acp,
-        )
-        .await?;
+        let harness = HarnessContext { config, lifecycle };
+        let mut attempt = LiveReconcileAttempt {
+            harness: &harness,
+            x0x: &x0x,
+            stable_group_id: &stable_group_id,
+            state_path: &state_path,
+            state: &mut state,
+            context: &mut context,
+            acp: &mut acp,
+        };
+        if reconcile_with_silent_recovery(&mut attempt).await?
+            == ReconcileRecoveryOutcome::ShutdownRequested
+        {
+            break;
+        }
     }
 
     wake_task.abort();
     acp.shutdown().await;
     Ok(())
+}
+
+async fn reconcile_with_silent_recovery(
+    attempt: &mut impl ReconcileAttempt,
+) -> Result<ReconcileRecoveryOutcome, HarnessError> {
+    let mut recovery_index = 0_usize;
+    loop {
+        match attempt.run().await {
+            Ok(()) => return Ok(ReconcileRecoveryOutcome::Reconciled),
+            Err(error @ HarnessError::SilentDirectedTurn { .. })
+                if recovery_index < SILENT_RECONCILE_BACKOFFS.len() =>
+            {
+                let delay = SILENT_RECONCILE_BACKOFFS[recovery_index];
+                recovery_index = recovery_index.saturating_add(1);
+                tracing::warn!(
+                    recovery_attempt = recovery_index,
+                    max_recovery_attempts = SILENT_RECONCILE_BACKOFFS.len(),
+                    ?delay,
+                    reason = %error,
+                    "tool-free directed turn remained silent; retrying reconciliation after backoff"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    signal = tokio::signal::ctrl_c() => {
+                        signal?;
+                        return Ok(ReconcileRecoveryOutcome::ShutdownRequested);
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 async fn reconcile(
@@ -360,11 +451,25 @@ async fn prompt_directed_message(
     loop {
         attempts = attempts.saturating_add(1);
         let outcome = acp.prompt(prompt).await?;
+        if outcome.has_ambiguous_tool_activity() {
+            return Err(HarnessError::AmbiguousDirectedToolTurn {
+                stop_reason: outcome.stop_reason,
+            });
+        }
         if outcome.has_visible_text() || outcome.has_completed_tool() {
             return Ok(outcome);
         }
-        let may_retry =
-            outcome.stop_reason == "end_turn" && attempts <= MAX_SILENT_END_TURN_RETRIES;
+        if outcome.saw_any_tool_call {
+            return Err(HarnessError::AmbiguousDirectedToolTurn {
+                stop_reason: outcome.stop_reason,
+            });
+        }
+        if outcome.stop_reason != "end_turn" {
+            return Err(HarnessError::IncompleteDirectedTurn {
+                stop_reason: outcome.stop_reason,
+            });
+        }
+        let may_retry = attempts <= MAX_SILENT_END_TURN_RETRIES;
         if !may_retry {
             return Err(HarnessError::SilentDirectedTurn {
                 attempts,
@@ -517,6 +622,48 @@ mod tests {
         }
     }
 
+    struct ScriptedMentionReconcile {
+        state_path: PathBuf,
+        state: DurableState,
+        acp: ScriptedPrompter,
+        reply_sends: usize,
+        reconcile_calls: usize,
+        directed: bool,
+    }
+
+    impl ReconcileAttempt for ScriptedMentionReconcile {
+        fn run<'a>(&'a mut self) -> ReconcileFuture<'a> {
+            Box::pin(async move {
+                let Self {
+                    state_path,
+                    state,
+                    acp,
+                    reply_sends,
+                    reconcile_calls,
+                    directed,
+                } = self;
+                *reconcile_calls = reconcile_calls.saturating_add(1);
+                const ROW_ID: i64 = 42;
+                if ROW_ID <= state.last_seen_id {
+                    return Ok(());
+                }
+                if !*directed {
+                    return claim_row(state_path, state, ROW_ID);
+                }
+                after_durable_claim(state_path, state, ROW_ID, || async {
+                    let outcome = prompt_directed_message(acp, "directed prompt").await?;
+                    let _posted = post_turn_reply(&outcome, true, |_reply| {
+                        *reply_sends = reply_sends.saturating_add(1);
+                        std::future::ready(Ok(()))
+                    })
+                    .await?;
+                    Ok(())
+                })
+                .await
+            })
+        }
+    }
+
     #[test]
     fn directed_trigger_requires_verified_exact_mention_and_owner() {
         let config = test_config(RespondTo::OwnerOnly);
@@ -580,6 +727,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguous_acp_failure_keeps_the_durable_claim() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState::default();
+
+        let error = after_durable_claim(&state_path, &mut state, 42, || async {
+            Err(HarnessError::Acp(AcpError::Timeout(Duration::from_secs(1))))
+        })
+        .await
+        .expect_err("ACP failure must propagate");
+
+        assert!(matches!(error, HarnessError::Acp(AcpError::Timeout(_))));
+        assert_eq!(state.last_seen_id, 42);
+        assert_eq!(
+            load_state(&state_path)
+                .expect("reload state")
+                .expect("state remains durable")
+                .last_seen_id,
+            42
+        );
+    }
+
+    #[tokio::test]
     async fn completed_tool_success_keeps_the_durable_claim() {
         let directory = tempfile::tempdir().expect("tempdir");
         let state_path = directory.path().join("state.json");
@@ -612,19 +782,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blank_or_failed_tool_end_turn_gets_one_bounded_retry() {
-        for first_turn in [
-            silent_turn(),
-            completed_tool_wire_turn("failed-tool", Some(true)),
-        ] {
-            let mut acp = ScriptedPrompter::new([first_turn, visible_turn("recovered")]);
-            let outcome = prompt_directed_message(&mut acp, "directed prompt")
-                .await
-                .expect("one retry should recover");
+    async fn tool_free_blank_end_turn_gets_one_inline_retry() {
+        let mut acp = ScriptedPrompter::new([silent_turn(), visible_turn("recovered")]);
+        let outcome = prompt_directed_message(&mut acp, "directed prompt")
+            .await
+            .expect("one retry should recover");
 
-            assert_eq!(outcome.assistant_text, "recovered");
-            assert_eq!(acp.calls, 2);
-        }
+        assert_eq!(outcome.assistant_text, "recovered");
+        assert_eq!(acp.calls, 2);
+    }
+
+    #[tokio::test]
+    async fn failed_tool_is_observable_and_never_retried_inline() {
+        let mut acp = ScriptedPrompter::new([
+            completed_tool_wire_turn("failed-tool", Some(true)),
+            visible_turn("must remain unused"),
+        ]);
+
+        let error = prompt_directed_message(&mut acp, "directed prompt")
+            .await
+            .expect_err("ambiguous tool must fail visibly");
+
+        assert!(matches!(
+            error,
+            HarnessError::AmbiguousDirectedToolTurn { ref stop_reason }
+                if stop_reason == "end_turn"
+        ));
+        assert_eq!(acp.calls, 1);
     }
 
     #[tokio::test]
@@ -671,64 +855,177 @@ mod tests {
         assert_eq!(sends.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn silent_exhaustion_releases_claim_and_restart_retry_posts_once() {
+    #[tokio::test(start_paused = true)]
+    async fn real_recovery_path_reenters_tool_free_silent_row_and_posts_once() {
         let directory = tempfile::tempdir().expect("tempdir");
         let state_path = directory.path().join("state.json");
-        let mut state = DurableState { last_seen_id: 7 };
+        let state = DurableState { last_seen_id: 7 };
         persist_state(&state_path, &state).expect("persist prior watermark");
-        let mut acp = ScriptedPrompter::new([
-            silent_turn(),
-            completed_tool_wire_turn("failed-tool", Some(true)),
-        ]);
+        let mut attempt = ScriptedMentionReconcile {
+            state_path,
+            state,
+            acp: ScriptedPrompter::new([
+                silent_turn(),
+                silent_turn(),
+                visible_turn("recovered once"),
+            ]),
+            reply_sends: 0,
+            reconcile_calls: 0,
+            directed: true,
+        };
 
-        let error = after_durable_claim(&state_path, &mut state, 42, || async {
-            prompt_directed_message(&mut acp, "directed prompt")
-                .await
-                .map(|_| ())
-        })
-        .await
-        .expect_err("exhaustion must not become success");
+        reconcile_with_silent_recovery(&mut attempt)
+            .await
+            .expect("in-process recovery succeeds");
 
-        assert!(matches!(
-            error,
-            HarnessError::SilentDirectedTurn {
-                attempts: 2,
-                ref stop_reason
-            } if stop_reason == "end_turn"
-        ));
-        assert_eq!(acp.calls, 2);
+        assert_eq!(attempt.reconcile_calls, 2);
+        assert_eq!(attempt.acp.calls, 3);
+        assert_eq!(attempt.reply_sends, 1);
+        assert_eq!(attempt.state.last_seen_id, 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_recovery_path_caps_silence_and_leaves_row_released() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+        let mut attempt = ScriptedMentionReconcile {
+            state_path,
+            state,
+            acp: ScriptedPrompter::new(std::iter::repeat_with(silent_turn).take(8)),
+            reply_sends: 0,
+            reconcile_calls: 0,
+            directed: true,
+        };
+
+        let error = reconcile_with_silent_recovery(&mut attempt)
+            .await
+            .expect_err("recovery cap must remain observable");
+
+        assert!(matches!(error, HarnessError::SilentDirectedTurn { .. }));
+        assert_eq!(attempt.reconcile_calls, 4);
+        assert_eq!(attempt.acp.calls, 8);
+        assert_eq!(attempt.reply_sends, 0);
+        assert_eq!(attempt.state.last_seen_id, 7);
         assert_eq!(
-            load_state(&state_path)
+            load_state(&attempt.state_path)
                 .expect("reload state")
-                .expect("prior state is restored")
+                .expect("released state exists")
                 .last_seen_id,
             7
         );
-        assert_eq!(state.last_seen_id, 7);
+    }
 
-        // Simulate the supervisor restart/reconcile decision and successful
-        // processing of the same history row.
-        assert!(42 > state.last_seen_id);
-        let mut restarted_acp = ScriptedPrompter::new([visible_turn("recovered once")]);
-        let sends = AtomicUsize::new(0);
-        after_durable_claim(&state_path, &mut state, 42, || async {
-            let outcome = prompt_directed_message(&mut restarted_acp, "directed prompt").await?;
-            let posted = post_turn_reply(&outcome, true, |reply| {
-                assert_eq!(reply, "recovered once");
-                sends.fetch_add(1, Ordering::SeqCst);
-                std::future::ready(Ok(()))
-            })
-            .await?;
-            assert!(posted);
-            Ok(())
-        })
-        .await
-        .expect("restart retry succeeds");
+    #[tokio::test(start_paused = true)]
+    async fn real_recovery_path_does_not_retry_ambiguous_tool_and_keeps_claim() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+        let mut attempt = ScriptedMentionReconcile {
+            state_path,
+            state,
+            acp: ScriptedPrompter::new([
+                completed_tool_wire_turn("timed-out-space-send", Some(true)),
+                visible_turn("must remain unused"),
+            ]),
+            reply_sends: 0,
+            reconcile_calls: 0,
+            directed: true,
+        };
 
-        assert_eq!(restarted_acp.calls, 1);
-        assert_eq!(sends.load(Ordering::SeqCst), 1);
-        assert_eq!(state.last_seen_id, 42);
+        let error = reconcile_with_silent_recovery(&mut attempt)
+            .await
+            .expect_err("ambiguous tool remains a visible failure");
+
+        assert!(matches!(
+            error,
+            HarnessError::AmbiguousDirectedToolTurn { .. }
+        ));
+        assert_eq!(attempt.reconcile_calls, 1);
+        assert_eq!(attempt.acp.calls, 1);
+        assert_eq!(attempt.reply_sends, 0);
+        assert_eq!(attempt.state.last_seen_id, 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_recovery_path_does_not_retry_non_end_turn_and_keeps_claim() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+        let mut attempt = ScriptedMentionReconcile {
+            state_path,
+            state,
+            acp: ScriptedPrompter::new([
+                incomplete_turn("max_tokens"),
+                visible_turn("must remain unused"),
+            ]),
+            reply_sends: 0,
+            reconcile_calls: 0,
+            directed: true,
+        };
+
+        let error = reconcile_with_silent_recovery(&mut attempt)
+            .await
+            .expect_err("non-end turn remains a visible failure");
+
+        assert!(matches!(error, HarnessError::IncompleteDirectedTurn { .. }));
+        assert_eq!(attempt.reconcile_calls, 1);
+        assert_eq!(attempt.acp.calls, 1);
+        assert_eq!(attempt.reply_sends, 0);
+        assert_eq!(attempt.state.last_seen_id, 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_recovery_path_accepts_clean_tool_once() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+        let mut attempt = ScriptedMentionReconcile {
+            state_path,
+            state,
+            acp: ScriptedPrompter::new([completed_tool_wire_turn("clean-space-send", Some(false))]),
+            reply_sends: 0,
+            reconcile_calls: 0,
+            directed: true,
+        };
+
+        reconcile_with_silent_recovery(&mut attempt)
+            .await
+            .expect("clean tool succeeds");
+
+        assert_eq!(attempt.reconcile_calls, 1);
+        assert_eq!(attempt.acp.calls, 1);
+        assert_eq!(attempt.reply_sends, 0);
+        assert_eq!(attempt.state.last_seen_id, 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_recovery_path_leaves_passive_rows_prompt_free() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+        let mut attempt = ScriptedMentionReconcile {
+            state_path,
+            state,
+            acp: ScriptedPrompter::new([visible_turn("must remain unused")]),
+            reply_sends: 0,
+            reconcile_calls: 0,
+            directed: false,
+        };
+
+        reconcile_with_silent_recovery(&mut attempt)
+            .await
+            .expect("passive claim succeeds");
+
+        assert_eq!(attempt.reconcile_calls, 1);
+        assert_eq!(attempt.acp.calls, 0);
+        assert_eq!(attempt.reply_sends, 0);
+        assert_eq!(attempt.state.last_seen_id, 42);
     }
 
     #[tokio::test]
@@ -756,11 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn silent_non_end_turn_fails_without_retry() {
         let mut acp = ScriptedPrompter::new([
-            AcpTurnOutcome {
-                stop_reason: "max_tokens".to_string(),
-                assistant_text: String::new(),
-                completed_tool_call_ids: Vec::new(),
-            },
+            incomplete_turn("max_tokens"),
             visible_turn("must remain unused"),
         ]);
 
@@ -770,10 +1063,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            HarnessError::SilentDirectedTurn {
-                attempts: 1,
-                ref stop_reason
-            } if stop_reason == "max_tokens"
+            HarnessError::IncompleteDirectedTurn { ref stop_reason }
+                if stop_reason == "max_tokens"
         ));
         assert_eq!(acp.calls, 1);
     }
@@ -824,6 +1115,20 @@ mod tests {
     }
 
     #[test]
+    fn conversation_context_deduplicates_reconciled_rows_by_message_id() {
+        let config = test_config(RespondTo::OwnerOnly);
+        let row = test_row(&config.owner_agent_id, &config.agent_id);
+        let envelope = row.envelope().expect("valid envelope");
+        let mut context = ConversationContext::default();
+
+        context.push(&row, &envelope);
+        context.push(&row, &envelope);
+
+        assert_eq!(context.messages.len(), 1);
+        assert_eq!(context.render_recent().matches(&row.msg_id).count(), 1);
+    }
+
+    #[test]
     fn directed_prompt_names_native_space_tools() {
         let config = test_config(RespondTo::OwnerOnly);
         let row = test_row(&config.owner_agent_id, &config.agent_id);
@@ -863,6 +1168,8 @@ mod tests {
         AcpTurnOutcome {
             stop_reason: "end_turn".to_string(),
             assistant_text: String::new(),
+            saw_any_tool_call: false,
+            ambiguous_tool_activity: false,
             completed_tool_call_ids: Vec::new(),
         }
     }
@@ -871,6 +1178,18 @@ mod tests {
         AcpTurnOutcome {
             stop_reason: "end_turn".to_string(),
             assistant_text: text.to_string(),
+            saw_any_tool_call: false,
+            ambiguous_tool_activity: false,
+            completed_tool_call_ids: Vec::new(),
+        }
+    }
+
+    fn incomplete_turn(stop_reason: &str) -> AcpTurnOutcome {
+        AcpTurnOutcome {
+            stop_reason: stop_reason.to_string(),
+            assistant_text: String::new(),
+            saw_any_tool_call: false,
+            ambiguous_tool_activity: false,
             completed_tool_call_ids: Vec::new(),
         }
     }
