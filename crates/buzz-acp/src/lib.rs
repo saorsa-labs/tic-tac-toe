@@ -272,8 +272,19 @@ where
     // Claim before entering ACP. ACP tools can perform externally-visible
     // sends that cannot be rolled back, so retrying this prompt after a reply
     // or watermark failure would duplicate a successful side effect.
+    let previous_watermark = state.last_seen_id;
     claim_row(state_path, state, row_id)?;
-    operation().await
+    let result = operation().await;
+    if matches!(&result, Err(HarnessError::SilentDirectedTurn { .. })) {
+        // SilentDirectedTurn is constructed only after observing neither
+        // visible assistant text nor a clean completed tool. It is therefore
+        // the sole error for which releasing the claim cannot duplicate a
+        // known side effect. Persist the rollback before surfacing the error
+        // so a supervisor restart can reconcile this exact mention again.
+        state.last_seen_id = previous_watermark;
+        persist_state(state_path, state)?;
+    }
+    result
 }
 
 fn should_trigger(
@@ -541,7 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn directed_row_is_durably_claimed_before_any_acp_side_effect() {
+    async fn ambiguous_send_failure_keeps_the_durable_claim() {
         let directory = tempfile::tempdir().expect("tempdir");
         let state_path = directory.path().join("state.json");
         let mut state = DurableState::default();
@@ -563,6 +574,38 @@ mod tests {
             load_state(&state_path)
                 .expect("reload state")
                 .expect("state remains durable")
+                .last_seen_id,
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_tool_success_keeps_the_durable_claim() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState::default();
+        let mut acp =
+            ScriptedPrompter::new([completed_tool_wire_turn("space-send-1", Some(false))]);
+
+        after_durable_claim(&state_path, &mut state, 42, || async {
+            let outcome = prompt_directed_message(&mut acp, "directed prompt").await?;
+            let posted = post_turn_reply(&outcome, true, |_reply| {
+                std::future::ready(Err(HarnessError::X0x(X0xError::Transport(
+                    "harness reply must not run after a tool-only turn".to_string(),
+                ))))
+            })
+            .await?;
+            assert!(!posted);
+            Ok(())
+        })
+        .await
+        .expect("completed tool turn succeeds");
+
+        assert_eq!(state.last_seen_id, 42);
+        assert_eq!(
+            load_state(&state_path)
+                .expect("reload state")
+                .expect("claim remains durable")
                 .last_seen_id,
             42
         );
@@ -629,10 +672,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn silent_retry_exhaustion_is_failure_after_durable_claim() {
+    async fn silent_exhaustion_releases_claim_and_restart_retry_posts_once() {
         let directory = tempfile::tempdir().expect("tempdir");
         let state_path = directory.path().join("state.json");
-        let mut state = DurableState::default();
+        let mut state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
         let mut acp = ScriptedPrompter::new([
             silent_turn(),
             completed_tool_wire_turn("failed-tool", Some(true)),
@@ -657,10 +701,56 @@ mod tests {
         assert_eq!(
             load_state(&state_path)
                 .expect("reload state")
-                .expect("claimed state remains")
+                .expect("prior state is restored")
                 .last_seen_id,
-            42
+            7
         );
+        assert_eq!(state.last_seen_id, 7);
+
+        // Simulate the supervisor restart/reconcile decision and successful
+        // processing of the same history row.
+        assert!(42 > state.last_seen_id);
+        let mut restarted_acp = ScriptedPrompter::new([visible_turn("recovered once")]);
+        let sends = AtomicUsize::new(0);
+        after_durable_claim(&state_path, &mut state, 42, || async {
+            let outcome = prompt_directed_message(&mut restarted_acp, "directed prompt").await?;
+            let posted = post_turn_reply(&outcome, true, |reply| {
+                assert_eq!(reply, "recovered once");
+                sends.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            })
+            .await?;
+            assert!(posted);
+            Ok(())
+        })
+        .await
+        .expect("restart retry succeeds");
+
+        assert_eq!(restarted_acp.calls, 1);
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        assert_eq!(state.last_seen_id, 42);
+    }
+
+    #[tokio::test]
+    async fn silent_claim_rollback_persistence_failure_is_surfaced() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+
+        let error = after_durable_claim(&state_path, &mut state, 42, || async {
+            std::fs::remove_file(&state_path).expect("remove claimed state");
+            std::fs::create_dir(&state_path).expect("block atomic rollback rename");
+            Err(HarnessError::SilentDirectedTurn {
+                attempts: 2,
+                stop_reason: "end_turn".to_string(),
+            })
+        })
+        .await
+        .expect_err("rollback persistence failure must be returned");
+
+        assert!(matches!(error, HarnessError::StateIo(_)));
+        assert_eq!(state.last_seen_id, 7);
     }
 
     #[tokio::test]
