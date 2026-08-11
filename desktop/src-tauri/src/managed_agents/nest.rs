@@ -44,11 +44,11 @@ const BUZZ_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
 /// Version 1 is implicitly "before this mechanism existed" (no version file).
-const NEST_AGENTS_VERSION: u32 = 4;
+const NEST_AGENTS_VERSION: u32 = 5;
 
 /// Template content version for SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
-const NEST_SKILL_VERSION: u32 = 4;
+const NEST_SKILL_VERSION: u32 = 5;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
 const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
@@ -526,8 +526,7 @@ pub fn render_dynamic_section(
     agents: &[ManagedAgentRecord],
 ) -> String {
     let active_agents = if agents.is_empty() {
-        "## Active Agents\n\n*(No agents deployed yet. Add agents in the Buzz desktop app.)*"
-            .to_string()
+        "## Active Agents\n\n*(No agents deployed yet. Add agents in tic-tac-toe.)*".to_string()
     } else {
         let mut table =
             "## Active Agents\n\n| Name | Persona | How to address |\n|------|---------|----------------|"

@@ -66,6 +66,95 @@ test("create-from-scratch agent form uses a neutral starter name", async () => {
   assert.doesNotMatch(agentDefinitionDialog, /placeholder="Fizz"/);
 });
 
+test("agent catalog and bundled help use tic-tac-toe branding while preserving compatibility identifiers", async () => {
+  const [
+    runtimeCatalog,
+    nestRuntime,
+    agentWorkspace,
+    cliSkill,
+    managedNode,
+    envVars,
+    agentAuth,
+  ] = await Promise.all([
+    readFile(
+      new URL(
+        "../../../../src-tauri/src/managed_agents/discovery.rs",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../../../../src-tauri/src/managed_agents/nest.rs",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../../../../src-tauri/src/managed_agents/nest_agents.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../../../../src-tauri/src/managed_agents/nest_skill.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../../../../src-tauri/src/commands/agent_discovery/managed_node.rs",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../../../../src-tauri/src/managed_agents/env_vars.rs",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../../../crates/buzz-agent/src/auth.rs", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  const visibleAgentCopy = [
+    runtimeCatalog,
+    nestRuntime,
+    agentWorkspace,
+    cliSkill,
+    managedNode,
+    envVars,
+    agentAuth,
+  ].join("\n");
+
+  assert.match(runtimeCatalog, /label: "x0x Agent"/);
+  assert.match(runtimeCatalog, /cli_install_hint: "Ships with tic-tac-toe\."/);
+  assert.match(agentWorkspace, /^# tic-tac-toe Agent Workspace/m);
+  assert.match(cliSkill, /^# tic-tac-toe CLI Skill/m);
+  assert.match(managedNode, /restart tic-tac-toe/);
+  assert.match(envVars, /reserved by tic-tac-toe/);
+  assert.match(agentAuth, /tic-tac-toe: signed in/);
+  assert.doesNotMatch(
+    visibleAgentCopy,
+    /"Buzz Agent"|Ships with the Buzz desktop app|# Buzz Nest|Created once by the Buzz desktop app|Add agents in the Buzz desktop app|# Buzz CLI Skill|Buzz CLI for relay operations|current Buzz `\[Context\]`|Buzz hosts real git repos|restart Buzz|Buzz could not|failed to (?:resolve|create) Buzz|Buzz's private Node tools|reserved by Buzz|<h2>Buzz/,
+  );
+
+  // These are compatibility contracts, not product copy.
+  assert.match(runtimeCatalog, /id: "buzz-agent"/);
+  assert.match(runtimeCatalog, /commands: &\["buzz-agent"\]/);
+  assert.match(runtimeCatalog, /BUZZ_AGENT_PROVIDER/);
+  assert.match(agentWorkspace, /BEGIN BUZZ MANAGED/);
+  assert.match(cliSkill, /name: buzz-cli/);
+  assert.match(cliSkill, /BUZZ_PRIVATE_KEY/);
+  assert.match(cliSkill, /buzz agents draft-create/);
+});
+
 test("retired starter character images are not shipped as public assets", async () => {
   const retiredAssets = ["fizz.png", "honey.png", "bumble.png"];
 
