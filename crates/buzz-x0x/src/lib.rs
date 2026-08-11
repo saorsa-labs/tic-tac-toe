@@ -117,7 +117,7 @@ impl X0xTools {
                 },
                 {
                     "name": "space_send",
-                    "description": "Send a native x0x space message, optionally mentioning members or replying in a thread.",
+                    "description": "Send an agent-generated native x0x space message, optionally mentioning members or replying in a thread.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -295,6 +295,7 @@ struct ChannelMessageEnvelope<'a> {
     client_id: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mentions: Vec<String>,
+    agent_generated: bool,
 }
 
 #[derive(Serialize)]
@@ -343,6 +344,9 @@ fn build_group_send_body(request: SpaceSend) -> Result<Value, AppError> {
         created_at,
         client_id: uuid::Uuid::new_v4().to_string(),
         mentions: request.mentions,
+        // This marker is server-owned rather than a space_send argument, so
+        // an agent cannot omit or override the recursion/audit guard.
+        agent_generated: true,
     };
     let body = serde_json::to_string(&envelope)
         .map_err(|error| AppError::new(format!("failed to encode message: {error}")))?;
@@ -517,6 +521,7 @@ mod tests {
             serde_json::from_str(body["body"].as_str().expect("body string")).expect("envelope");
         assert_eq!(envelope["text"], "work complete");
         assert_eq!(envelope["mentions"][0], OWNER_ID);
+        assert_eq!(envelope["agentGenerated"], true);
         assert!(envelope["createdAt"].as_u64().is_some());
         assert!(uuid::Uuid::parse_str(envelope["clientId"].as_str().expect("client id")).is_ok());
     }
@@ -534,6 +539,12 @@ mod tests {
             "thread_parent": "d".repeat(64)
         }));
         assert!(missing_root.is_err());
+
+        let marker_override = parse_send_arguments(json!({
+            "text": "hello",
+            "agentGenerated": false
+        }));
+        assert!(marker_override.is_err());
 
         let request = parse_send_arguments(json!({ "text": "x".repeat(MAX_PUBLIC_MESSAGE_BYTES) }))
             .expect("text parses before envelope size check");
@@ -629,6 +640,17 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         assert_eq!(names, ["space_members", "space_send"]);
+        assert!(!names.iter().any(|name| name.starts_with("community_")));
+        let send_schema = list["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool["name"] == "space_send")
+            .map(|tool| &tool["inputSchema"])
+            .expect("space_send schema");
+        assert_eq!(send_schema["required"], json!(["text"]));
+        assert_eq!(send_schema["additionalProperties"], false);
+        assert!(send_schema["properties"].get("agentGenerated").is_none());
 
         let invalid = handle_request(
             &tools,
@@ -646,6 +668,23 @@ mod tests {
             .as_str()
             .expect("error text")
             .contains("must not be empty"));
+
+        let legacy = handle_request(
+            &tools,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "community_send", "arguments": {"text": "no"}}
+            }),
+        )
+        .await
+        .expect("legacy tool error response");
+        assert_eq!(legacy["result"]["isError"], true);
+        assert!(legacy["result"]["content"][0]["text"]
+            .as_str()
+            .expect("legacy error text")
+            .contains("unknown tool: community_send"));
     }
 
     struct FakeServer {
@@ -683,6 +722,7 @@ mod tests {
                 .expect("native envelope JSON");
                 assert_eq!(envelope["text"], text);
                 assert_eq!(envelope["mentions"][0], OWNER_ID);
+                assert_eq!(envelope["agentGenerated"], true);
             }
             let wire = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
