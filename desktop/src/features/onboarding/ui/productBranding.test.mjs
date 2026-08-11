@@ -75,6 +75,7 @@ test("agent catalog and bundled help use tic-tac-toe branding while preserving c
     managedNode,
     envVars,
     agentAuth,
+    personaCatalog,
   ] = await Promise.all([
     readFile(
       new URL(
@@ -122,6 +123,13 @@ test("agent catalog and bundled help use tic-tac-toe branding while preserving c
       new URL("../../../../../crates/buzz-agent/src/auth.rs", import.meta.url),
       "utf8",
     ),
+    readFile(
+      new URL(
+        "../../../../src-tauri/src/managed_agents/personas.rs",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
   ]);
   const visibleAgentCopy = [
     runtimeCatalog,
@@ -131,6 +139,7 @@ test("agent catalog and bundled help use tic-tac-toe branding while preserving c
     managedNode,
     envVars,
     agentAuth,
+    personaCatalog,
   ].join("\n");
 
   assert.match(runtimeCatalog, /label: "x0x Agent"/);
@@ -140,6 +149,7 @@ test("agent catalog and bundled help use tic-tac-toe branding while preserving c
   assert.match(managedNode, /restart tic-tac-toe/);
   assert.match(envVars, /reserved by tic-tac-toe/);
   assert.match(agentAuth, /tic-tac-toe: signed in/);
+  assert.doesNotMatch(personaCatalog, /"Buzz"/);
   assert.doesNotMatch(
     visibleAgentCopy,
     /"Buzz Agent"|Ships with the Buzz desktop app|# Buzz Nest|Created once by the Buzz desktop app|Add agents in the Buzz desktop app|# Buzz CLI Skill|Buzz CLI for relay operations|current Buzz `\[Context\]`|Buzz hosts real git repos|restart Buzz|Buzz could not|failed to (?:resolve|create) Buzz|Buzz's private Node tools|reserved by Buzz|<h2>Buzz/,
