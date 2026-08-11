@@ -2,10 +2,17 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
-const [tauriConfigSource, distSource, launcherSource, entitlementsSource] =
+const [
+  tauriConfigSource,
+  distSource,
+  dmgPackagerSource,
+  launcherSource,
+  entitlementsSource,
+] =
   await Promise.all([
     readFile("desktop/src-tauri/tauri.conf.json", "utf8"),
     readFile("scripts/dist.sh", "utf8"),
+    readFile("scripts/package-macos-dmg.sh", "utf8"),
     readFile("scripts/run-tic-tac-toe.sh", "utf8"),
     readFile("desktop/scripts/verify-macos-entitlements.sh", "utf8"),
   ]);
@@ -45,5 +52,21 @@ describe("portable macOS package contract", () => {
 
   it("never injects retired relay identity into the portable desktop", () => {
     assert.doesNotMatch(launcherSource, legacyIdentityEnvironment);
+  });
+
+  it("images the exact signed app instead of asking Tauri to rebuild it", () => {
+    assert.doesNotMatch(distSource, /tauri build --bundles dmg/);
+    assert.match(distSource, /package-macos-dmg\.sh/);
+    assert.match(distSource, /--app "\$APP_BUNDLE"/);
+    assert.match(dmgPackagerSource, /codesign --verify --deep --strict/);
+    assert.match(dmgPackagerSource, /write_bundle_manifest/);
+    assert.match(
+      dmgPackagerSource,
+      /Finished DMG app differs from the signed source app/,
+    );
+    assert.match(
+      dmgPackagerSource,
+      /Contents\/Resources is missing or empty/,
+    );
   });
 });

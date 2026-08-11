@@ -3,8 +3,11 @@
 #
 # Usage: scripts/dist.sh [--skip-notarization]
 #
-# Produces: dist/tic-tac-toe-v<X0XD_VERSION>-aarch64.tar.gz
-# containing:
+# Produces:
+#   dist/tic-tac-toe-v<X0XD_VERSION>-aarch64.tar.gz
+#   dist/tic-tac-toe-v<X0XD_VERSION>-aarch64.dmg
+#
+# The archive contains:
 #   tic-tac-toe.app/       - Tauri-built, signed application bundle
 #   run-tic-tac-toe.sh     - launcher with x0xd auto-detection
 #   VERSION                - exact build and signing manifest
@@ -68,6 +71,23 @@ elif [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API
     notarization_configured=true
 fi
 
+notarytool_submit() {
+    local artifact="$1"
+    if [[ -n "${APPLE_ID:-}" ]]; then
+        xcrun notarytool submit "$artifact" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+    else
+        xcrun notarytool submit "$artifact" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+    fi
+}
+
 if ! $notarization_configured && ! $SKIP_NOTARIZATION; then
     echo "Notarization credentials are not configured." >&2
     echo "Set APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID or" >&2
@@ -129,20 +149,31 @@ fi
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 spctl --assess --type execute --verbose=2 "$APP_BUNDLE"
 
+notarized="no"
+if $notarization_configured; then
+    NOTARY_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tic-tac-toe-notary.XXXXXX")"
+    NOTARY_APP_ZIP="$NOTARY_WORK_DIR/$APP_BUNDLE_NAME.zip"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$NOTARY_APP_ZIP"
+    notarytool_submit "$NOTARY_APP_ZIP"
+    xcrun stapler staple "$APP_BUNDLE"
+    xcrun stapler validate "$APP_BUNDLE"
+    codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+    spctl --assess --type execute --verbose=2 "$APP_BUNDLE"
+    rm -rf "$NOTARY_WORK_DIR"
+    notarized="yes"
+fi
+
 PKG_NAME="tic-tac-toe-v${X0XD_SEMVER}-aarch64"
 PKG_DIR="$DIST_DIR/$PKG_NAME"
 TARBALL="$DIST_DIR/$PKG_NAME.tar.gz"
 TARBALL_TMP="$TARBALL.tmp"
+DMG="$DIST_DIR/$PKG_NAME.dmg"
+DMG_BUILD="$DIST_DIR/.$PKG_NAME.building.dmg"
 
 rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR"
 ditto "$APP_BUNDLE" "$PKG_DIR/$APP_BUNDLE_NAME"
 install -m 755 "$ROOT/scripts/run-tic-tac-toe.sh" "$PKG_DIR/run-tic-tac-toe.sh"
-
-notarized="no"
-if $notarization_configured; then
-    notarized="yes"
-fi
 
 cat > "$PKG_DIR/VERSION" <<EOF
 tic-tac-toe: $(git -C "$ROOT" describe --tags --always --dirty)
@@ -158,9 +189,27 @@ rm -f "$TARBALL_TMP"
 tar -czf "$TARBALL_TMP" -C "$PKG_DIR" "$APP_BUNDLE_NAME" run-tic-tac-toe.sh VERSION
 mv "$TARBALL_TMP" "$TARBALL"
 
+rm -f "$DMG_BUILD"
+"$ROOT/scripts/package-macos-dmg.sh" \
+    --app "$APP_BUNDLE" \
+    --output "$DMG_BUILD" \
+    --signing-identity "$APPLE_SIGNING_IDENTITY" \
+    --background "$DESKTOP_DIR/src-tauri/icons/dmg-background.png"
+
+if $notarization_configured; then
+    notarytool_submit "$DMG_BUILD"
+    xcrun stapler staple "$DMG_BUILD"
+    xcrun stapler validate "$DMG_BUILD"
+    codesign --verify --deep --strict --verbose=2 "$DMG_BUILD"
+    spctl --assess --type open --verbose=2 "$DMG_BUILD"
+fi
+mv "$DMG_BUILD" "$DMG"
+
 echo
 echo "Built: $TARBALL"
 echo "SHA-256: $(shasum -a 256 "$TARBALL" | awk '{ print $1 }')"
+echo "Built: $DMG"
+echo "SHA-256: $(shasum -a 256 "$DMG" | awk '{ print $1 }')"
 if ! $notarization_configured; then
-    echo "Warning: this archive is signed but not notarized; use it for acceptance only."
+    echo "Warning: these artifacts are signed but not notarized; use them for acceptance only."
 fi
