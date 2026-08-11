@@ -126,3 +126,16 @@ pub struct ManagedAgentRuntimeReceipt {
     pub desktop_instance_id: String,
     pub started_at: String,
 }
+
+/// Durable handoff from the desktop validator to one exact harness generation.
+/// One file is written per canonical message id so distinct causal messages
+/// for the same `(record, group)` runtime never overwrite each other.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentPendingCausalMessage {
+    pub version: u8,
+    pub start_nonce: String,
+    pub group_id: String,
+    pub msg_id: String,
+    pub state: String,
+}

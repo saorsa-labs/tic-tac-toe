@@ -5,8 +5,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    owner_group_has_existing_active_member, prepare_managed_agent_launch, process_is_running,
-    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    owner_group_has_existing_active_member, persist_native_pending_causal_message,
+    prepare_managed_agent_launch, process_is_running, record_agent_command,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
     spawn_native_lifecycle_monitor, stabilize_started_agent_process, terminate_process,
     terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
     GroupBindIntent, ManagedAgentCommunityTarget, ManagedAgentPairRuntime, ManagedAgentRecord,
@@ -233,6 +234,29 @@ pub(crate) async fn start_managed_agent_runtime_pair_lazy(
         true,
         None,
         GroupBindIntent::EnsureAttached,
+        None,
+        app,
+    )
+    .await
+}
+
+/// Start (or reuse) the exact `(record, group)` harness while durably staging
+/// one canonical causal message for this harness generation. Runtime liveness
+/// remains pair-keyed; message identity is deliberately not part of the
+/// runtime key, so multiple distinct pending messages feed one worker.
+pub(crate) async fn start_managed_agent_runtime_pair_for_causal_message(
+    pubkey: String,
+    group_id: String,
+    msg_id: String,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    start_pair(
+        pubkey,
+        group_id,
+        true,
+        None,
+        GroupBindIntent::EnsureAttached,
+        Some(msg_id),
         app,
     )
     .await
@@ -253,6 +277,7 @@ async fn start_pair(
     lazy: bool,
     expected_updated_at: Option<&str>,
     bind_intent: GroupBindIntent,
+    pending_causal_msg_id: Option<String>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
@@ -307,13 +332,30 @@ async fn start_pair(
         .get_mut(&key)
         .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
     {
+        if let (Some(msg_id), Some(runtime)) =
+            (pending_causal_msg_id.as_deref(), runtimes.get(&key))
+        {
+            persist_native_pending_causal_message(
+                &native_launch.child_data_dir,
+                &key.group_id,
+                &runtime.start_nonce,
+                msg_id,
+            )?;
+        }
         let status = status_for(&app, record, &key, runtimes.get(&key), None);
         return Ok(status);
     }
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
 
-    let mut process = spawn_agent_child(&app, record, &key.group_id, lazy, &native_launch)?;
+    let mut process = spawn_agent_child(
+        &app,
+        record,
+        &key.group_id,
+        lazy,
+        &native_launch,
+        pending_causal_msg_id.as_deref(),
+    )?;
     let now = crate::util::now_iso();
     record.runtime_pid = None;
     record.updated_at = now.clone();
@@ -441,6 +483,7 @@ pub async fn restart_managed_agent_runtime(
         true,
         None,
         GroupBindIntent::EnsureAttached,
+        None,
         app,
     )
     .await
@@ -606,6 +649,7 @@ pub async fn reconcile_managed_agent_runtimes(
                     GroupBindIntent::ExistingOnly {
                         expected_child_agent_id: child_agent_id,
                     },
+                    None,
                     app.clone(),
                 )
                 .await

@@ -491,6 +491,13 @@ export type CreateManagedAgentResponse = {
   spawnError: string | null;
 };
 
+/** Exact durable identity of a child-authored group mention cold handoff. */
+export type ManagedAgentMentionWakeInput = {
+  targetRecordPubkey: string;
+  groupId: string;
+  msgId: string;
+};
+
 export type ManagedAgentLog = {
   content: string;
   logPath: string;

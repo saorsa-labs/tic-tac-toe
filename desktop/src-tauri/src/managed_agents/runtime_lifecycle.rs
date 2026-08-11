@@ -4,8 +4,8 @@ use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 
 use super::{
-    load_managed_agents, terminate_process, ManagedAgentProcess, ManagedAgentRecord,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    load_managed_agents, terminate_process, ManagedAgentPendingCausalMessage, ManagedAgentProcess,
+    ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
 };
 use crate::app_state::AppState;
 
@@ -36,6 +36,182 @@ pub(crate) fn prepare_native_harness_lifecycle(
             "failed to clear stale native harness lifecycle receipt: {error}"
         )),
     }
+}
+
+pub(crate) fn native_pending_causal_dir(data_dir: &Path, group_id: &str) -> PathBuf {
+    data_dir.join(format!("buzz-acp-{group_id}.pending"))
+}
+
+fn validate_pending_causal_message(
+    message: &ManagedAgentPendingCausalMessage,
+    group_id: &str,
+    msg_id: &str,
+) -> Result<(), String> {
+    if message.version == 1
+        && message.group_id == group_id
+        && message.msg_id == msg_id
+        && message.start_nonce.len() == 32
+        && message
+            .start_nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        && matches!(message.state.as_str(), "pending" | "claimed")
+    {
+        Ok(())
+    } else {
+        Err("existing native pending causal message is invalid".into())
+    }
+}
+
+fn adopt_existing_pending_causal_message(
+    path: &Path,
+    group_id: &str,
+    start_nonce: &str,
+    msg_id: &str,
+) -> Result<PathBuf, String> {
+    let mut existing: ManagedAgentPendingCausalMessage = serde_json::from_slice(
+        &std::fs::read(path)
+            .map_err(|error| format!("failed to read native pending causal message: {error}"))?,
+    )
+    .map_err(|error| format!("invalid native pending causal message: {error}"))?;
+    validate_pending_causal_message(&existing, group_id, msg_id)?;
+    if existing.start_nonce.eq_ignore_ascii_case(start_nonce) {
+        return Ok(path.to_path_buf());
+    }
+    if existing.state == "claimed" {
+        return Err(
+            "native pending causal message was claimed by an earlier harness generation".into(),
+        );
+    }
+    existing.start_nonce = start_nonce.to_ascii_lowercase();
+    let payload = serde_json::to_vec(&existing)
+        .map_err(|error| format!("failed to serialize native pending causal message: {error}"))?;
+    crate::managed_agents::storage::atomic_write_json_restricted(path, &payload)?;
+    Ok(path.to_path_buf())
+}
+
+/// Persist one canonical mention for one exact harness generation before the
+/// process can observe it. Files are message-keyed, so duplicate delivery is
+/// idempotent while distinct mentions remain distinct.
+pub(crate) fn persist_native_pending_causal_message(
+    data_dir: &Path,
+    group_id: &str,
+    start_nonce: &str,
+    msg_id: &str,
+) -> Result<PathBuf, String> {
+    if start_nonce.len() != 32 || !start_nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("native pending causal start nonce must be 32 hexadecimal characters".into());
+    }
+    if msg_id.len() != 64 || !msg_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("native pending causal msg id must be 64 hexadecimal characters".into());
+    }
+    let dir = native_pending_causal_dir(data_dir, group_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create native pending causal directory: {error}"))?;
+    let normalized_msg_id = msg_id.to_ascii_lowercase();
+    let path = dir.join(format!("{normalized_msg_id}.json"));
+    if path.exists() {
+        return adopt_existing_pending_causal_message(
+            &path,
+            group_id,
+            start_nonce,
+            &normalized_msg_id,
+        );
+    }
+    let payload = serde_json::to_vec(&ManagedAgentPendingCausalMessage {
+        version: 1,
+        start_nonce: start_nonce.to_ascii_lowercase(),
+        group_id: group_id.to_string(),
+        msg_id: normalized_msg_id.clone(),
+        state: "pending".to_string(),
+    })
+    .map_err(|error| format!("failed to serialize native pending causal message: {error}"))?;
+    let mut file = match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return adopt_existing_pending_causal_message(
+                &path,
+                group_id,
+                start_nonce,
+                &normalized_msg_id,
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to create native pending causal message: {error}"
+            ));
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!("failed to restrict native pending causal message: {error}")
+            })?;
+    }
+    use std::io::Write as _;
+    file.write_all(&payload)
+        .map_err(|error| format!("failed to write native pending causal message: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("failed to sync native pending causal message: {error}"))?;
+    #[cfg(unix)]
+    std::fs::File::open(&dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("failed to sync native pending causal directory: {error}"))?;
+    Ok(path)
+}
+
+/// A safely released silent-turn handoff may outlive its failed harness
+/// generation. Rebind only `pending` entries while no prior harness is live;
+/// `claimed` entries remain bound to their original nonce because an
+/// ambiguous side effect may already have occurred.
+pub(crate) fn rebind_released_pending_causal_messages(
+    data_dir: &Path,
+    group_id: &str,
+    start_nonce: &str,
+) -> Result<(), String> {
+    let dir = native_pending_causal_dir(data_dir, group_id);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed to read native pending causal directory: {error}"
+            ));
+        }
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("failed to read native pending causal entry: {error}"))?
+            .path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let mut message: ManagedAgentPendingCausalMessage =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                format!("failed to read native pending causal message: {error}")
+            })?)
+            .map_err(|error| format!("invalid native pending causal message: {error}"))?;
+        validate_pending_causal_message(&message, group_id, &message.msg_id)?;
+        if message.msg_id.len() != 64
+            || !message.msg_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("existing native pending causal message is invalid".into());
+        }
+        if message.state == "pending" {
+            message.start_nonce = start_nonce.to_ascii_lowercase();
+            let payload = serde_json::to_vec(&message).map_err(|error| {
+                format!("failed to serialize rebound pending causal message: {error}")
+            })?;
+            crate::managed_agents::storage::atomic_write_json_restricted(&path, &payload)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn mark_agent_start_failure(
@@ -307,6 +483,52 @@ mod tests {
             .expect_err("native adapter must not pretend to provide 24 workers");
         assert!(error.contains("exactly one worker"));
         assert!(error.contains("stored value is 24"));
+    }
+
+    #[test]
+    fn pending_causal_files_are_nonce_bound_and_message_distinct() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let nonce = "1".repeat(32);
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+
+        let first_path =
+            persist_native_pending_causal_message(directory.path(), "welcome", &nonce, &first)
+                .expect("persist first");
+        let second_path =
+            persist_native_pending_causal_message(directory.path(), "welcome", &nonce, &second)
+                .expect("persist second");
+
+        assert_ne!(first_path, second_path);
+        let payload: ManagedAgentPendingCausalMessage =
+            serde_json::from_slice(&std::fs::read(&first_path).expect("read pending causal file"))
+                .expect("decode pending causal file");
+        assert_eq!(payload.version, 1);
+        assert_eq!(payload.start_nonce, nonce);
+        assert_eq!(payload.group_id, "welcome");
+        assert_eq!(payload.msg_id, first);
+        assert_eq!(payload.state, "pending");
+
+        rebind_released_pending_causal_messages(directory.path(), "welcome", &"2".repeat(32))
+            .expect("rebind released entries");
+        let rebound: ManagedAgentPendingCausalMessage =
+            serde_json::from_slice(&std::fs::read(&first_path).expect("read rebound file"))
+                .expect("decode rebound file");
+        assert_eq!(rebound.start_nonce, "2".repeat(32));
+
+        let mut claimed = rebound;
+        claimed.state = "claimed".to_string();
+        let claimed_payload = serde_json::to_vec(&claimed).expect("encode claimed entry");
+        crate::managed_agents::storage::atomic_write_json_restricted(&first_path, &claimed_payload)
+            .expect("persist claimed entry");
+        let error = persist_native_pending_causal_message(
+            directory.path(),
+            "welcome",
+            &"3".repeat(32),
+            &first,
+        )
+        .expect_err("a later harness cannot adopt an earlier claim");
+        assert!(error.contains("claimed by an earlier harness generation"));
     }
 
     #[cfg(unix)]

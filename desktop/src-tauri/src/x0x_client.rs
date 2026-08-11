@@ -20,8 +20,7 @@
 //!
 //! # Auth
 //! The durable API token is sent only as an `Authorization: Bearer <token>`
-//! header (accepted on every route including `/ws` per `auth::authorize`). It
-//! is never placed in a URL query string.
+//! header, never in a URL query string (including on `/ws`).
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -33,11 +32,21 @@ use tokio_tungstenite::tungstenite::{
 
 use crate::local_stack::{loopback_api_base, named_data_dir, read_api_port, read_api_token};
 
+mod direct;
 mod post;
+mod redeliver;
+
+#[cfg(test)]
+use direct::SendDirectBody;
+pub use redeliver::GroupMessageRedeliveryReceipt;
 
 /// Per-request deadline for REST calls. The daemon's history store runs on a
 /// blocking SQLite thread; 15s is generous even for a full-group backfill.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Direct-send and group redelivery wait for the daemon's own retry budget.
+/// x0xd 0.37.1 returns in ~8s; 0.38 durable-ACK product sends use ~30s.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) const DIRECT_SEND_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Cap on the WS connect (upgrade) handshake before declaring the daemon
 /// unreachable. Distinct from the read loop, which has no per-frame deadline.
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -215,20 +224,6 @@ struct PublishBody<'a> {
 struct SendGroupBody<'a> {
     body: &'a str,
     kind: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread_root: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread_parent: Option<&'a str>,
-}
-
-/// `POST /direct/send` body. The daemon validates `agent_id` as a 64-hex
-/// AgentId and `payload` as base64; optional `thread_root`/`thread_parent` are
-/// 64-hex canonical msg_ids (validated to 32 bytes via `ThreadMeta::from_hex`).
-/// All fields are snake_case on the wire (the daemon deserializes verbatim).
-#[derive(Serialize)]
-struct SendDirectBody<'a> {
-    agent_id: &'a str,
-    payload: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_root: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -813,35 +808,6 @@ impl X0xClient {
             .get("msg_id")
             .and_then(|v| v.as_str())
             .map(str::to_string))
-    }
-
-    /// `POST /direct/send` — native one-to-one direct message send.
-    ///
-    /// Sends base64 application `payload` to the 64-hex recipient `agent_id`
-    /// over the daemon's authenticated DM path (raw-QUIC preferred when a live
-    /// connection exists, gossip-inbox fallback otherwise). Optional
-    /// `thread_root`/`thread_parent` are 64-hex canonical msg_ids, validated
-    /// daemon-side via `ThreadMeta::from_hex` (32 bytes each).
-    ///
-    /// The daemon records the outbound row under `Scope::Dm(<recipient_hex>)`
-    /// with `msg_id = compute_local_send_msg_id(request_id, payload)`; that
-    /// canonical id is reconciled with the optimistic (clientId-keyed) row via
-    /// the shared `localKey` when history/live rehydrates — the receipt itself
-    /// carries only the `request_id`, never the canonical msg_id.
-    pub async fn send_direct_message(
-        &self,
-        agent_id: &str,
-        payload_b64: &str,
-        thread_root: Option<&str>,
-        thread_parent: Option<&str>,
-    ) -> Result<DirectSendReceipt, X0xClientError> {
-        let body = SendDirectBody {
-            agent_id,
-            payload: payload_b64,
-            thread_root,
-            thread_parent,
-        };
-        self.post_json("/direct/send", &body).await
     }
 
     /// Open a backfill-then-live stream over the daemon `/ws` surface and

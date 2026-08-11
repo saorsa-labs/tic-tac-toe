@@ -5,6 +5,7 @@ import {
 } from "@/shared/api/tauri";
 import type {
   ManagedAgent,
+  ManagedAgentMentionWakeInput,
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
 
@@ -63,6 +64,17 @@ export async function startManagedAgentRuntime(
   groupId: string,
 ): Promise<ManagedAgentRuntimeStatus> {
   return invokeTauri("start_managed_agent_runtime", { pubkey, groupId });
+}
+
+/**
+ * Revalidate and hand off one exact signed group mention to a managed child.
+ * The backend, not the renderer, authorizes the row and durably stages its
+ * canonical msg_id before starting the exact (record, group) runtime.
+ */
+export async function wakeManagedAgentFromMention(
+  input: ManagedAgentMentionWakeInput,
+): Promise<ManagedAgentRuntimeStatus> {
+  return invokeTauri("wake_managed_agent_from_mention", { input });
 }
 
 export async function stopManagedAgentRuntime(

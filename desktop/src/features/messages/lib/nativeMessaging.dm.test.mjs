@@ -19,6 +19,7 @@ const {
   nativeDmRecipientAgentId,
   nativeScopeForChannel,
   sendNativeDirectMessage,
+  sendNativeMessage,
 } = await import("./nativeMessaging.ts");
 const { historyRowToRelayEvent, liveDirectMessageToRelayEvent } = await import(
   "@/shared/api/nativeMessageAdapter.ts"
@@ -133,12 +134,30 @@ test("sendNativeDirectMessage invokes x0x_send_direct_message with recipient + b
   const envelope = JSON.parse(atob(send.args.input.payloadB64));
   assert.equal(envelope.text, "hello dm");
   assert.equal(typeof envelope.clientId, "string");
+  assert.equal(send.args.input.logicalId, envelope.clientId);
   assert.equal(send.args.input.threadRoot, null);
   assert.equal(send.args.input.threadParent, null);
   // The returned clientId keys the optimistic row and reconciles with the
   // canonical (msgId-keyed) row when history rehydrates.
   assert.equal(result.clientId, envelope.clientId);
   assert.equal(typeof result.createdAt, "number");
+});
+
+test("sendNativeMessage uses the envelope clientId as the DM logical id", async () => {
+  reset();
+  response = { ok: true };
+  const peer = "c".repeat(64);
+
+  const event = await sendNativeMessage({
+    channel: dmChannel({ id: peer }),
+    content: "stable retry",
+    identity: identity(),
+  });
+
+  const send = calls.find((call) => call.cmd === "x0x_send_direct_message");
+  const envelope = JSON.parse(atob(send.args.input.payloadB64));
+  assert.equal(send.args.input.logicalId, envelope.clientId);
+  assert.equal(event.localKey, envelope.clientId);
 });
 
 test("sendNativeDirectMessage forwards native thread ancestry as 64-hex msg_ids", async () => {

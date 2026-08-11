@@ -57,6 +57,12 @@ pub enum HarnessError {
     AmbiguousDirectedToolTurn { stop_reason: String },
     #[error("directed ACP turn ended without output before end_turn; stop reason: {stop_reason}")]
     IncompleteDirectedTurn { stop_reason: String },
+    #[error("pending causal handoff is invalid: {0}")]
+    PendingCausalInvalid(String),
+    #[error("pending causal message {0} is absent from child durable history")]
+    PendingCausalMissing(String),
+    #[error("pending causal message {0} failed exact signed trigger validation")]
+    PendingCausalRejected(String),
 }
 
 type PromptFuture<'a> = Pin<Box<dyn Future<Output = Result<AcpTurnOutcome, AcpError>> + 'a>>;
@@ -110,6 +116,22 @@ impl ReconcileAttempt for LiveReconcileAttempt<'_> {
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct DurableState {
     last_seen_id: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PendingCausalMessage {
+    version: u8,
+    start_nonce: String,
+    group_id: String,
+    msg_id: String,
+    state: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCausalEntry {
+    path: PathBuf,
+    message: PendingCausalMessage,
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +337,195 @@ async fn reconcile_with_silent_recovery(
     }
 }
 
+fn pending_causal_dir(config: &Config) -> PathBuf {
+    config
+        .data_dir
+        .join(format!("buzz-acp-{}.pending", config.group_id))
+}
+
+fn load_pending_causal(config: &Config) -> Result<Vec<PendingCausalEntry>, HarnessError> {
+    let Some(start_nonce) = config.start_nonce.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let dir = pending_causal_dir(config);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut pending = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let message: PendingCausalMessage = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let file_msg_id = path.file_stem().and_then(|value| value.to_str());
+        let canonical_msg_id = message.msg_id.to_ascii_lowercase();
+        let valid = message.version == 1
+            && message.start_nonce == start_nonce
+            && message.group_id == config.group_id
+            && canonical_msg_id.len() == 64
+            && canonical_msg_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && file_msg_id == Some(canonical_msg_id.as_str())
+            && matches!(message.state.as_str(), "pending" | "claimed");
+        if !valid {
+            // A different nonce belongs to an earlier harness generation and
+            // must never be adopted by this process. Other malformed fields
+            // on our nonce are fatal rather than silently ignored.
+            if message.start_nonce != start_nonce {
+                continue;
+            }
+            return Err(HarnessError::PendingCausalInvalid(
+                path.display().to_string(),
+            ));
+        }
+        pending.push(PendingCausalEntry {
+            path,
+            message: PendingCausalMessage {
+                msg_id: canonical_msg_id,
+                ..message
+            },
+        });
+    }
+    pending.sort_by(|left, right| left.message.msg_id.cmp(&right.message.msg_id));
+    Ok(pending)
+}
+
+fn persist_pending_causal(entry: &PendingCausalEntry) -> Result<(), HarnessError> {
+    let temporary = entry.path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(&entry.message)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, &entry.path)?;
+    #[cfg(unix)]
+    if let Some(parent) = entry.path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn remove_pending_causal(path: &Path) -> Result<(), HarnessError> {
+    std::fs::remove_file(path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+async fn after_durable_pending_claim<F, Fut>(
+    state_path: &Path,
+    state: &mut DurableState,
+    row_id: i64,
+    entry: &mut PendingCausalEntry,
+    operation: F,
+) -> Result<(), HarnessError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), HarnessError>>,
+{
+    let previous_watermark = state.last_seen_id;
+    claim_row(state_path, state, row_id)?;
+    entry.message.state = "claimed".to_string();
+    if let Err(error) = persist_pending_causal(entry) {
+        state.last_seen_id = previous_watermark;
+        persist_state(state_path, state)?;
+        return Err(error);
+    }
+
+    let result = operation().await;
+    match &result {
+        Ok(()) => remove_pending_causal(&entry.path)?,
+        Err(HarnessError::SilentDirectedTurn { .. }) => {
+            // No visible text and no completed/ambiguous tool means no known
+            // side effect. Release both claims so the same exact row can be
+            // retried by this process or rebound on a later clean launch.
+            state.last_seen_id = previous_watermark;
+            persist_state(state_path, state)?;
+            entry.message.state = "pending".to_string();
+            persist_pending_causal(entry)?;
+        }
+        Err(_) => {
+            // Ambiguous ACP/tool/send failures retain both durable claims.
+        }
+    }
+    result
+}
+
+async fn reconcile_pending_causal(
+    harness: &HarnessContext<'_>,
+    x0x: &X0xClient,
+    stable_group_id: &str,
+    state_path: &Path,
+    state: &mut DurableState,
+    context: &mut ConversationContext,
+    acp: &mut AcpClient,
+) -> Result<(), HarnessError> {
+    let mut pending_rows = Vec::new();
+    for entry in load_pending_causal(harness.config)? {
+        if entry.message.state == "claimed" {
+            continue;
+        }
+        let msg_id = entry.message.msg_id.clone();
+        let row = x0x
+            .history_get(&msg_id)
+            .await?
+            .ok_or_else(|| HarnessError::PendingCausalMissing(msg_id.clone()))?;
+        let envelope = row
+            .envelope()
+            .ok_or_else(|| HarnessError::PendingCausalRejected(msg_id.clone()))?;
+        pending_rows.push((entry, row, envelope));
+    }
+    pending_rows.sort_by_key(|(_, row, _)| row.id);
+
+    for (mut entry, row, envelope) in pending_rows {
+        let msg_id = entry.message.msg_id.clone();
+
+        // Bounded child delegation depends on the exact owner root. Load it
+        // explicitly when it is older than the recent-context window; never
+        // reconstruct or inject content from the desktop handoff.
+        if let Some(root_id) = envelope.delegation_root.as_deref() {
+            if !context
+                .messages
+                .iter()
+                .any(|message| message.msg_id == root_id)
+            {
+                if let Some(root) = x0x.history_get(root_id).await? {
+                    if let Some(root_envelope) = root
+                        .envelope()
+                        .filter(|_| root.is_safe_context(stable_group_id, &harness.config.agent_id))
+                    {
+                        context.push(&root, &root_envelope);
+                    }
+                }
+            }
+        }
+        if row.is_safe_context(stable_group_id, &harness.config.agent_id) {
+            context.push(&row, &envelope);
+        }
+        if !should_trigger(harness.config, stable_group_id, &row, &envelope, context) {
+            return Err(HarnessError::PendingCausalRejected(msg_id));
+        }
+
+        after_durable_pending_claim(state_path, state, row.id, &mut entry, || async {
+            harness.lifecycle.publish(Lifecycle::Waking, None)?;
+            handle_directed_message(harness.config, x0x, &row, &envelope, context, acp).await?;
+            harness.lifecycle.publish(Lifecycle::Ready, None)?;
+            Ok(())
+        })
+        .await?;
+    }
+    Ok(())
+}
+
 async fn reconcile(
     harness: &HarnessContext<'_>,
     x0x: &X0xClient,
@@ -325,6 +536,16 @@ async fn reconcile(
     acp: &mut AcpClient,
 ) -> Result<(), HarnessError> {
     let config = harness.config;
+    reconcile_pending_causal(
+        harness,
+        x0x,
+        stable_group_id,
+        state_path,
+        state,
+        context,
+        acp,
+    )
+    .await?;
     let rows = x0x
         .history_after(stable_group_id, state.last_seen_id)
         .await?;
@@ -988,6 +1209,90 @@ mod tests {
                 .last_seen_id,
             42
         );
+    }
+
+    #[tokio::test]
+    async fn pending_causal_claim_bypasses_high_watermark_and_releases_only_silence() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState { last_seen_id: 99 };
+        persist_state(&state_path, &state).expect("persist first-launch max watermark");
+        let pending_path = directory.path().join("a.json");
+        let mut entry = PendingCausalEntry {
+            path: pending_path.clone(),
+            message: PendingCausalMessage {
+                version: 1,
+                start_nonce: "1".repeat(32),
+                group_id: "group".to_string(),
+                msg_id: "a".repeat(64),
+                state: "pending".to_string(),
+            },
+        };
+        persist_pending_causal(&entry).expect("persist pending handoff");
+
+        let error = after_durable_pending_claim(&state_path, &mut state, 42, &mut entry, || {
+            std::future::ready(Err(HarnessError::SilentDirectedTurn {
+                attempts: 2,
+                stop_reason: "end_turn".to_string(),
+            }))
+        })
+        .await
+        .expect_err("silent turn releases the pending handoff");
+
+        assert!(matches!(error, HarnessError::SilentDirectedTurn { .. }));
+        assert_eq!(state.last_seen_id, 99);
+        let released: PendingCausalMessage = serde_json::from_slice(
+            &std::fs::read(&pending_path).expect("released pending file exists"),
+        )
+        .expect("released pending file parses");
+        assert_eq!(released.state, "pending");
+
+        after_durable_pending_claim(&state_path, &mut state, 42, &mut entry, || {
+            std::future::ready(Ok(()))
+        })
+        .await
+        .expect("retry succeeds despite first-launch watermark");
+        assert_eq!(state.last_seen_id, 99);
+        assert!(!pending_path.exists());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_pending_causal_failure_keeps_both_claims() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state_path = directory.path().join("state.json");
+        let mut state = DurableState { last_seen_id: 7 };
+        persist_state(&state_path, &state).expect("persist prior watermark");
+        let pending_path = directory.path().join("b.json");
+        let mut entry = PendingCausalEntry {
+            path: pending_path.clone(),
+            message: PendingCausalMessage {
+                version: 1,
+                start_nonce: "1".repeat(32),
+                group_id: "group".to_string(),
+                msg_id: "b".repeat(64),
+                state: "pending".to_string(),
+            },
+        };
+        persist_pending_causal(&entry).expect("persist pending handoff");
+
+        let error = after_durable_pending_claim(&state_path, &mut state, 42, &mut entry, || {
+            std::future::ready(Err(HarnessError::AmbiguousDirectedToolTurn {
+                stop_reason: "end_turn".to_string(),
+            }))
+        })
+        .await
+        .expect_err("ambiguous side effect remains visible");
+
+        assert!(matches!(
+            error,
+            HarnessError::AmbiguousDirectedToolTurn { .. }
+        ));
+        assert_eq!(state.last_seen_id, 42);
+        let claimed: PendingCausalMessage = serde_json::from_slice(
+            &std::fs::read(pending_path).expect("claimed pending file remains"),
+        )
+        .expect("claimed pending file parses");
+        assert_eq!(claimed.state, "claimed");
     }
 
     #[tokio::test]

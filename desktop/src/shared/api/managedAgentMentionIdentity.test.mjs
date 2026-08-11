@@ -132,6 +132,7 @@ test("a managed child structured mention cold-starts the stopped target by recor
   const targetRecord = "3".repeat(64);
   const targetChild = "4".repeat(64);
   const starts = [];
+  const msgId = "5".repeat(64);
   const agents = [
     {
       backend: { type: "local" },
@@ -149,7 +150,7 @@ test("a managed child structured mention cold-starts the stopped target by recor
 
   const started = await wakeManagedAgentMentionFromLiveEvent(
     {
-      id: "guide-mentions-x",
+      id: msgId,
       kind: 9,
       pubkey: guideChild,
       created_at: 1,
@@ -165,15 +166,21 @@ test("a managed child structured mention cold-starts the stopped target by recor
       listManagedAgents: async () => agents,
       getManagedAgentNativeIdentity: async (record) =>
         record === guideRecord ? guideChild : targetChild,
-      startManagedAgent: async (record) => {
-        starts.push(record);
+      wakeManagedAgentFromMention: async (input) => {
+        starts.push(input);
       },
     },
   );
 
   assert.deepEqual(started, [targetRecord]);
-  assert.deepEqual(starts, [targetRecord]);
-  assert.ok(!starts.includes(targetChild));
+  assert.deepEqual(starts, [
+    {
+      targetRecordPubkey: targetRecord,
+      groupId: "welcome",
+      msgId,
+    },
+  ]);
+  assert.ok(!starts.some((start) => start.targetRecordPubkey === targetChild));
 });
 
 test("a stranger cannot cold-start a managed target with a structured mention", async () => {
@@ -185,8 +192,12 @@ test("a stranger cannot cold-start a managed target with a structured mention", 
 
   const started = await wakeManagedAgentsForStructuredMention(
     {
+      id: "8".repeat(64),
       pubkey: "9".repeat(64),
-      tags: [["p", targetChild]],
+      tags: [
+        ["h", "welcome"],
+        ["p", targetChild],
+      ],
     },
     {
       listManagedAgents: async () => [
@@ -205,8 +216,8 @@ test("a stranger cannot cold-start a managed target with a structured mention", 
       ],
       getManagedAgentNativeIdentity: async (record) =>
         record === guideRecord ? guideChild : targetChild,
-      startManagedAgent: async (record) => {
-        starts.push(record);
+      wakeManagedAgentFromMention: async (input) => {
+        starts.push(input);
       },
     },
   );
@@ -238,24 +249,127 @@ test("legacy record-key mention and already-running target do not start a child"
     ],
     getManagedAgentNativeIdentity: async (record) =>
       record === guideRecord ? guideChild : targetChild,
-    startManagedAgent: async (record) => {
-      starts.push(record);
+    wakeManagedAgentFromMention: async (input) => {
+      starts.push(input);
     },
   };
 
   assert.deepEqual(
     await wakeManagedAgentsForStructuredMention(
-      { pubkey: guideChild, tags: [["p", targetRecord]] },
+      {
+        id: "6".repeat(64),
+        pubkey: guideChild,
+        tags: [
+          ["h", "welcome"],
+          ["p", targetRecord],
+        ],
+      },
       dependencies,
     ),
     [],
   );
   assert.deepEqual(
     await wakeManagedAgentsForStructuredMention(
-      { pubkey: guideChild, tags: [["p", targetChild]] },
+      {
+        id: "7".repeat(64),
+        pubkey: guideChild,
+        tags: [
+          ["h", "welcome"],
+          ["p", targetChild],
+        ],
+      },
       dependencies,
     ),
     [],
   );
   assert.deepEqual(starts, []);
+});
+
+test("distinct causal rows for one target and group do not collapse", async () => {
+  const guideRecord = "1".repeat(64);
+  const guideChild = "2".repeat(64);
+  const targetRecord = "3".repeat(64);
+  const targetChild = "4".repeat(64);
+  const calls = [];
+  const dependencies = {
+    listManagedAgents: async () => [
+      {
+        backend: { type: "local" },
+        name: "Guide",
+        pubkey: guideRecord,
+        status: "running",
+      },
+      {
+        backend: { type: "local" },
+        name: "X",
+        pubkey: targetRecord,
+        status: "stopped",
+      },
+    ],
+    getManagedAgentNativeIdentity: async (record) =>
+      record === guideRecord ? guideChild : targetChild,
+    wakeManagedAgentFromMention: async (input) => {
+      calls.push(input);
+    },
+  };
+  const event = (id) => ({
+    id,
+    pubkey: guideChild,
+    tags: [
+      ["h", "welcome"],
+      ["p", targetChild],
+    ],
+  });
+
+  await Promise.all([
+    wakeManagedAgentsForStructuredMention(event("a".repeat(64)), dependencies),
+    wakeManagedAgentsForStructuredMention(event("b".repeat(64)), dependencies),
+  ]);
+
+  assert.deepEqual(calls.map((call) => call.msgId).sort(), [
+    "a".repeat(64),
+    "b".repeat(64),
+  ]);
+});
+
+test("malformed msg id or ambiguous group tags cannot cross the wake boundary", async () => {
+  let calls = 0;
+  const dependencies = {
+    listManagedAgents: async () => [],
+    getManagedAgentNativeIdentity: async () => null,
+    wakeManagedAgentFromMention: async () => {
+      calls += 1;
+    },
+  };
+
+  assert.deepEqual(
+    await wakeManagedAgentsForStructuredMention(
+      {
+        id: "not-canonical",
+        pubkey: childAgentId,
+        tags: [
+          ["h", "one"],
+          ["p", humanAgentId],
+        ],
+      },
+      dependencies,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    await wakeManagedAgentsForStructuredMention(
+      {
+        id: "f".repeat(64),
+        pubkey: childAgentId,
+        tags: [
+          ["h", "one"],
+          ["h", "two"],
+          ["p", humanAgentId],
+        ],
+      },
+      dependencies,
+    ),
+    [],
+  );
+  assert.equal(calls, 0);
 });

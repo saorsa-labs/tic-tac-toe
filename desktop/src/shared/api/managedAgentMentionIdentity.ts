@@ -1,6 +1,7 @@
 import { getManagedAgentNativeIdentity } from "@/shared/api/observerRelay";
 import { listManagedAgents } from "@/shared/api/tauri";
-import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
+import { wakeManagedAgentFromMention } from "@/shared/api/tauriManagedAgents";
+import type { ManagedAgentMentionWakeInput } from "@/shared/api/types";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -13,6 +14,7 @@ type ManagedMentionWakeRecord = Pick<
 >;
 
 export type StructuredManagedMentionEvent = {
+  id: string;
   pubkey: string;
   tags: readonly (readonly string[])[];
 };
@@ -20,7 +22,9 @@ export type StructuredManagedMentionEvent = {
 export type ManagedMentionWakeDependencies = {
   listManagedAgents: () => Promise<readonly ManagedMentionWakeRecord[]>;
   getManagedAgentNativeIdentity: (pubkey: string) => Promise<string | null>;
-  startManagedAgent: (pubkey: string) => Promise<unknown>;
+  wakeManagedAgentFromMention: (
+    input: ManagedAgentMentionWakeInput,
+  ) => Promise<unknown>;
 };
 
 export type ManagedAgentNativeIdentityMap = Readonly<Record<string, string>>;
@@ -38,12 +42,13 @@ const defaultDependencies: ManagedMentionIdentityDependencies = {
 const defaultWakeDependencies: ManagedMentionWakeDependencies = {
   listManagedAgents,
   getManagedAgentNativeIdentity,
-  startManagedAgent,
+  wakeManagedAgentFromMention,
 };
 
-// Collapse duplicate live frames and near-simultaneous child replies onto one
-// lifecycle start for each managed record. The entry is removed after settle
-// so a later mention can retry a transiently failed start.
+// Collapse duplicate delivery of the SAME signed causal row. The canonical
+// row id is part of the key: two distinct mentions for one (record, group)
+// runtime must both cross the backend boundary, where lifecycle start itself
+// is deduped by ManagedAgentRuntimeKey(record, group).
 const managedMentionStartsInFlight = new Map<string, Promise<void>>();
 
 /**
@@ -179,7 +184,16 @@ export async function wakeManagedAgentsForStructuredMention(
   event: StructuredManagedMentionEvent,
   dependencies: ManagedMentionWakeDependencies = defaultWakeDependencies,
 ): Promise<string[]> {
+  const msgId = normalizePubkey(event.id);
   const authorAgentId = normalizePubkey(event.pubkey);
+  const groupIds = [
+    ...new Set(
+      event.tags
+        .filter((tag) => tag[0] === "h")
+        .map((tag) => (tag[1] ?? "").trim())
+        .filter(Boolean),
+    ),
+  ];
   const mentionedAgentIds = new Set(
     event.tags
       .filter((tag) => tag[0] === "p")
@@ -189,9 +203,15 @@ export async function wakeManagedAgentsForStructuredMention(
           AGENT_ID_PATTERN.test(agentId) && agentId !== authorAgentId,
       ),
   );
-  if (!AGENT_ID_PATTERN.test(authorAgentId) || mentionedAgentIds.size === 0) {
+  if (
+    !AGENT_ID_PATTERN.test(msgId) ||
+    !AGENT_ID_PATTERN.test(authorAgentId) ||
+    mentionedAgentIds.size === 0 ||
+    groupIds.length !== 1
+  ) {
     return [];
   }
+  const [groupId] = groupIds;
 
   const agents = await dependencies.listManagedAgents();
   const nativeIdentityByRecord = await resolveManagedAgentNativeIdentityMap(
@@ -234,21 +254,26 @@ export async function wakeManagedAgentsForStructuredMention(
 
   await Promise.all(
     targetRecordPubkeys.map(async (recordPubkey) => {
-      const existing = managedMentionStartsInFlight.get(recordPubkey);
+      const causalKey = `${recordPubkey}\u0000${groupId}\u0000${msgId}`;
+      const existing = managedMentionStartsInFlight.get(causalKey);
       if (existing) {
         await existing;
         return;
       }
 
       const start = dependencies
-        .startManagedAgent(recordPubkey)
+        .wakeManagedAgentFromMention({
+          targetRecordPubkey: recordPubkey,
+          groupId,
+          msgId,
+        })
         .then(() => undefined);
-      managedMentionStartsInFlight.set(recordPubkey, start);
+      managedMentionStartsInFlight.set(causalKey, start);
       try {
         await start;
       } finally {
-        if (managedMentionStartsInFlight.get(recordPubkey) === start) {
-          managedMentionStartsInFlight.delete(recordPubkey);
+        if (managedMentionStartsInFlight.get(causalKey) === start) {
+          managedMentionStartsInFlight.delete(causalKey);
         }
       }
     }),

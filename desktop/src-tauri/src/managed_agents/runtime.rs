@@ -1628,6 +1628,7 @@ pub fn spawn_agent_child(
     group_id: &str,
     lazy: bool,
     native_launch: &super::ManagedAgentLaunchContext,
+    pending_causal_msg_id: Option<&str>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     validate_native_agent_parallelism(record.parallelism)?;
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), group_id)?;
@@ -1953,6 +1954,19 @@ pub fn spawn_agent_child(
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
     let lifecycle_path =
         prepare_native_harness_lifecycle(&native_launch.child_data_dir, &native_launch.group_id)?;
+    super::rebind_released_pending_causal_messages(
+        &native_launch.child_data_dir,
+        &native_launch.group_id,
+        &start_nonce,
+    )?;
+    if let Some(msg_id) = pending_causal_msg_id {
+        super::persist_native_pending_causal_message(
+            &native_launch.child_data_dir,
+            &native_launch.group_id,
+            &start_nonce,
+            msg_id,
+        )?;
+    }
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
@@ -2072,15 +2086,16 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = match spawn_agent_child(app, record, &key.group_id, false, native_launch) {
-        Ok(process) => process,
-        Err(error) => {
-            mark_agent_start_failure(record, &error, None);
-            runtimes.remove(&key);
-            super::remove_agent_runtime_receipt(app, &key);
-            return Err(error);
-        }
-    };
+    let mut process =
+        match spawn_agent_child(app, record, &key.group_id, false, native_launch, None) {
+            Ok(process) => process,
+            Err(error) => {
+                mark_agent_start_failure(record, &error, None);
+                runtimes.remove(&key);
+                super::remove_agent_runtime_receipt(app, &key);
+                return Err(error);
+            }
+        };
     let now = now_iso();
     record.updated_at = now.clone();
     record.last_started_at = Some(now.clone());

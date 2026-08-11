@@ -1,3 +1,6 @@
+use base64::Engine as _;
+use serde::Deserialize;
+use std::collections::HashMap;
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -9,11 +12,166 @@ use crate::{
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentSummary,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentMentionWakeRequest,
+        ManagedAgentRuntimeStatus, ManagedAgentSummary, RespondTo, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     util::now_iso,
 };
+
+const NATIVE_ID_HEX_LEN: usize = 64;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedMentionEnvelope {
+    #[serde(default)]
+    mentions: Vec<String>,
+    #[serde(default)]
+    agent_generated: bool,
+    #[serde(default)]
+    agent_generation: Option<u8>,
+    #[serde(default)]
+    delegation_root: Option<String>,
+}
+
+fn canonical_hex_id(value: &str, label: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() == NATIVE_ID_HEX_LEN
+        && normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        Ok(normalized)
+    } else {
+        Err(format!("{label} must be 64 hexadecimal characters"))
+    }
+}
+
+fn decode_managed_mention_envelope(
+    row: &crate::x0x_client::HistoryRow,
+) -> Result<ManagedMentionEnvelope, String> {
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(row.payload.as_bytes())
+        .map_err(|_| "managed mention owner row payload is not canonical base64".to_string())?;
+    serde_json::from_slice(&payload)
+        .map_err(|_| "managed mention owner row is not a native channel envelope".to_string())
+}
+
+fn require_verified_owner_mention_row(
+    row: &crate::x0x_client::HistoryRow,
+    stable_group_id: &str,
+    expected_msg_id: &str,
+    target_child_agent_id: &str,
+    owned_child_by_agent_id: &HashMap<String, String>,
+) -> Result<(String, ManagedMentionEnvelope), String> {
+    if row.msg_id != expected_msg_id
+        || row.scope != format!("group:{stable_group_id}")
+        || row.direction != "Inbound"
+        || !row.signed
+        || row.provenance != "VerifiedEnvelope"
+    {
+        return Err(
+            "managed mention must be the exact signed VerifiedEnvelope owner history row"
+                .to_string(),
+        );
+    }
+    let author = row
+        .author_agent
+        .as_deref()
+        .ok_or_else(|| "managed mention owner row has no authenticated author".to_string())?
+        .to_ascii_lowercase();
+    if author == target_child_agent_id || !owned_child_by_agent_id.contains_key(&author) {
+        return Err("managed mention author is not another owned managed child".to_string());
+    }
+    let envelope = decode_managed_mention_envelope(row)?;
+    if !envelope
+        .mentions
+        .iter()
+        .any(|mention| mention.eq_ignore_ascii_case(target_child_agent_id))
+    {
+        return Err("managed mention does not explicitly target the child AgentId".to_string());
+    }
+    Ok((author, envelope))
+}
+
+fn author_allowed_for_launch(
+    respond_to: RespondTo,
+    author_agent_id: &str,
+    owner_agent_id: &str,
+    effective_allowlist: &[String],
+) -> bool {
+    match respond_to {
+        RespondTo::OwnerOnly => author_agent_id.eq_ignore_ascii_case(owner_agent_id),
+        RespondTo::Allowlist => {
+            author_agent_id.eq_ignore_ascii_case(owner_agent_id)
+                || effective_allowlist
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(author_agent_id))
+        }
+        RespondTo::Anyone => true,
+    }
+}
+
+fn require_exact_redelivery_receipt(
+    receipt: &crate::x0x_client::GroupMessageRedeliveryReceipt,
+    stable_group_id: &str,
+    msg_id: &str,
+    target_agent_id: &str,
+) -> Result<(), String> {
+    let durable_outcome = matches!(receipt.outcome.as_str(), "committed" | "duplicate");
+    if receipt.ok
+        && receipt.group_id == stable_group_id
+        && receipt.msg_id == msg_id
+        && receipt.agent_id == target_agent_id
+        && durable_outcome
+    {
+        Ok(())
+    } else {
+        Err("x0xd did not return an exact durable managed mention redelivery receipt".into())
+    }
+}
+
+fn require_bounded_agent_delegation(
+    mention_row: &crate::x0x_client::HistoryRow,
+    mention: &ManagedMentionEnvelope,
+    root_row: &crate::x0x_client::HistoryRow,
+    stable_group_id: &str,
+    owner_agent_id: &str,
+    delegate_agent_id: &str,
+) -> Result<(), String> {
+    let root_id = mention
+        .delegation_root
+        .as_deref()
+        .ok_or_else(|| "managed child mention has no owner delegation root".to_string())?;
+    if !mention.agent_generated
+        || mention.agent_generation != Some(1)
+        || mention_row.thread_root.as_deref() != Some(root_id)
+        || mention_row.thread_parent.as_deref() != Some(root_id)
+    {
+        return Err("managed child mention is not a bounded first-generation delegation".into());
+    }
+    if root_row.msg_id != root_id
+        || root_row.scope != format!("group:{stable_group_id}")
+        || root_row.direction != "Outbound"
+        || !root_row.signed
+        || root_row.provenance != "LocalSend"
+        || root_row.author_agent.as_deref() != Some(owner_agent_id)
+        || root_row.thread_root.is_some()
+        || root_row.thread_parent.is_some()
+    {
+        return Err(
+            "managed child mention delegation root is not the exact signed owner row".into(),
+        );
+    }
+    let root = decode_managed_mention_envelope(root_row)?;
+    if root.agent_generated
+        || !root
+            .mentions
+            .iter()
+            .any(|mention| mention.eq_ignore_ascii_case(delegate_agent_id))
+    {
+        return Err("managed child mention was not authorized by its owner delegation root".into());
+    }
+    Ok(())
+}
 
 fn trim_to_optional_string(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -730,6 +888,157 @@ pub async fn create_managed_agent(
         profile_sync_error,
         spawn_error,
     })
+}
+
+/// Cold-start one exact managed `(record, group)` runtime from one exact
+/// signed child-authored causal row. Every authority-bearing fact is re-read
+/// from owner x0xd history; the renderer supplies identifiers only.
+#[tauri::command]
+pub async fn wake_managed_agent_from_mention(
+    input: ManagedAgentMentionWakeRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    let target_record_pubkey = canonical_hex_id(
+        &input.target_record_pubkey,
+        "managed-agent target record pubkey",
+    )?;
+    let msg_id = canonical_hex_id(&input.msg_id, "managed mention msg id")?;
+    let group_id = input.group_id.trim().to_string();
+    if group_id.is_empty() {
+        return Err("managed mention group id is required".into());
+    }
+
+    let (target_record, records) = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let target = records
+            .iter()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&target_record_pubkey))
+            .cloned()
+            .ok_or_else(|| format!("agent {target_record_pubkey} not found"))?;
+        if target.backend != BackendKind::Local {
+            return Err("managed mention target must be a local agent".into());
+        }
+        (target, records)
+    };
+
+    let target_child =
+        crate::managed_agents::agent_identity::managed_agent_child_identity(&target_record_pubkey)
+            .ok_or_else(|| {
+                "managed mention target has no durable native child identity".to_string()
+            })?;
+    let mut owned_child_by_agent_id = HashMap::new();
+    for record in &records {
+        if record.backend != BackendKind::Local {
+            continue;
+        }
+        if let Some(child) =
+            crate::managed_agents::agent_identity::managed_agent_child_identity(&record.pubkey)
+        {
+            owned_child_by_agent_id.insert(child.agent_id, record.pubkey.clone());
+        }
+    }
+
+    let transport = state.x0x_client.resolve_group_transport(&group_id).await?;
+    if transport.confidentiality != crate::x0x_client::GroupConfidentiality::SignedPublic {
+        return Err("managed mention group must be signed_public".into());
+    }
+    let row = state
+        .x0x_client
+        .history_get(&msg_id)
+        .await?
+        .ok_or_else(|| "managed mention owner history row was not found".to_string())?;
+    let (author_agent_id, mention) = require_verified_owner_mention_row(
+        &row,
+        &transport.stable_group_id,
+        &msg_id,
+        &target_child.agent_id,
+        &owned_child_by_agent_id,
+    )?;
+
+    let owner: serde_json::Value = state.x0x_client.get_json("/agent", &[]).await?;
+    let owner_agent_id = owner
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "owner /agent response has no AgentId".to_string())?
+        .to_ascii_lowercase();
+    let root_id = mention
+        .delegation_root
+        .as_deref()
+        .ok_or_else(|| "managed child mention has no owner delegation root".to_string())?;
+    let root_row = state
+        .x0x_client
+        .history_get(root_id)
+        .await?
+        .ok_or_else(|| "managed child mention owner delegation root was not found".to_string())?;
+    require_bounded_agent_delegation(
+        &row,
+        &mention,
+        &root_row,
+        &transport.stable_group_id,
+        &owner_agent_id,
+        &author_agent_id,
+    )?;
+
+    // Launch preparation revalidates/repairs exact target membership and
+    // translates record-key policy to native child AgentIds. It does not start
+    // the harness; redelivery and pending-causal persistence still happen first.
+    let native_launch = crate::managed_agents::prepare_managed_agent_launch(
+        &app,
+        &target_record,
+        &group_id,
+        crate::managed_agents::GroupBindIntent::EnsureAttached,
+    )
+    .await?;
+    if native_launch.child_agent_id != target_child.agent_id {
+        return Err("managed mention target child identity changed during validation".into());
+    }
+    if !author_allowed_for_launch(
+        target_record.respond_to,
+        &author_agent_id,
+        &native_launch.owner_agent_id,
+        &native_launch.effective_respond_to_allowlist,
+    ) {
+        return Err(
+            "managed mention author is not authorized by the target response policy".into(),
+        );
+    }
+
+    // The child independently revalidates the same delegation chain. Establish
+    // its exact owner root first, then the exact causal mention; never inject
+    // decoded content or a renderer-supplied substitute into child history.
+    let root_receipt = state
+        .x0x_client
+        .redeliver_group_message(&transport.stable_group_id, root_id, &target_child.agent_id)
+        .await?;
+    require_exact_redelivery_receipt(
+        &root_receipt,
+        &transport.stable_group_id,
+        root_id,
+        &target_child.agent_id,
+    )?;
+    let mention_receipt = state
+        .x0x_client
+        .redeliver_group_message(&transport.stable_group_id, &msg_id, &target_child.agent_id)
+        .await?;
+    require_exact_redelivery_receipt(
+        &mention_receipt,
+        &transport.stable_group_id,
+        &msg_id,
+        &target_child.agent_id,
+    )?;
+
+    crate::managed_agents::start_managed_agent_runtime_pair_for_causal_message(
+        target_record_pubkey,
+        transport.stable_group_id,
+        msg_id,
+        app,
+    )
+    .await
 }
 
 /// Data needed for background profile reconciliation after agent start.

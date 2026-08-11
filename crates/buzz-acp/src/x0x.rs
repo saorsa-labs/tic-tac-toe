@@ -110,6 +110,11 @@ struct HistoryResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct HistoryMessageResponse {
+    record: Option<HistoryRow>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AgentResponse {
     agent_id: String,
 }
@@ -226,6 +231,15 @@ impl X0xClient {
         }
 
         Err(X0xError::HistoryPageLimit)
+    }
+
+    pub async fn history_get(&self, msg_id: &str) -> Result<Option<HistoryRow>, X0xError> {
+        let path = format!("/history/message/{msg_id}");
+        match self.get_json::<HistoryMessageResponse>(&path, &[]).await {
+            Ok(response) => Ok(response.record),
+            Err(X0xError::Status { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn recent_history(&self, stable_group_id: &str) -> Result<Vec<HistoryRow>, X0xError> {

@@ -209,6 +209,7 @@ export async function sendNativeDirectMessage(
   await x0xSendDirectMessage({
     agentId: recipient,
     payload: native.payload,
+    logicalId: native.clientId,
     threadRoot: input.threadRoot ?? null,
     threadParent: input.threadParent ?? null,
   });
@@ -243,6 +244,7 @@ export async function sendNativeMessage(
     await x0xSendDirectMessage({
       agentId: recipient,
       payload: native.payload,
+      logicalId: native.clientId,
       threadRoot: input.threadRoot ?? null,
       threadParent: input.threadParent ?? null,
     });

@@ -187,6 +187,9 @@ pub(crate) struct SendDirectMessageInput {
     agent_id: String,
     /// Base64-encoded application payload bytes.
     payload_b64: String,
+    /// Optional stable logical identity for retry/deduplication.
+    #[serde(default)]
+    logical_id: Option<String>,
     /// Optional 64-hex canonical msg_id of the thread root.
     #[serde(default)]
     thread_root: Option<String>,
@@ -213,6 +216,7 @@ pub async fn x0x_send_direct_message(
         .send_direct_message(
             &input.agent_id,
             &input.payload_b64,
+            input.logical_id.as_deref(),
             input.thread_root.as_deref(),
             input.thread_parent.as_deref(),
         )
