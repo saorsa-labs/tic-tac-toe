@@ -46,6 +46,8 @@ export type WelcomeKickoffStageInput = {
   hasMessages: boolean;
   /** The timeout window elapsed while the stage was active. */
   timedOut: boolean;
+  /** Kickoff threw or the lead agent failed to start — do not wait 90s. */
+  failed: boolean;
 };
 
 /**
@@ -70,7 +72,9 @@ export function resolveWelcomeKickoffStagePhase(
   }
   if (current === "exiting") return "exiting";
   if (input.hasMessages) return "exiting";
-  if (input.timedOut && current === "active") return "timed-out";
+  if ((input.timedOut || input.failed) && current === "active") {
+    return "timed-out";
+  }
   return current;
 }
 
@@ -105,6 +109,7 @@ export function useWelcomeKickoffStage(
   activeChannel: Channel | null,
   hasTimelineMessages: boolean,
   timelineLoading: boolean,
+  kickoffFailed = false,
 ) {
   const channelId = activeChannel?.id ?? null;
   const isWelcome = isWelcomeChannel(activeChannel);
@@ -124,9 +129,16 @@ export function useWelcomeKickoffStage(
         timelineSettled: !timelineLoading,
         hasMessages: hasTimelineMessages,
         timedOut,
+        failed: kickoffFailed,
       }),
     );
-  }, [hasTimelineMessages, isWelcome, timedOut, timelineLoading]);
+  }, [
+    hasTimelineMessages,
+    isWelcome,
+    kickoffFailed,
+    timedOut,
+    timelineLoading,
+  ]);
 
   React.useEffect(() => {
     if (phase !== "active") return;

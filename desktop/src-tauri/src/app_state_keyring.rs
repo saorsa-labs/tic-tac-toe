@@ -2,6 +2,12 @@
 /// identifier so the native x0x app never probes the inherited
 /// `buzz-desktop` entry. That legacy entry may have an ACL bound to an older
 /// signing identity, which makes Finder launches prompt on every read.
+///
+/// Decision (2026-08-12, v0.5.1): do **not** migrate secrets from
+/// `buzz-desktop`. v0.5.0 installs were team-only; copying those items into
+/// the new service would re-introduce the Buzz ACL prompt this split exists
+/// to stop. Users on a v0.5.0 identity re-create agent secrets on first
+/// 0.5.1 launch. See `docs/releasing-macos.md`.
 const PRODUCTION_KEYRING_SERVICE: &str = "com.saorsalabs.tictactoe";
 
 /// Service name for the desktop OS keyring. Debug builds default to a distinct

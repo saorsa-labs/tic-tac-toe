@@ -97,7 +97,9 @@ PLIST_BUDDY=/usr/libexec/PlistBuddy
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
-REQUIRED_EXECUTABLES=(buzz-desktop x0xd buzz-acp buzz-agent buzz-x0x-mcp)
+# buzz-desktop is CFBundleExecutable. The rest must match tauri.conf.json
+# bundle.externalBin basenames (enforced by portable-package-contract.test.mjs).
+REQUIRED_EXECUTABLES=(buzz-desktop x0xd buzz-acp buzz-agent buzz-dev-mcp buzz)
 
 if [[ ! -f "$INFO_PLIST" ]]; then
     echo "App bundle is incomplete: Contents/Info.plist is missing" >&2

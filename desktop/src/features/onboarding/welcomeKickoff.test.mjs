@@ -9,6 +9,7 @@ import {
   classifyWelcomeKickoffResolution,
   createWelcomeKickoffCoordinator,
   mergeKickoffEvents,
+  reportWelcomeKickoffFailure,
   resolveWelcomeAgentSet,
   selectWelcomeKickoffIntroTeammates,
   startWelcomeAgentForGroup,
@@ -33,6 +34,15 @@ function agent(name, personaId, pubkey) {
 const fizz = agent("Fizz", "builtin:fizz", "f".repeat(64));
 const honey = agent("Honey", "builtin:honey", "h".repeat(64));
 const bumble = agent("Bumble", "builtin:bumble", "b".repeat(64));
+
+test("kickoff failure is reported instead of swallowed", () => {
+  const seen = [];
+  reportWelcomeKickoffFailure(new Error("lead ACP exited"), (error) => {
+    seen.push(error);
+  });
+  assert.equal(seen.length, 1);
+  assert.match(String(seen[0]), /lead ACP exited/);
+});
 
 test("resolveWelcomeAgentSet orders agents by stable persona identity", () => {
   assert.deepEqual(resolveWelcomeAgentSet([bumble, fizz, honey]), {

@@ -494,11 +494,21 @@ async function sendWelcomeKickoffCloser({
   });
 }
 
+/** Loud, callback-bearing failure so the Welcome stage can stop claiming setup. */
+export function reportWelcomeKickoffFailure(
+  error: unknown,
+  onKickoffFailed?: (error: unknown) => void,
+) {
+  console.error("Failed to start the Welcome team kickoff.", error);
+  onKickoffFailed?.(error);
+}
+
 /** Runs the Welcome choreography only while the Welcome channel is focused. */
 export function useWelcomeKickoff(
   activeChannel: Channel | null,
   channelEvents: readonly RelayEvent[],
   onKickoffOpenerPosted?: (eventId: string) => void,
+  onKickoffFailed?: (error: unknown) => void,
 ) {
   const queryClient = useQueryClient();
   const { activeCommunity } = useCommunities();
@@ -646,7 +656,13 @@ export function useWelcomeKickoff(
         const leadStartIndex = agentsToStart.findIndex(
           (agent) => agent.pubkey === resolvedAgentSet.lead.pubkey,
         );
-        if (startResults[leadStartIndex]?.status === "rejected") return;
+        if (startResults[leadStartIndex]?.status === "rejected") {
+          reportWelcomeKickoffFailure(
+            startResults[leadStartIndex].reason,
+            onKickoffFailed,
+          );
+          return;
+        }
         const teammatesToAwait = resolvedAgentSet.teammates.filter(
           (teammate) =>
             startResults[
@@ -689,7 +705,9 @@ export function useWelcomeKickoff(
         );
         if (!isCancelled()) onKickoffOpenerPosted?.(openerResult.eventId);
       } catch (error) {
-        console.warn("Failed to start the Welcome team kickoff.", error);
+        if (!isCancelled()) {
+          reportWelcomeKickoffFailure(error, onKickoffFailed);
+        }
       } finally {
         kickoffCoordinator.finish(channelId, kickoffController);
       }
@@ -698,6 +716,7 @@ export function useWelcomeKickoff(
     channelId,
     configLoading,
     isActiveWelcome,
+    onKickoffFailed,
     onKickoffOpenerPosted,
     queryClient,
     readiness,

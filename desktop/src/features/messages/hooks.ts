@@ -1,7 +1,6 @@
 import { useEffect, useEffectEvent } from "react";
 import {
   type QueryClient,
-  type QueryKey,
   useMutation,
   useQuery,
   useQueryClient,
@@ -379,34 +378,56 @@ export function useChannelSubscription(channel: Channel | null) {
   }, [channel, channelId, channelType]);
 }
 
-function restoreCachedQuery<T>(
-  queryClient: QueryClient,
-  queryKey: QueryKey,
-  previous: T | undefined,
-) {
-  if (previous === undefined) {
-    queryClient.removeQueries({ queryKey, exact: true });
-    return;
-  }
-  queryClient.setQueryData(queryKey, previous);
+function eventIsOptimistic(event: RelayEvent, optimisticId: string) {
+  return event.id === optimisticId || event.localKey === optimisticId;
 }
 
-/** Restore every cache surface changed by an optimistic send. */
+/** Drop one optimistic send from a live window without reverting concurrent rows. */
+export function removeOptimisticFromWindow(
+  store: ChannelWindowStore,
+  optimisticId: string,
+): ChannelWindowStore {
+  return {
+    ...store,
+    liveOverlay: store.liveOverlay.filter(
+      (event) => !eventIsOptimistic(event, optimisticId),
+    ),
+    liveAux: store.liveAux.filter(
+      (event) => !eventIsOptimistic(event, optimisticId),
+    ),
+    pages: store.pages.map((page) => ({
+      ...page,
+      rows: page.rows.filter(
+        (row) => !eventIsOptimistic(row.event, optimisticId),
+      ),
+      aux: page.aux.filter((event) => !eventIsOptimistic(event, optimisticId)),
+    })),
+  };
+}
+
+/** Remove a failed optimistic send from current cache, keeping later arrivals. */
 export function rollbackOptimisticMessageCache(
   queryClient: QueryClient,
   context: MessageQueryContext,
 ) {
-  queryClient.setQueryData(context.queryKey, context.previousMessages);
-  restoreCachedQuery(
-    queryClient,
-    channelWindowKey(context.channelId),
-    context.previousWindow,
+  queryClient.setQueryData<RelayEvent[]>(context.queryKey, (current = []) =>
+    current.filter((event) => !eventIsOptimistic(event, context.optimisticId)),
   );
+  const windowKey = channelWindowKey(context.channelId);
+  const currentWindow = queryClient.getQueryData<ChannelWindowStore>(windowKey);
+  if (currentWindow) {
+    queryClient.setQueryData(
+      windowKey,
+      removeOptimisticFromWindow(currentWindow, context.optimisticId),
+    );
+  }
   if (context.threadRootId) {
-    restoreCachedQuery(
-      queryClient,
+    queryClient.setQueryData<RelayEvent[]>(
       threadRepliesKey(context.channelId, context.threadRootId),
-      context.previousThreadReplies,
+      (current = []) =>
+        current.filter(
+          (event) => !eventIsOptimistic(event, context.optimisticId),
+        ),
     );
   }
 }

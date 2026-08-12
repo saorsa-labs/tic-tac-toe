@@ -68,10 +68,14 @@ test("failed offline send retry renders exactly one acknowledged row", () => {
 
   rollbackOptimisticMessageCache(queryClient, context(firstOptimistic.id));
 
+  const afterFirstRollback = queryClient.getQueryData(windowKey);
+  assert.ok(afterFirstRollback, "rollback must keep the window store");
   assert.equal(
-    queryClient.getQueryData(windowKey),
-    undefined,
-    "rollback must delete a window that did not exist before the failed send",
+    afterFirstRollback.liveOverlay.some(
+      (event) => event.id === firstOptimistic.id,
+    ),
+    false,
+    "rollback must remove only the failed optimistic row",
   );
   assert.deepEqual(queryClient.getQueryData(messagesKey), []);
 
@@ -114,6 +118,43 @@ test("failed offline send retry renders exactly one acknowledged row", () => {
     rendered.some((event) => event.id === firstOptimistic.id),
     false,
     "the first failed SENDING row must not survive the successful retry",
+  );
+});
+
+test("failed send rollback keeps messages that arrived while the send was in flight", () => {
+  const queryClient = new QueryClient();
+  const messagesKey = channelMessagesKey(CHANNEL_ID);
+  const windowKey = channelWindowKey(CHANNEL_ID);
+  const inbound = message("inbound-during-send");
+  const optimistic = message("optimistic-send", {
+    localKey: "optimistic-send",
+    pending: true,
+  });
+  queryClient.setQueryData(
+    windowKey,
+    mergeLiveChannelWindowEvent(
+      mergeLiveChannelWindowEvent(emptyChannelWindowStore(), inbound),
+      optimistic,
+    ),
+  );
+  queryClient.setQueryData(messagesKey, [inbound, optimistic]);
+
+  rollbackOptimisticMessageCache(queryClient, context(optimistic.id));
+
+  const window = queryClient.getQueryData(windowKey);
+  assert.equal(
+    window.liveOverlay.some((event) => event.id === inbound.id),
+    true,
+    "a concurrent inbound row must survive rollback of the failed send",
+  );
+  assert.equal(
+    window.liveOverlay.some((event) => event.id === optimistic.id),
+    false,
+  );
+  const remaining = queryClient.getQueryData(messagesKey);
+  assert.deepEqual(
+    remaining.map((event) => event.id),
+    [inbound.id],
   );
 });
 
