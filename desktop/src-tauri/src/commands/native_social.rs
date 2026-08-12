@@ -5,6 +5,7 @@
 //! before a request is sent.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -12,15 +13,77 @@ use tauri::State;
 use crate::app_state::AppState;
 
 const AGENT_ID_HEX_LEN: usize = 64;
+const CONNECT_REQUEST_TIMEOUT: Duration = Duration::from_secs(65);
 
 pub(crate) fn validate_agent_id(value: &str) -> Result<String, String> {
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.len() != AGENT_ID_HEX_LEN
-        || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
+    if value.len() != AGENT_ID_HEX_LEN
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err("invalid x0x AgentId (expected 64 hex characters)".to_string());
+        return Err("invalid x0x AgentId (expected 64 lowercase hex characters)".to_string());
     }
-    Ok(normalized)
+    Ok(value.to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConnectResult {
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConnectAgentBody<'a> {
+    agent_id: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectAgentResponse {
+    ok: bool,
+    outcome: String,
+    #[serde(default)]
+    addr: Option<String>,
+}
+
+/// POST /agents/connect — bounded exact-AgentId connection through the
+/// authenticated loopback daemon. The request deadline is 65 seconds: bounded,
+/// but long enough for x0xd's documented 60-second connect outcome. The bearer
+/// token stays entirely inside the request header.
+///
+/// The command does not synthesize contact/trust state. First contact remains
+/// the signed AgentCard import flow; this command connects an exact canonical
+/// AgentId that the daemon already knows how to discover.
+#[tauri::command]
+pub async fn x0x_connect_agent(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<NativeConnectResult, String> {
+    let agent_id = validate_agent_id(&agent_id)?;
+    let response: ConnectAgentResponse = state
+        .x0x_client
+        .post_json_with_timeout(
+            "/agents/connect",
+            &ConnectAgentBody {
+                agent_id: &agent_id,
+            },
+            CONNECT_REQUEST_TIMEOUT,
+        )
+        .await?;
+    if !response.ok {
+        return Err("x0xd rejected the connection request".to_string());
+    }
+    if !matches!(
+        response.outcome.as_str(),
+        "Direct" | "Coordinated" | "AlreadyConnected" | "Unreachable" | "NotFound"
+    ) {
+        return Err("x0xd returned an unknown connection outcome".to_string());
+    }
+    Ok(NativeConnectResult {
+        outcome: response.outcome,
+        address: response.addr,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -190,12 +253,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_id_validation_rejects_npub_and_normalizes_hex() {
+    fn agent_id_validation_requires_canonical_lowercase_hex() {
         assert!(validate_agent_id(&format!("npub1{}", "0".repeat(59))).is_err());
+        assert!(validate_agent_id(&"AB".repeat(32)).is_err());
+        assert!(validate_agent_id(&format!(" {}", "ab".repeat(32))).is_err());
         assert_eq!(
-            validate_agent_id(&"AB".repeat(32)).unwrap(),
+            validate_agent_id(&"ab".repeat(32)).unwrap(),
             "ab".repeat(32)
         );
+    }
+
+    #[test]
+    fn connect_result_serializes_without_daemon_credentials() {
+        let value = serde_json::to_value(NativeConnectResult {
+            outcome: "Direct".to_string(),
+            address: Some("127.0.0.1:5483".to_string()),
+        })
+        .unwrap();
+        assert_eq!(value["outcome"], "Direct");
+        assert_eq!(value["address"], "127.0.0.1:5483");
+        assert!(value.get("token").is_none());
+        assert!(value.get("apiToken").is_none());
     }
 
     #[test]

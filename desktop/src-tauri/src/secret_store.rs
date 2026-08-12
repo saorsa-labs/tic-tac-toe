@@ -7,9 +7,10 @@
 //!
 //! The chosen backend is selected at compile time by the per-target feature in
 //! `Cargo.toml`. On macOS the legacy `keyring` crate (SecKeychain API) is used
-//! for the blob entry so that signed release builds and unsigned dev builds
-//! share the same store. DPK (Data Protection Keychain) is used only by the
-//! one-time migration path that reads old per-key entries written by #1264.
+//! for the blob entry. Signed release and unsigned dev builds deliberately use
+//! distinct service namespaces; DPK (Data Protection Keychain) is used only
+//! by the one-time migration path that reads old per-key entries written by
+//! #1264.
 //! Windows and Linux use the `keyring` crate directly. The `system-keyring`
 //! feature gates the whole store; when it is off, [`SecretStore`] is unusable
 //! and callers fall back to their own `0o600` file storage.
@@ -45,10 +46,8 @@ const BLOB_KEY: &str = "secrets";
 
 // ── Interprocess advisory lock ─────────────────────────────────────────────
 //
-// Two concurrent Buzz processes (e.g. the signed DMG build and an unsigned dev
-// build via `just staging`) share the same OS keychain blob because the
-// service name `"buzz-desktop"` is a constant — it does not key off the bundle
-// identifier. Each process holds its own in-memory cache, so without an
+// Two concurrent desktop processes using the same service namespace share one
+// OS keychain blob. Each process holds its own in-memory cache, so without an
 // interprocess lock a warm-cache write in process A drops keys added by process
 // B between A's last cache-warming read and A's write.
 //
@@ -237,8 +236,9 @@ impl SecretStore {
     /// cache and one mutex — so concurrent blob read-modify-write operations
     /// see each other's writes and the last-writer-wins race is closed.
     ///
-    /// Only one service name (`"buzz-desktop"`) is used in practice. If a
-    /// second service name is ever needed, this can be extended to a registry.
+    /// One service name is selected per process by `app_state::keyring_service`.
+    /// If multiple services are ever needed concurrently, this can be extended
+    /// to a registry.
     pub fn shared(service: &'static str) -> &'static SecretStore {
         use std::sync::OnceLock;
         static INSTANCE: OnceLock<SecretStore> = OnceLock::new();

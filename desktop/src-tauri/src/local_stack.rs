@@ -65,6 +65,8 @@ pub(crate) enum SpawnError {
 pub(crate) enum LocalDaemonError {
     NoDataDir,
     Spawn(SpawnError),
+    Exited { status: String, log_path: PathBuf },
+    Monitor(String),
     Timeout,
 }
 
@@ -81,6 +83,14 @@ impl fmt::Display for LocalDaemonError {
             }
             Self::Spawn(SpawnError::System(name, reason)) => {
                 write!(formatter, "{name} spawn failed: {reason}")
+            }
+            Self::Exited { status, log_path } => write!(
+                formatter,
+                "x0xd exited before becoming healthy ({status}); see {}",
+                log_path.display()
+            ),
+            Self::Monitor(reason) => {
+                write!(formatter, "could not observe x0xd startup status: {reason}")
             }
             Self::Timeout => write!(formatter, "timed out waiting for x0xd health"),
         }
@@ -104,6 +114,9 @@ pub(crate) trait SidecarSpawner: Send {
 
 pub(crate) trait Killable: Send {
     fn label(&self) -> &'static str;
+    fn try_wait(&mut self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     fn kill_and_reap(&mut self);
 }
 
@@ -130,6 +143,14 @@ impl OwnedChild {
 
     pub(crate) fn label(&self) -> &'static str {
         self.inner.label()
+    }
+
+    pub(crate) fn try_wait(&mut self) -> Result<Option<String>, String> {
+        let status = self.inner.try_wait()?;
+        if status.is_some() {
+            self.reaped = true;
+        }
+        Ok(status)
     }
 
     pub(crate) fn shutdown(&mut self) {
@@ -218,8 +239,8 @@ impl<P: DaemonProbe, S: SidecarSpawner, T: TimeSource> LocalStackSupervisor<P, S
         let (daemon, api_base) = match self.try_attach() {
             Some(api_base) => (None, api_base),
             None => {
-                let child = self.spawn_daemon()?;
-                let api_base = self.wait_ready()?;
+                let mut child = self.spawn_daemon()?;
+                let api_base = self.wait_ready(&mut child)?;
                 (Some(child), api_base)
             }
         };
@@ -255,9 +276,15 @@ impl<P: DaemonProbe, S: SidecarSpawner, T: TimeSource> LocalStackSupervisor<P, S
             .map_err(LocalDaemonError::Spawn)
     }
 
-    fn wait_ready(&self) -> Result<String, LocalDaemonError> {
+    fn wait_ready(&self, child: &mut OwnedChild) -> Result<String, LocalDaemonError> {
         let deadline = self.time.now() + self.cfg.daemon_timeout;
         loop {
+            if let Some(status) = child.try_wait().map_err(LocalDaemonError::Monitor)? {
+                return Err(LocalDaemonError::Exited {
+                    status,
+                    log_path: self.cfg.data_dir.join("x0xd.log"),
+                });
+            }
             if let (Some(port), Some(token)) = (
                 read_api_port(&self.cfg.data_dir),
                 read_api_token(&self.cfg.data_dir),
@@ -340,6 +367,13 @@ impl StdChild {
 impl Killable for StdChild {
     fn label(&self) -> &'static str {
         self.label
+    }
+
+    fn try_wait(&mut self) -> Result<Option<String>, String> {
+        self.child
+            .try_wait()
+            .map(|status| status.map(|status| status.to_string()))
+            .map_err(|error| error.to_string())
     }
 
     fn kill_and_reap(&mut self) {

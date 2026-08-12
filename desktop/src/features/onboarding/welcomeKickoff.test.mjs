@@ -9,8 +9,10 @@ import {
   classifyWelcomeKickoffResolution,
   createWelcomeKickoffCoordinator,
   mergeKickoffEvents,
+  reportWelcomeKickoffFailure,
   resolveWelcomeAgentSet,
   selectWelcomeKickoffIntroTeammates,
+  startWelcomeAgentForGroup,
   waitForWelcomeKickoffBeat,
   waitForWelcomeTeammatesOnline,
   welcomeTeammateNeedsRestart,
@@ -32,6 +34,15 @@ function agent(name, personaId, pubkey) {
 const fizz = agent("Fizz", "builtin:fizz", "f".repeat(64));
 const honey = agent("Honey", "builtin:honey", "h".repeat(64));
 const bumble = agent("Bumble", "builtin:bumble", "b".repeat(64));
+
+test("kickoff failure is reported instead of swallowed", () => {
+  const seen = [];
+  reportWelcomeKickoffFailure(new Error("lead ACP exited"), (error) => {
+    seen.push(error);
+  });
+  assert.equal(seen.length, 1);
+  assert.match(String(seen[0]), /lead ACP exited/);
+});
 
 test("resolveWelcomeAgentSet orders agents by stable persona identity", () => {
   assert.deepEqual(resolveWelcomeAgentSet([bumble, fizz, honey]), {
@@ -197,6 +208,23 @@ test("running teammates restart when their allowlist does not include the lead",
     ),
     true,
   );
+});
+
+test("a record running in the previous group still starts a Welcome runtime pair", async () => {
+  const calls = [];
+  await startWelcomeAgentForGroup(
+    { ...fizz, status: "running" },
+    "welcome-group",
+    {
+      restart: false,
+      startAgent: async (pubkey, groupId) => {
+        calls.push({ pubkey, groupId });
+        return { pubkey, groupId };
+      },
+    },
+  );
+
+  assert.deepEqual(calls, [{ pubkey: fizz.pubkey, groupId: "welcome-group" }]);
 });
 
 test("opener keeps partial-readiness warm and mentions only online teammates", () => {

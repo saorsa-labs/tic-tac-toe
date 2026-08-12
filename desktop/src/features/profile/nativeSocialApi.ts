@@ -2,6 +2,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { requireAgentId } from "@/features/communities/nativeCommunityApi";
 import { getActiveNativeGroupId } from "@/features/communities/nativeCommunityApi";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { x0xImportAgentCard } from "@/shared/api/tauriNativeAuxiliary";
 import { x0xGetGroupMembers } from "@/shared/api/tauriNativeX0x";
 import type {
   PresenceLookup,
@@ -23,6 +24,11 @@ export type NativeContact = {
 
 export async function listNativeContacts(): Promise<NativeContact[]> {
   return invokeTauri<NativeContact[]>("x0x_list_contacts");
+}
+
+/** Only explicit contact trust satisfies the human first-contact gate. */
+export function isEstablishedNativeContact(contact: NativeContact): boolean {
+  return contact.trustLevel === "known" || contact.trustLevel === "trusted";
 }
 
 /** Project the active x0x group's roster into the shared agent directory. */
@@ -63,6 +69,115 @@ export async function addNativeContact(
   });
 }
 
+export type NativeContactInput =
+  | { kind: "agentCard"; card: string }
+  | { kind: "agentId"; agentId: string }
+  | { kind: "fourWords"; words: [string, string, string, string] }
+  | { kind: "invalid" };
+
+export type NativeContactConnectionOutcome =
+  | "Direct"
+  | "Coordinated"
+  | "AlreadyConnected"
+  | "Unreachable"
+  | "NotFound";
+
+export type AddedNativeContact = {
+  agentId: string;
+  displayName: string | null;
+  connectionOutcome: NativeContactConnectionOutcome | null;
+  connectionError: string | null;
+};
+
+const AGENT_ID_PATTERN = /^[0-9a-fA-F]{64}$/;
+const RAW_AGENT_CARD_PATTERN = /^[A-Za-z0-9_-]{80,}$/;
+
+/** Classify the paste without decoding identity words in the webview. */
+export function classifyNativeContactInput(input: string): NativeContactInput {
+  const value = input.trim();
+  if (AGENT_ID_PATTERN.test(value)) {
+    return { kind: "agentId", agentId: value.toLowerCase() };
+  }
+  if (
+    value.toLowerCase().startsWith("x0x://agent/") ||
+    RAW_AGENT_CARD_PATTERN.test(value)
+  ) {
+    return { kind: "agentCard", card: value };
+  }
+
+  const words = value
+    .toLowerCase()
+    .split(/[\s-]+/)
+    .filter(Boolean);
+  if (words.length === 4 && words.every((word) => /^[a-z]+$/.test(word))) {
+    return {
+      kind: "fourWords",
+      words: words as [string, string, string, string],
+    };
+  }
+  return { kind: "invalid" };
+}
+
+async function connectNativeContact(agentId: string): Promise<{
+  outcome: NativeContactConnectionOutcome;
+  address?: string;
+}> {
+  return invokeTauri("x0x_connect_agent", { agentId });
+}
+
+/**
+ * Persist a daemon-owned contact from a signed card or exact AgentId, then ask
+ * x0xd to establish a live connection. A failed/unreachable connection never
+ * rolls back the valid contact import: presence polling can turn green later.
+ */
+export async function addNativeContactFromInput(
+  input: string,
+): Promise<AddedNativeContact> {
+  const parsed = classifyNativeContactInput(input);
+  if (parsed.kind === "fourWords") {
+    throw new Error(
+      "Four-word identities are display prefixes, not unique addresses. Ask for a signed agent card or the full 64-character Agent ID.",
+    );
+  }
+  if (parsed.kind === "invalid") {
+    throw new Error(
+      "Paste a signed x0x agent card or an exact 64-character Agent ID.",
+    );
+  }
+
+  let agentId: string;
+  let displayName: string | null;
+  if (parsed.kind === "agentCard") {
+    const receipt = await x0xImportAgentCard({
+      card: parsed.card,
+      trustLevel: "known",
+    });
+    agentId = requireAgentId(receipt.agentId);
+    displayName = receipt.displayName.trim() || null;
+  } else {
+    agentId = requireAgentId(parsed.agentId);
+    displayName = null;
+    await addNativeContact(agentId);
+  }
+
+  try {
+    const connection = await connectNativeContact(agentId);
+    return {
+      agentId,
+      displayName,
+      connectionOutcome: connection.outcome,
+      connectionError: null,
+    };
+  } catch (error) {
+    return {
+      agentId,
+      displayName,
+      connectionOutcome: null,
+      connectionError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export async function removeNativeContact(agentIdInput: string): Promise<void> {
   await invokeTauri("x0x_remove_contact", {
     agentId: requireAgentId(agentIdInput),
@@ -93,6 +208,28 @@ async function nativeDisplayNames(): Promise<Map<string, string | null>> {
   for (const member of members) {
     if (member.displayName?.trim())
       names.set(member.agentId, member.displayName);
+  }
+  return names;
+}
+
+/** Directory names are restricted to contacts the human has accepted. */
+async function establishedNativeDisplayNames(): Promise<
+  Map<string, string | null>
+> {
+  const [groupId, contacts] = await Promise.all([
+    getActiveNativeGroupId(),
+    listNativeContacts(),
+  ]);
+  const names = new Map(
+    contacts
+      .filter(isEstablishedNativeContact)
+      .map((contact) => [contact.agentId, contact.label] as const),
+  );
+  const members = await x0xGetGroupMembers(groupId);
+  for (const member of members) {
+    if (names.has(member.agentId) && member.displayName?.trim()) {
+      names.set(member.agentId, member.displayName);
+    }
   }
   return names;
 }
@@ -174,7 +311,7 @@ export async function searchNativeProfiles(
   limit: number,
 ): Promise<UserSearchResult[]> {
   const needle = query.trim().toLowerCase();
-  return [...(await nativeDisplayNames()).entries()]
+  return [...(await establishedNativeDisplayNames()).entries()]
     .filter(
       ([agentId, label]) =>
         !needle ||

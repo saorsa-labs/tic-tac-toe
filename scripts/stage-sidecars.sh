@@ -4,9 +4,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${STAGE_SIDECARS_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 X0X_DIR="${X0X_DIR:-$(cd "$REPO_ROOT/../x0x" 2>/dev/null && pwd || true)}"
 PROFILE="${PROFILE:-release}"
+
+# shellcheck source=sidecar-validation.sh
+source "$SCRIPT_DIR/sidecar-validation.sh"
 
 if [[ -z "${X0X_DIR:-}" || ! -d "$X0X_DIR" ]]; then
   echo "FATAL: x0x repo not found (set X0X_DIR)" >&2
@@ -29,11 +32,14 @@ case "$TRIPLE" in
   *) EXT="" ;;
 esac
 
+BINARY_DIR="$REPO_ROOT/desktop/src-tauri/binaries"
+validate_managed_agent_sidecars "$BINARY_DIR" "$TRIPLE"
+
 printf '[stage-sidecars] building x0xd (%s) from %s\n' "$PROFILE" "$X0X_DIR" >&2
 (cd "$X0X_DIR" && cargo build --profile "$PROFILE" --bin x0xd)
 
 SOURCE="$X0X_DIR/target/$SUB/x0xd$EXT"
-DEST="$REPO_ROOT/desktop/src-tauri/binaries/x0xd-$TRIPLE$EXT"
+DEST="$BINARY_DIR/x0xd-$TRIPLE$EXT"
 if [[ ! -x "$SOURCE" ]]; then
   echo "FATAL: built x0xd not found at $SOURCE" >&2
   exit 3

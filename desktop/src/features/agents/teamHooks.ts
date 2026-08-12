@@ -6,6 +6,7 @@ import {
   listTeams,
   updateTeam,
 } from "@/shared/api/tauriTeams";
+import { migrateLegacyWelcomeTeams } from "@/features/agents/lib/welcomeTeamProfileMigration";
 import type {
   AgentTeam,
   CreateTeamInput,
@@ -17,7 +18,8 @@ export const teamsQueryKey = ["teams"] as const;
 export function useTeamsQuery() {
   return useQuery({
     queryKey: teamsQueryKey,
-    queryFn: listTeams,
+    queryFn: async () =>
+      migrateLegacyWelcomeTeams(await listTeams(), updateTeam),
     staleTime: 30_000,
     // No refetchInterval: inbound relay team changes emit `agents-data-changed`
     // (handled by useAgentsDataRefresh). Same redundant-poll removal as

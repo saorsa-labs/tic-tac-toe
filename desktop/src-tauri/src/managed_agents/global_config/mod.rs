@@ -146,17 +146,42 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
         .map(str::trim)
         .filter(|runtime| !runtime.is_empty())
     {
-        let catalog_runtime = known_acp_runtime_exact(runtime).ok_or_else(|| {
-            format!("global config `preferred_runtime` is not a supported ACP runtime: {runtime}")
-        })?;
-        if catalog_runtime.commands.is_empty() {
-            return Err(format!(
-                "global config `preferred_runtime` has no available command: {runtime}"
-            ));
-        }
+        preferred_runtime_catalog_error(runtime)?;
     }
 
     Ok(())
+}
+
+fn preferred_runtime_catalog_error(runtime: &str) -> Result<(), String> {
+    let catalog_runtime = known_acp_runtime_exact(runtime).ok_or_else(|| {
+        format!("global config `preferred_runtime` is not a supported ACP runtime: {runtime}")
+    })?;
+    if catalog_runtime.commands.is_empty() {
+        return Err(format!(
+            "global config `preferred_runtime` has no available command: {runtime}"
+        ));
+    }
+    Ok(())
+}
+
+/// Drop a stale create-time runtime preference so the rest of the config can load.
+///
+/// Save-time validation stays fail-closed: the settings UI cannot persist an
+/// unknown runtime. Load must not brick `create_managed_agent` when a catalog
+/// entry later disappears; the other fields (model/provider/env) are still
+/// usable.
+pub(crate) fn soften_preferred_runtime_for_load(config: &mut GlobalAgentConfig) -> Option<String> {
+    let runtime = config
+        .preferred_runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    if preferred_runtime_catalog_error(&runtime).is_ok() {
+        return None;
+    }
+    config.preferred_runtime = None;
+    Some(runtime)
 }
 
 /// Strip empty values from `env_vars`.
@@ -210,8 +235,14 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read global agent config: {e}"))?;
-    let config: GlobalAgentConfig = serde_json::from_str(&content)
+    let mut config: GlobalAgentConfig = serde_json::from_str(&content)
         .map_err(|e| format!("failed to parse global agent config: {e}"))?;
+    if let Some(runtime) = soften_preferred_runtime_for_load(&mut config) {
+        eprintln!(
+            "buzz-desktop: ignoring stale global preferred_runtime {runtime:?}; \
+             creating agents without that default"
+        );
+    }
     validate_global_config(&config)?;
     Ok(config)
 }

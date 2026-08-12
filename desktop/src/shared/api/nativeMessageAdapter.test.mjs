@@ -170,6 +170,36 @@ test("non-text history content type and undecodable payload map to null", () => 
   );
 });
 
+test("literal x0xd text/plain history remains renderable after restart", () => {
+  const marker = "cutest-769f-dm-b2a-20260811T2227BST";
+  const msgId = "7".repeat(64);
+  const event = historyRowToRelayEvent(
+    historyRow({
+      msgId,
+      contentType: "text/plain",
+      payload: btoa(marker),
+    }),
+    CHANNEL_ID,
+  );
+
+  assert.ok(event);
+  assert.equal(event.id, msgId);
+  assert.equal(event.localKey, msgId);
+  assert.equal(event.content, marker);
+});
+
+test("non-envelope JSON control rows stay out of chat history", () => {
+  const event = historyRowToRelayEvent(
+    historyRow({
+      contentType: "text/plain",
+      payload: btoa(JSON.stringify({ type: "result", event: "member_added" })),
+    }),
+    CHANNEL_ID,
+  );
+
+  assert.equal(event, null);
+});
+
 test("typed JSON DM history is a renderable channel envelope", () => {
   const event = historyRowToRelayEvent(
     historyRow({ contentType: "application/json" }),

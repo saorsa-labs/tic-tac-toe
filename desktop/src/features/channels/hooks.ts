@@ -147,6 +147,81 @@ export function reconcileRefreshedCachedChannel(
   return upsertCachedChannel(refreshed, refreshedChannel ?? channel);
 }
 
+/**
+ * Reconciles the group-only native channel directory with deterministic DMs
+ * already known to this client. Native x0xd has no DM directory/open route,
+ * so a successful group refresh cannot be treated as evidence that cached DMs
+ * disappeared. Missing non-DM channels are intentionally not retained.
+ */
+export function reconcileNativeChannelRefresh(
+  cached: Channel[] | undefined,
+  refreshed: Channel[],
+): Channel[] {
+  const refreshedIds = new Set(refreshed.map((channel) => channel.id));
+  const retainedDms = (cached ?? []).filter(
+    (channel) => channel.channelType === "dm" && !refreshedIds.has(channel.id),
+  );
+  return sortChannels([...refreshed, ...retainedDms]);
+}
+
+type ChannelCacheReader = {
+  getQueryData: <T>(queryKey: readonly unknown[]) => T | undefined;
+};
+
+export function createChannelsQueryFn(
+  queryClient: ChannelCacheReader,
+  groupId: string | null,
+  loadChannels: () => Promise<Channel[]> = listNativeChannels,
+  saveSnapshot: (
+    groupId: string,
+    channels: Channel[],
+  ) => void = writeChannelSnapshot,
+) {
+  return async () => {
+    const refreshed = sortChannels(await loadChannels());
+    const channels = reconcileNativeChannelRefresh(
+      queryClient.getQueryData<Channel[]>(channelsQueryKey),
+      refreshed,
+    );
+    if (groupId) {
+      saveSnapshot(groupId, channels);
+    }
+    return channels;
+  };
+}
+
+/**
+ * Keeps a deterministic native DM projection in the shared channel cache after
+ * the active channel-list refresh settles. An empty native DM has no history
+ * yet, so that refresh cannot discover it and would otherwise erase the route
+ * target before the profile Message action finishes navigating.
+ */
+export function createOpenDmCacheLifecycle(
+  queryClient: ReturnType<typeof useQueryClient>,
+) {
+  return {
+    onSuccess: (openedChannel: Channel) => {
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        upsertCachedChannel(current, openedChannel),
+      );
+    },
+    onSettled: async (openedChannel: Channel | undefined) => {
+      if (!openedChannel) {
+        await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        return;
+      }
+
+      await queryClient.refetchQueries({
+        queryKey: channelsQueryKey,
+        type: "active",
+      });
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        reconcileRefreshedCachedChannel(current, openedChannel),
+      );
+    },
+  };
+}
+
 export async function invalidateChannelState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null | undefined,
@@ -187,19 +262,14 @@ function setChannelArchivedState(
 }
 
 export function useChannelsQuery(options?: { enabled?: boolean }) {
+  const queryClient = useQueryClient();
   const { activeCommunity } = useCommunities();
   const groupId = activeCommunity?.groupId ?? null;
 
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: channelsQueryKey,
-    queryFn: async () => {
-      const channels = sortChannels(await listNativeChannels());
-      if (groupId) {
-        writeChannelSnapshot(groupId, channels);
-      }
-      return channels;
-    },
+    queryFn: createChannelsQueryFn(queryClient, groupId),
     // Paint the sidebar instantly from the last-known list for this group, then
     // revalidate. initialDataUpdatedAt:0 marks the seed as already-stale so the
     // background refetch still fires immediately.
@@ -243,14 +313,7 @@ export function useOpenDmMutation() {
 
   return useMutation({
     mutationFn: (input: OpenDmInput) => openDm(input),
-    onSuccess: (openedChannel) => {
-      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
-        upsertCachedChannel(current, openedChannel),
-      );
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
-    },
+    ...createOpenDmCacheLifecycle(queryClient),
   });
 }
 

@@ -1,9 +1,11 @@
 import { Bot } from "lucide-react";
 
+import { getPresenceLabel } from "@/features/presence/lib/presence";
+import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import type { UserSearchResult } from "@/shared/api/types";
+import type { PresenceStatus, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
@@ -71,6 +73,7 @@ export function NewMessageResultRow({
   isKeyboardHighlighted = false,
   onSelect,
   ownerProfiles,
+  presenceStatus,
   user,
 }: {
   currentAgentId?: string;
@@ -79,6 +82,7 @@ export function NewMessageResultRow({
   isKeyboardHighlighted?: boolean;
   onSelect: (user: UserSearchResult) => void;
   ownerProfiles?: UserProfileLookup;
+  presenceStatus?: PresenceStatus;
   user: UserSearchResult;
 }) {
   const name = formatRecipientName(user);
@@ -142,6 +146,15 @@ export function NewMessageResultRow({
           ) : (
             <HoverRecipientIdentity displayName={name} pubkey={user.pubkey} />
           )}
+          {presenceStatus ? (
+            <span
+              className="mt-0.5 inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+              data-testid={`new-dm-presence-${user.pubkey}`}
+            >
+              <PresenceDot className="h-2 w-2" status={presenceStatus} />
+              {getPresenceLabel(presenceStatus)}
+            </span>
+          ) : null}
         </div>
       </button>
     </div>

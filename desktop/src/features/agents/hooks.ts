@@ -12,6 +12,7 @@ import {
   provisionChannelManagedAgent,
 } from "@/features/agents/channelAgents";
 import { resolveSnapshotAvatarPng } from "@/features/agents/ui/snapshotAvatarPng";
+import { migrateLegacyWelcomePersonas } from "@/features/agents/lib/welcomeTeamProfileMigration";
 import {
   channelsQueryKey,
   upsertCachedChannelMember,
@@ -257,7 +258,8 @@ export function useBackendProvidersQuery(options?: { enabled?: boolean }) {
 export function usePersonasQuery() {
   return useQuery({
     queryKey: personasQueryKey,
-    queryFn: listPersonas,
+    queryFn: async () =>
+      migrateLegacyWelcomePersonas(await listPersonas(), updatePersona),
     staleTime: 30_000,
     // No refetchInterval: inbound relay changes to personas emit
     // `agents-data-changed`, which `useAgentsDataRefresh` coalesces into an

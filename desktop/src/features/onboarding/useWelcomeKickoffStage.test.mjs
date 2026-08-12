@@ -12,6 +12,7 @@ const base = {
   timelineSettled: true,
   hasMessages: false,
   timedOut: false,
+  failed: false,
 };
 
 test("stage stays hidden outside the Welcome channel", () => {
@@ -67,6 +68,17 @@ test("timeout only downgrades an active stage", () => {
   );
   assert.equal(
     resolveWelcomeKickoffStagePhase("exiting", { ...base, timedOut: true }),
+    "exiting",
+  );
+});
+
+test("a reported kickoff failure dismisses the stage immediately", () => {
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("active", { ...base, failed: true }),
+    "timed-out",
+  );
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("exiting", { ...base, failed: true }),
     "exiting",
   );
 });

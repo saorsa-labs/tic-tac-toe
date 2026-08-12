@@ -14,7 +14,7 @@ import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
-import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
+import { TicTacToeMark } from "@/shared/ui/TicTacToeMark";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
@@ -331,8 +331,8 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
           <code className="rounded bg-white/10 px-0.5 font-mono text-xs text-white">
             codex-acp
           </code>{" "}
-          adapter. Older Buzz releases using the legacy adapter contract may
-          lose community access until{" "}
+          adapter. Older app releases using the legacy adapter contract may lose
+          community access until{" "}
           <code className="rounded bg-white/10 px-0.5 font-mono text-xs text-white">
             @zed-industries/codex-acp@0.16.0
           </code>{" "}
@@ -538,7 +538,7 @@ function RuntimeProvidersLoadingState() {
       role="status"
     >
       <div className="flex flex-col items-center text-foreground opacity-35">
-        <FlappingBee className="h-auto w-16" />
+        <TicTacToeMark className="h-auto w-16 animate-pulse" />
         <p className="mt-5 text-2xl font-normal leading-8">
           Finding your providers...
         </p>
@@ -596,8 +596,8 @@ function RuntimeProvidersSection({
           Set up your agent harnesses
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz detected the harnesses available on this machine. Install or sign
-          in to at least one to continue.
+          tic-tac-toe detected the harnesses available on this machine. Install
+          or sign in to at least one to continue.
         </p>
       </div>
 

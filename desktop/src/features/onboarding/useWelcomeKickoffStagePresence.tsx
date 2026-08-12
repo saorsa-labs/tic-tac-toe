@@ -27,6 +27,7 @@ export function useWelcomeKickoffStagePresence(
   activeChannel: Channel | null,
   timelineMessages: readonly TimelineMessage[],
   isTimelineLoading: boolean,
+  kickoffFailed = false,
 ) {
   const hasVisibleTimelineMessages = React.useMemo(
     () =>
@@ -37,6 +38,7 @@ export function useWelcomeKickoffStagePresence(
     activeChannel,
     hasVisibleTimelineMessages,
     isTimelineLoading,
+    kickoffFailed,
   );
   // Announce the Welcome surface's first settled render (per channel) so the
   // onboarding "entering" curtain knows it can fade. Harmless outside

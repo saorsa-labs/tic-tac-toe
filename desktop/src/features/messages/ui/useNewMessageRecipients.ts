@@ -11,12 +11,15 @@ import {
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import {
+  useNativeContactsQuery,
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { isEstablishedNativeContact } from "@/features/profile/nativeSocialApi";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent, UserSearchResult } from "@/shared/api/types";
@@ -93,6 +96,7 @@ export function useNewMessageRecipients({
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: active });
   const relayAgentsQuery = useRelayAgentsQuery({ enabled: active });
   const channelsQuery = useChannelsQuery({ enabled: active });
+  const nativeContactsQuery = useNativeContactsQuery({ enabled: active });
   const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: true,
     enabled:
@@ -113,6 +117,11 @@ export function useNewMessageRecipients({
     const currentAgentIdNormalized = currentAgentId
       ? normalizePubkey(currentAgentId)
       : null;
+    const establishedContactPubkeys = new Set(
+      (nativeContactsQuery.data ?? [])
+        .filter(isEstablishedNativeContact)
+        .map((contact) => normalizePubkey(contact.agentId)),
+    );
     const eligibleAgentPubkeys = getMentionableAgentPubkeys({
       currentAgentId,
       managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
@@ -124,7 +133,10 @@ export function useNewMessageRecipients({
 
     const addCandidate = (
       candidate: NewMessageRecipientCandidate,
-      options: { includeSelected?: boolean } = {},
+      options: {
+        includeSelected?: boolean;
+        isNativeDirectoryEntry?: boolean;
+      } = {},
     ) => {
       const pubkey = normalizePubkey(candidate.pubkey);
 
@@ -132,7 +144,9 @@ export function useNewMessageRecipients({
         pubkey === currentAgentIdNormalized ||
         (!options.includeSelected && selectedPubkeys.has(pubkey)) ||
         isArchivedDiscovery(pubkey) ||
-        (candidate.isAgent && !eligibleAgentPubkeys.has(pubkey))
+        (candidate.isAgent &&
+          !options.isNativeDirectoryEntry &&
+          !eligibleAgentPubkeys.has(pubkey))
       ) {
         return;
       }
@@ -165,13 +179,24 @@ export function useNewMessageRecipients({
     };
 
     for (const user of userSearchResults) {
+      if (!establishedContactPubkeys.has(normalizePubkey(user.pubkey))) {
+        continue;
+      }
       addCandidate(candidateWithAgentMetadata(user, managedAgentsByPubkey), {
         includeSelected: deferredSearchQuery.length > 0,
+        // Native profile search is backed exclusively by x0xd contacts and the
+        // active community roster. Contacts must remain messageable even when
+        // they do not yet share a community — that is the first-DM flow.
+        isNativeDirectoryEntry: true,
       });
     }
 
     for (const agent of relayAgentsQuery.data ?? []) {
-      if (!eligibleAgentPubkeys.has(normalizePubkey(agent.pubkey))) {
+      const pubkey = normalizePubkey(agent.pubkey);
+      if (
+        !establishedContactPubkeys.has(pubkey) ||
+        !eligibleAgentPubkeys.has(pubkey)
+      ) {
         continue;
       }
 
@@ -225,6 +250,7 @@ export function useNewMessageRecipients({
     deferredSearchQuery,
     isArchivedDiscovery,
     managedAgentsQuery.data,
+    nativeContactsQuery.data,
     relayAgentsQuery.data,
     selectedPubkeys,
     userSearchResults,
@@ -233,6 +259,7 @@ export function useNewMessageRecipients({
   const isDirectoryLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
+    nativeContactsQuery.isLoading ||
     relayAgentsQuery.isLoading ||
     channelsQuery.isLoading;
   React.useEffect(() => {
@@ -268,6 +295,10 @@ export function useNewMessageRecipients({
   const ownerProfilesQuery = useUsersBatchQuery(searchOwnerPubkeys, {
     enabled: active && searchOwnerPubkeys.length > 0,
   });
+  const presenceQuery = usePresenceQuery(
+    searchResults.map((candidate) => candidate.pubkey),
+    { enabled: active && searchResults.length > 0 },
+  );
 
   // Clearing the query on each new chip mirrors the modal's behavior: the
   // search box empties so the next recipient can be typed immediately.
@@ -319,7 +350,9 @@ export function useNewMessageRecipients({
     handleDirectoryScroll,
     hasReachedRecipientLimit,
     isDirectoryLoading: isDirectorySettling,
+    nativeContacts: nativeContactsQuery.data ?? [],
     ownerProfiles: ownerProfilesQuery.data?.profiles,
+    presence: presenceQuery.data,
     removeUser,
     reset,
     searchError:

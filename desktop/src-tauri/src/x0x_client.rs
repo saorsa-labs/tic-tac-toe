@@ -33,6 +33,8 @@ use tokio_tungstenite::tungstenite::{
 
 use crate::local_stack::{loopback_api_base, named_data_dir, read_api_port, read_api_token};
 
+mod post;
+
 /// Per-request deadline for REST calls. The daemon's history store runs on a
 /// blocking SQLite thread; 15s is generous even for a full-group backfill.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -518,18 +520,8 @@ impl X0xClient {
         path: &str,
         body: &B,
     ) -> Result<T, X0xClientError> {
-        let r = self.resolve()?;
-        let url = format!("{}{}", r.api_base, path);
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&r.token)
-            .timeout(REQUEST_TIMEOUT)
-            .json(body)
-            .send()
+        self.post_json_with_timeout(path, body, REQUEST_TIMEOUT)
             .await
-            .map_err(|e| X0xClientError::Transport(format!("POST {path}: {e}")))?;
-        Self::decode_json::<T>(resp, path).await
     }
 
     /// Authenticated `PUT` with a JSON body, deserializing the response into

@@ -393,7 +393,7 @@ test("no eligible channels yields an honest empty feed with total 0 and since 0"
   assert.equal(result.meta.since, 0);
 });
 
-test("undecodable rows are dropped, leaving empty buckets without throwing", async () => {
+test("undecodable rows are dropped while literal x0xd text remains activity", async () => {
   setResponse(() => ({
     rows: [
       rawRow({
@@ -412,8 +412,9 @@ test("undecodable rows are dropped, leaving empty buckets without throwing", asy
   });
 
   assert.equal(result.feed.mentions.length, 0);
-  assert.equal(result.feed.activity.length, 0);
-  assert.equal(result.meta.total, 0);
+  assert.equal(result.feed.activity.length, 1);
+  assert.equal(result.feed.activity[0].content, "not json");
+  assert.equal(result.meta.total, 1);
 });
 
 test("mention bucket is capped at 30, newest-first", async () => {

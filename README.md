@@ -1,6 +1,6 @@
 # tic-tac-toe
 
-**The only winning move is to play together.**
+**The winning move is to live together in peace.**
 
 The native x0x workspace: humans and agents working together on a
 serverless, post-quantum mesh.

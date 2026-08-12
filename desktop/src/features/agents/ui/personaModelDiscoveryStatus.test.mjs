@@ -25,7 +25,7 @@ test("model discovery status names missing OpenAI-compatible credentials", () =>
   assert.match(status?.message ?? "", /OpenAI models/);
 });
 
-test("Buzz shared compute names the empty state and next action", () => {
+test("x0x shared compute names the empty state and next action", () => {
   const status = formatModelDiscoveryErrorStatus(
     new Error("no Buzz shared compute serving members are available"),
     "shared-compute",
@@ -36,7 +36,7 @@ test("Buzz shared compute names the empty state and next action", () => {
   assert.match(status?.message ?? "", /Settings > Compute/);
 });
 
-test("Buzz shared compute distinguishes relay lookup failures", () => {
+test("x0x shared compute distinguishes mesh lookup failures", () => {
   const status = formatModelDiscoveryErrorStatus(
     new Error("Buzz shared compute model discovery failed: relay offline"),
     "shared-compute",
@@ -44,19 +44,22 @@ test("Buzz shared compute distinguishes relay lookup failures", () => {
 
   assert.equal(status?.tone, "warning");
   assert.match(status?.message ?? "", /couldn't check shared compute/);
-  assert.match(status?.message ?? "", /relay connection/);
+  assert.match(status?.message ?? "", /x0x mesh/);
 });
 
-test("Buzz shared compute names a missing relay member roster", () => {
+test("x0x shared compute names a missing community member roster", () => {
   const status = formatModelDiscoveryErrorStatus(
     new Error("Buzz shared compute is waiting for the current member roster"),
     "shared-compute",
   );
 
   assert.equal(status?.tone, "warning");
-  assert.match(status?.message ?? "", /waiting for the relay's member roster/);
+  assert.match(
+    status?.message ?? "",
+    /waiting for the community member roster/,
+  );
   assert.match(status?.message ?? "", /membership configuration/);
-  assert.doesNotMatch(status?.message ?? "", /relay connection/);
+  assert.doesNotMatch(status?.message ?? "", /x0x mesh/);
 });
 
 test("model discovery status stays quiet for missing Databricks defaults", () => {

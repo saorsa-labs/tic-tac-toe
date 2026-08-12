@@ -23,12 +23,17 @@ export function useWelcomeKickoffEntrance(
   const [entranceMessageId, setEntranceMessageId] = React.useState<
     string | null
   >(null);
+  const [kickoffFailed, setKickoffFailed] = React.useState(false);
   React.useEffect(() => {
     void activeChannel?.id;
     setEntranceMessageId(null);
+    setKickoffFailed(false);
   }, [activeChannel?.id]);
   const handleKickoffOpenerPosted = React.useCallback((eventId: string) => {
     setEntranceMessageId(eventId);
+  }, []);
+  const handleKickoffFailed = React.useCallback(() => {
+    setKickoffFailed(true);
   }, []);
   const handleEntranceComplete = React.useCallback((eventId: string) => {
     setEntranceMessageId((current) => (current === eventId ? null : current));
@@ -37,7 +42,8 @@ export function useWelcomeKickoffEntrance(
     activeChannel,
     welcomeKickoffEvents,
     handleKickoffOpenerPosted,
+    handleKickoffFailed,
   );
 
-  return { entranceMessageId, handleEntranceComplete };
+  return { entranceMessageId, handleEntranceComplete, kickoffFailed };
 }

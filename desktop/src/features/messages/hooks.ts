@@ -1,5 +1,10 @@
 import { useEffect, useEffectEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -373,6 +378,75 @@ export function useChannelSubscription(channel: Channel | null) {
   }, [channel, channelId, channelType]);
 }
 
+function eventIsOptimistic(event: RelayEvent, optimisticId: string) {
+  return event.id === optimisticId || event.localKey === optimisticId;
+}
+
+/** Drop one optimistic send from a live window without reverting concurrent rows. */
+export function removeOptimisticFromWindow(
+  store: ChannelWindowStore,
+  optimisticId: string,
+): ChannelWindowStore {
+  return {
+    ...store,
+    liveOverlay: store.liveOverlay.filter(
+      (event) => !eventIsOptimistic(event, optimisticId),
+    ),
+    liveAux: store.liveAux.filter(
+      (event) => !eventIsOptimistic(event, optimisticId),
+    ),
+    pages: store.pages.map((page) => ({
+      ...page,
+      rows: page.rows.filter(
+        (row) => !eventIsOptimistic(row.event, optimisticId),
+      ),
+      aux: page.aux.filter((event) => !eventIsOptimistic(event, optimisticId)),
+    })),
+  };
+}
+
+/** Remove a failed optimistic send from current cache, keeping later arrivals. */
+export function rollbackOptimisticMessageCache(
+  queryClient: QueryClient,
+  context: MessageQueryContext,
+) {
+  queryClient.setQueryData<RelayEvent[]>(context.queryKey, (current = []) =>
+    current.filter((event) => !eventIsOptimistic(event, context.optimisticId)),
+  );
+  const windowKey = channelWindowKey(context.channelId);
+  const currentWindow = queryClient.getQueryData<ChannelWindowStore>(windowKey);
+  if (currentWindow) {
+    queryClient.setQueryData(
+      windowKey,
+      removeOptimisticFromWindow(currentWindow, context.optimisticId),
+    );
+  }
+  if (context.threadRootId) {
+    queryClient.setQueryData<RelayEvent[]>(
+      threadRepliesKey(context.channelId, context.threadRootId),
+      (current = []) =>
+        current.filter(
+          (event) => !eventIsOptimistic(event, context.optimisticId),
+        ),
+    );
+  }
+}
+
+/** Replace an optimistic row while retaining the native durable correlation key. */
+export function acknowledgeOptimisticChannelWindowMessage(
+  current: ChannelWindowStore,
+  message: RelayEvent,
+  optimisticId: string,
+) {
+  const withoutPending: ChannelWindowStore = {
+    ...current,
+    liveOverlay: current.liveOverlay.filter(
+      (event) => event.id !== optimisticId,
+    ),
+  };
+  return mergeLiveChannelWindowEvent(withoutPending, message);
+}
+
 export function useSendMessageMutation(
   channel: Channel | null,
   identity: Identity | undefined,
@@ -540,17 +614,7 @@ export function useSendMessageMutation(
         return;
       }
 
-      queryClient.setQueryData(context.queryKey, context.previousMessages);
-      queryClient.setQueryData(
-        channelWindowKey(context.channelId),
-        context.previousWindow,
-      );
-      if (context.threadRootId) {
-        queryClient.setQueryData(
-          threadRepliesKey(context.channelId, context.threadRootId),
-          context.previousThreadReplies,
-        );
-      }
+      rollbackOptimisticMessageCache(queryClient, context);
     },
     onSuccess: (message, _variables, context) => {
       // An accepted send proves the write-block is lifted; clear any recorded
@@ -564,16 +628,11 @@ export function useSendMessageMutation(
       const current =
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
         emptyChannelWindowStore();
-      const withoutPending: ChannelWindowStore = {
-        ...current,
-        liveOverlay: current.liveOverlay.filter(
-          (event) => event.id !== context.optimisticId,
-        ),
-      };
-      const next = mergeLiveChannelWindowEvent(withoutPending, {
-        ...message,
-        localKey: context.optimisticId,
-      });
+      const next = acknowledgeOptimisticChannelWindowMessage(
+        current,
+        message,
+        context.optimisticId,
+      );
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, context.channelId);
       if (context.threadRootId) {
@@ -582,7 +641,7 @@ export function useSendMessageMutation(
           (current = []) =>
             mergeMessages(
               current.filter((event) => event.id !== context.optimisticId),
-              { ...message, localKey: context.optimisticId },
+              message,
             ),
         );
       }

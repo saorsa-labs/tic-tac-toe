@@ -114,6 +114,45 @@ export function decodeChannelMessageEnvelope(
   };
 }
 
+/**
+ * Decode a durable chat row across both desktop-authored envelopes and the
+ * native x0xd `text/plain` interoperability form.
+ *
+ * The desktop writes a JSON {@link ChannelMessageEnvelope}, but x0xd's public
+ * DM/group APIs also accept literal UTF-8 text. Those rows are deliberately
+ * FTS-indexed by the daemon and must remain visible after restart and in global
+ * search. JSON that is not our typed envelope stays excluded: daemon control
+ * artifacts can share the historical `text/plain` content type and must not
+ * leak into the chat timeline.
+ */
+function decodeHistoryMessageEnvelope(
+  row: X0xHistoryRow,
+): ChannelMessageEnvelope | null {
+  const envelope = decodeChannelMessageEnvelope(row.payload);
+  if (envelope) return envelope;
+  if (row.contentType !== "text/plain") return null;
+
+  let text: string;
+  try {
+    text = decodeBase64Utf8(row.payload);
+  } catch {
+    return null;
+  }
+
+  try {
+    JSON.parse(text);
+    return null;
+  } catch {
+    // Literal text is the native x0xd interoperability form.
+  }
+
+  return {
+    text,
+    createdAt: row.sentAtMs,
+    clientId: row.msgId,
+  };
+}
+
 // ─── Tag reconstruction (rendering-layer adapter) ───────────────────────────
 
 /**
@@ -269,7 +308,8 @@ export function channelIdFromScope(scope: X0xScope): string {
  * Map a durable history row to a `RelayEvent` for the rendering layer.
  *
  * History rows carry the full stored metadata (`seenAtMs`, `contentType`,
- * `threadRoot`/`threadParent`). Non-text content types and undecodable
+ * `threadRoot`/`threadParent`). Desktop JSON envelopes and literal x0xd
+ * `text/plain` chat rows are renderable; non-text, malformed, and control
  * payloads map to `null` (skipped by the pager).
  */
 export function historyRowToRelayEvent(
@@ -287,7 +327,7 @@ export function historyRowToRelayEvent(
     return null;
   }
 
-  const envelope = decodeChannelMessageEnvelope(row.payload);
+  const envelope = decodeHistoryMessageEnvelope(row);
   if (!envelope) {
     return null;
   }

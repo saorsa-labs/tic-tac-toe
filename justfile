@@ -33,6 +33,10 @@ no-relay-gate:
 stage-sidecars:
     scripts/stage-sidecars.sh
 
+# Reject incomplete or signature-invalid app bundles before DMG publication.
+package-macos-dmg-test:
+    scripts/package-macos-dmg.test.sh
+
 # Full validation
 check: desktop-check crates-check
 

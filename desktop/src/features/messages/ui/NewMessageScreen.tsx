@@ -1,20 +1,33 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { relayAgentsQueryKey } from "@/features/agents/hooks";
 import {
+  channelsQueryKey,
   useOpenDmMutation,
   useUpsertCachedChannel,
 } from "@/features/channels/hooks";
-import type { Channel } from "@/shared/api/types";
 import { useSendMessageMutation } from "@/features/messages/hooks";
+import { addNativeContactFromInput } from "@/features/profile/nativeSocialApi";
+import {
+  contactListQueryKey,
+  nativeContactsQueryKey,
+} from "@/features/profile/hooks";
 import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidateSearch";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import type { Channel, UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import { MessageComposer } from "./MessageComposer";
+import {
+  getAddedNativeContactStatus,
+  getNewMessageContactPrompt,
+  shouldPreferNewMessageContactPrompt,
+} from "./newMessageContactPrompt";
 import { NewMessageResultRow } from "./NewMessageResultRow";
 import {
   formatRecipientName,
@@ -27,6 +40,7 @@ import {
  * lives in an attached popover instead of taking over the message area.
  */
 export function NewMessageScreen() {
+  const queryClient = useQueryClient();
   const identityQuery = useIdentityQuery();
   const currentAgentId = identityQuery.data?.agentId;
   const openDmMutation = useOpenDmMutation();
@@ -45,11 +59,16 @@ export function NewMessageScreen() {
   >(null);
   const [isPreparingMentionSend, setIsPreparingMentionSend] =
     React.useState(false);
+  const [isAddingContact, setIsAddingContact] = React.useState(false);
+  const [contactAddStatus, setContactAddStatus] = React.useState<string | null>(
+    null,
+  );
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const toFieldRef = React.useRef<HTMLDivElement>(null);
   const preparedDirectMessageRef = React.useRef<Channel | null>(null);
   const isMountedRef = React.useRef(false);
   const isPending =
+    isAddingContact ||
     isPreparingMentionSend ||
     openDmMutation.isPending ||
     sendMessageMutation.isPending;
@@ -59,7 +78,9 @@ export function NewMessageScreen() {
     handleDirectoryScroll,
     hasReachedRecipientLimit,
     isDirectoryLoading,
+    nativeContacts,
     ownerProfiles,
+    presence,
     removeUser,
     searchError,
     searchQuery,
@@ -70,8 +91,18 @@ export function NewMessageScreen() {
   } = useNewMessageRecipients({ active: true, currentAgentId });
 
   const isSearchTransitionPending = searchQuery.trim() !== deferredSearchQuery;
+  const contactPrompt = getNewMessageContactPrompt(
+    deferredSearchQuery,
+    nativeContacts,
+  );
+  const shouldPreferContactPrompt = shouldPreferNewMessageContactPrompt(
+    contactPrompt,
+    searchResults.map((candidate) => candidate.pubkey),
+  );
   const visibleSearchResults =
-    isSearchTransitionPending || isDirectoryLoading ? [] : searchResults;
+    isSearchTransitionPending || isDirectoryLoading || shouldPreferContactPrompt
+      ? []
+      : searchResults;
   const showRecipientPicker = isRecipientPickerOpen && !isPending;
   const highlightedRecipientIndex = React.useMemo(() => {
     if (!showRecipientPicker || visibleSearchResults.length === 0) {
@@ -165,6 +196,67 @@ export function NewMessageScreen() {
     },
     [handleSelectUser, selectedUsers, setSearchQuery],
   );
+
+  const handleAddContact = React.useCallback(async () => {
+    if (isAddingContact) {
+      return;
+    }
+
+    setIsAddingContact(true);
+    setSubmitErrorMessage(null);
+    setContactAddStatus(null);
+    try {
+      const currentPrompt = getNewMessageContactPrompt(
+        searchQuery,
+        nativeContacts,
+      );
+      if (currentPrompt.kind !== "action") {
+        throw new Error("Choose a signed agent card or exact Agent ID.");
+      }
+      const added = await addNativeContactFromInput(
+        currentPrompt.input.kind === "agentCard"
+          ? currentPrompt.input.card
+          : currentPrompt.input.agentId,
+      );
+      const user: UserSearchResult = {
+        pubkey: added.agentId,
+        displayName: added.displayName,
+        avatarUrl: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+        isAgent: true,
+      };
+
+      handleSelectUser(user);
+      setContactAddStatus(getAddedNativeContactStatus(added));
+
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: contactListQueryKey(currentAgentId ?? "native"),
+        }),
+        queryClient.invalidateQueries({ queryKey: ["user-search"] }),
+        queryClient.invalidateQueries({ queryKey: nativeContactsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: ["presence"] }),
+        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: channelsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: ["channel-messages"] }),
+        queryClient.invalidateQueries({ queryKey: ["channel-window"] }),
+      ]);
+    } catch (error) {
+      setSubmitErrorMessage(
+        error instanceof Error ? error.message : "Failed to add contact.",
+      );
+    } finally {
+      setIsAddingContact(false);
+    }
+  }, [
+    currentAgentId,
+    handleSelectUser,
+    isAddingContact,
+    queryClient,
+    nativeContacts,
+    searchQuery,
+  ]);
 
   const openDirectMessage = React.useCallback(
     async (additionalParticipantPubkeys: string[] = []) => {
@@ -461,6 +553,19 @@ export function NewMessageScreen() {
                         results: visibleSearchResults,
                       });
                     if (!keyboardSelection) {
+                      const prompt = getNewMessageContactPrompt(
+                        searchQuery,
+                        nativeContacts,
+                      );
+                      if (
+                        shouldPreferNewMessageContactPrompt(
+                          prompt,
+                          searchResults.map((candidate) => candidate.pubkey),
+                        )
+                      ) {
+                        event.preventDefault();
+                        void handleAddContact();
+                      }
                       return;
                     }
 
@@ -521,6 +626,10 @@ export function NewMessageScreen() {
                           key={user.pubkey}
                           onSelect={handleResultSelect}
                           ownerProfiles={ownerProfiles}
+                          presenceStatus={
+                            presence?.[normalizePubkey(user.pubkey)] ??
+                            "offline"
+                          }
                           user={user}
                         />
                       );
@@ -545,14 +654,26 @@ export function NewMessageScreen() {
                     ))}
                   </div>
                 ) : (
-                  <p
-                    className="px-4 py-3 text-sm text-muted-foreground"
-                    data-testid="new-dm-empty"
-                  >
-                    {deferredSearchQuery.length === 0
-                      ? "No people or agents available to message."
-                      : "No matching users."}
-                  </p>
+                  <div className="px-4 py-3 text-sm text-muted-foreground">
+                    {contactPrompt.kind === "action" ? (
+                      <div
+                        className="space-y-2"
+                        data-testid="new-dm-contact-action"
+                      >
+                        <p>{contactPrompt.description}</p>
+                        <button
+                          className="rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+                          disabled={isPending}
+                          onClick={() => void handleAddContact()}
+                          type="button"
+                        >
+                          {contactPrompt.actionLabel}
+                        </button>
+                      </div>
+                    ) : (
+                      <p data-testid="new-dm-empty">{contactPrompt.message}</p>
+                    )}
+                  </div>
                 )}
               </div>
             </PopoverContent>
@@ -563,7 +684,7 @@ export function NewMessageScreen() {
               className="shrink-0 pl-2 text-sm text-muted-foreground"
               data-testid="new-dm-opening"
             >
-              Opening…
+              {isAddingContact ? "Adding contact…" : "Opening…"}
             </span>
           ) : null}
         </div>
@@ -579,8 +700,8 @@ export function NewMessageScreen() {
           className="px-5 pb-2 text-sm text-muted-foreground"
           data-testid="new-dm-limit"
         >
-          Native direct messages are one-to-one. Group messaging isn't available
-          yet.
+          Native direct messages are one-to-one. Community messaging isn't
+          available here yet.
         </p>
       ) : null}
       {searchError ? (
@@ -591,6 +712,15 @@ export function NewMessageScreen() {
       {submitErrorMessage ? (
         <p className="px-5 pb-2 text-sm text-destructive">
           {submitErrorMessage}
+        </p>
+      ) : null}
+      {contactAddStatus ? (
+        <p
+          className="px-5 pb-2 text-sm text-muted-foreground"
+          data-testid="new-dm-contact-status"
+          role="status"
+        >
+          {contactAddStatus}
         </p>
       ) : null}
 

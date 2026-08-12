@@ -245,6 +245,7 @@ export function ChannelScreen({
   const {
     entranceMessageId: welcomeEntranceMessageId,
     handleEntranceComplete: handleWelcomeEntranceComplete,
+    kickoffFailed: welcomeKickoffFailed,
   } = useWelcomeKickoffEntrance(
     activeChannel,
     resolvedMessages,
@@ -623,6 +624,7 @@ export function ChannelScreen({
       activeChannel,
       timelineMessages,
       isTimelineLoading,
+      welcomeKickoffFailed,
     );
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {

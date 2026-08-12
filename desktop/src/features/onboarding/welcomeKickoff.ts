@@ -15,12 +15,13 @@ import {
   WELCOME_TEAM_STARTERS,
   type WelcomeTeamStarterDefinition,
 } from "@/features/onboarding/welcomeGuide";
+import { withAcknowledgedWelcomeGroup } from "@/features/onboarding/welcomeGroupActivation";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import {
-  startManagedAgent,
-  stopManagedAgent,
+  restartManagedAgentRuntime,
+  startManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
@@ -168,10 +169,10 @@ export function buildWelcomeKickoffOpener(
   if (introTeammates.length === 0) {
     const teammateNames = formatAgentNames(allTeammates);
     const teammatePhrase = teammateNames ? ` with ${teammateNames}` : "";
-    return `${greeting} Welcome to Buzz. This is your private home base, and I'm here${teammatePhrase} to help you get oriented or work through something you're building.\n\n${WELCOME_KICKOFF_CTA}`;
+    return `${greeting} Welcome to tic-tac-toe, an x0x app. This is your private home base, and I'm here${teammatePhrase} to help you get oriented or work through something you're building.\n\n${WELCOME_KICKOFF_CTA}`;
   }
 
-  return `${greeting} Welcome to Buzz. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
+  return `${greeting} Welcome to tic-tac-toe, an x0x app. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
 }
 
 export function onlineWelcomeTeammates(
@@ -439,17 +440,35 @@ export function buildWelcomeKickoffOpenerSendInput(
 
 export async function restartWelcomeTeammate(
   agent: ManagedAgent,
+  groupId: string,
   options: {
-    stopAgent?: typeof stopManagedAgent;
-    startAgent?: typeof startManagedAgent;
+    restartAgent?: typeof restartManagedAgentRuntime;
   } = {},
 ) {
-  const stopAgent = options.stopAgent ?? stopManagedAgent;
-  const startAgent = options.startAgent ?? startManagedAgent;
-  if (agent.status === "running") {
-    await stopAgent(agent.pubkey);
+  return (options.restartAgent ?? restartManagedAgentRuntime)(
+    agent.pubkey,
+    groupId,
+  );
+}
+
+export async function startWelcomeAgentForGroup(
+  agent: ManagedAgent,
+  groupId: string,
+  options: {
+    restart: boolean;
+    startAgent?: typeof startManagedAgentRuntime;
+    restartAgent?: typeof restartManagedAgentRuntime;
+  },
+) {
+  if (options.restart) {
+    return restartWelcomeTeammate(agent, groupId, {
+      restartAgent: options.restartAgent,
+    });
   }
-  return startAgent(agent.pubkey);
+  return (options.startAgent ?? startManagedAgentRuntime)(
+    agent.pubkey,
+    groupId,
+  );
 }
 
 async function sendWelcomeKickoffCloser({
@@ -475,11 +494,21 @@ async function sendWelcomeKickoffCloser({
   });
 }
 
+/** Loud, callback-bearing failure so the Welcome stage can stop claiming setup. */
+export function reportWelcomeKickoffFailure(
+  error: unknown,
+  onKickoffFailed?: (error: unknown) => void,
+) {
+  console.error("Failed to start the Welcome team kickoff.", error);
+  onKickoffFailed?.(error);
+}
+
 /** Runs the Welcome choreography only while the Welcome channel is focused. */
 export function useWelcomeKickoff(
   activeChannel: Channel | null,
   channelEvents: readonly RelayEvent[],
   onKickoffOpenerPosted?: (eventId: string) => void,
+  onKickoffFailed?: (error: unknown) => void,
 ) {
   const queryClient = useQueryClient();
   const { activeCommunity } = useCommunities();
@@ -557,10 +586,11 @@ export function useWelcomeKickoff(
       focusedWelcomeChannelRef.current !== channelId;
     void (async () => {
       try {
-        const welcomeTeam = await ensureWelcomeTeam(
-          channelId,
-          activeCommunity?.groupId,
+        const welcomeTeam = await withAcknowledgedWelcomeGroup(
+          { groupId: channelId, isCancelled },
+          () => ensureWelcomeTeam(channelId, channelId),
         );
+        if (!welcomeTeam || isCancelled()) return;
         await queryClient.invalidateQueries({
           queryKey: managedAgentsQueryKey,
         });
@@ -597,15 +627,17 @@ export function useWelcomeKickoff(
                 normalizePubkey(teammate.pubkey) ===
                 normalizePubkey(agent.pubkey),
             );
-            if (
-              isTeammate &&
-              welcomeTeammateNeedsRestart(agent, resolvedAgentSet.lead.pubkey)
-            ) {
-              return restartWelcomeTeammate(agent);
-            }
-            return agent.status === "running" || agent.status === "deployed"
-              ? Promise.resolve(agent)
-              : startManagedAgent(agent.pubkey);
+            // Pair startup is idempotent for this exact group. Always call it:
+            // a record may be running in the channel the user just left while
+            // still having no child runtime or native membership in Welcome.
+            return startWelcomeAgentForGroup(agent, channelId, {
+              restart:
+                isTeammate &&
+                welcomeTeammateNeedsRestart(
+                  agent,
+                  resolvedAgentSet.lead.pubkey,
+                ),
+            });
           }),
         );
         for (const [index, result] of startResults.entries()) {
@@ -624,7 +656,13 @@ export function useWelcomeKickoff(
         const leadStartIndex = agentsToStart.findIndex(
           (agent) => agent.pubkey === resolvedAgentSet.lead.pubkey,
         );
-        if (startResults[leadStartIndex]?.status === "rejected") return;
+        if (startResults[leadStartIndex]?.status === "rejected") {
+          reportWelcomeKickoffFailure(
+            startResults[leadStartIndex].reason,
+            onKickoffFailed,
+          );
+          return;
+        }
         const teammatesToAwait = resolvedAgentSet.teammates.filter(
           (teammate) =>
             startResults[
@@ -667,16 +705,18 @@ export function useWelcomeKickoff(
         );
         if (!isCancelled()) onKickoffOpenerPosted?.(openerResult.eventId);
       } catch (error) {
-        console.warn("Failed to start the Welcome team kickoff.", error);
+        if (!isCancelled()) {
+          reportWelcomeKickoffFailure(error, onKickoffFailed);
+        }
       } finally {
         kickoffCoordinator.finish(channelId, kickoffController);
       }
     })();
   }, [
-    activeCommunity?.groupId,
     channelId,
     configLoading,
     isActiveWelcome,
+    onKickoffFailed,
     onKickoffOpenerPosted,
     queryClient,
     readiness,

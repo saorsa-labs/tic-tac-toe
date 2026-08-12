@@ -159,7 +159,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     },
     KnownAcpRuntime {
         id: "buzz-agent",
-        label: "Buzz Agent",
+        label: "x0x Agent",
         commands: &["buzz-agent"],
         aliases: &[],
         avatar_url: BUZZ_AGENT_AVATAR_URL,
@@ -170,7 +170,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands_windows: &[],
         adapter_install_commands: &[],
         install_instructions_url: "https://github.com/block/buzz",
-        cli_install_hint: "Ships with the Buzz desktop app.",
+        cli_install_hint: "Ships with tic-tac-toe.",
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: true,
@@ -386,6 +386,16 @@ pub fn resolve_create_agent_runtime(
     }
 
     Ok((default_agent_command(), None))
+}
+
+/// Runtime field stored on a newly created record.
+///
+/// Only a materialized global preference is persisted. Persona and override
+/// paths already have authoritative storage; writing `None` here is what
+/// keeps later global-config edits from rewriting those agents.
+#[must_use]
+pub fn persisted_create_runtime(materialized_runtime: Option<String>) -> Option<String> {
+    materialized_runtime
 }
 
 mod overrides;

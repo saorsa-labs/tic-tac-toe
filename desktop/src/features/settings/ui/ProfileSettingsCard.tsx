@@ -19,6 +19,7 @@ import {
   parseEmojiAvatarDataUrl,
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { cn } from "@/shared/lib/cn";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
@@ -128,6 +129,7 @@ export function ProfileSettingsCard({
 }: ProfileSettingsCardProps) {
   const shouldReduceMotion = useReducedMotion();
   const profileQuery = useProfileQuery();
+  const identityQuery = useIdentityQuery();
   const updateProfileMutation = useUpdateProfileMutation();
   const profile = profileQuery.data;
 
@@ -269,7 +271,8 @@ export function ProfileSettingsCard({
     fallbackDisplayName ||
     "Your profile";
   const resolvedPubkey = profile?.pubkey ?? currentAgentId ?? "Unavailable";
-  const nip05Handle = profile?.nip05Handle ?? "Not set";
+  const identityWords =
+    identityQuery.data?.identityWords.join(" ") ?? "Unavailable";
   const emojiAvatarPreview = React.useMemo(
     () => parseEmojiAvatarDataUrl(avatarUrlDraft),
     [avatarUrlDraft],
@@ -447,7 +450,7 @@ export function ProfileSettingsCard({
       <div>
         <SettingsSectionHeader
           title="Profile"
-          description="Update how your name, avatar, and bio appear across Buzz."
+          description="Update how your name and avatar appear across tic-tac-toe."
         />
 
         <div className="space-y-3">
@@ -707,8 +710,8 @@ export function ProfileSettingsCard({
                                   Identity
                                 </h2>
                                 <p className="mt-1 text-sm font-normal text-muted-foreground">
-                                  Your keypair and NIP-05 handle are fixed for
-                                  this device.
+                                  Your x0x Agent ID and four-word identity are
+                                  fixed for this device.
                                 </p>
                               </div>
                               <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-[color,transform] duration-150 ease-out group-open:rotate-180 group-hover/identity:text-foreground group-focus-visible/identity:text-foreground" />
@@ -721,15 +724,19 @@ export function ProfileSettingsCard({
                                 copyValue={
                                   profile?.pubkey ?? currentAgentId ?? undefined
                                 }
-                                label="Public key"
+                                label="Agent ID"
                                 testId="profile-pubkey"
                                 value={resolvedPubkey}
                               />
                               <IdentityRow
-                                copyValue={profile?.nip05Handle ?? undefined}
-                                label="NIP-05 handle"
-                                testId="profile-nip05"
-                                value={nip05Handle}
+                                copyValue={
+                                  identityWords === "Unavailable"
+                                    ? undefined
+                                    : identityWords
+                                }
+                                label="Four-word identity"
+                                testId="profile-identity-words"
+                                value={identityWords}
                               />
                             </div>
                           </details>
