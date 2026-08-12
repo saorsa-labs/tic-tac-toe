@@ -19,9 +19,9 @@ export function KeyringLockedScreen() {
           Compatibility service unavailable
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Buzz couldn&apos;t reach the compatibility service that backs your
-          identity. Unlock your desktop session or restart the service, then
-          relaunch Buzz.
+          tic-tac-toe couldn&apos;t reach the compatibility service that backs
+          your identity. Unlock your desktop session or restart the service,
+          then relaunch tic-tac-toe.
         </p>
         <Button
           className="mt-8 h-10 w-full max-w-[300px]"
@@ -31,7 +31,7 @@ export function KeyringLockedScreen() {
           }}
           type="button"
         >
-          Relaunch Buzz
+          Relaunch tic-tac-toe
         </Button>
       </div>
     </div>

@@ -188,6 +188,8 @@ export const settingsSections: SettingsSectionDescriptor[] = [
 ];
 
 function formatThemeLabel(name: string): string {
+  if (name === "buzz") return "tic-tac-toe";
+  if (name === "buzz-dark") return "tic-tac-toe Dark";
   return name
     .split("-")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
@@ -201,6 +203,7 @@ function formatThemeLabel(name: string): string {
  * "material-theme-lighter", and "gruvbox-light-soft".
  */
 function pairedThemeLabel(lightName: string): string {
+  if (lightName === "buzz") return "tic-tac-toe";
   const modeTokens = new Set([
     "light",
     "latte",
@@ -472,7 +475,7 @@ function ThemeSettingsCard() {
     >
       <SettingsSectionHeader
         title="Appearance"
-        description="Choose a theme for Buzz."
+        description="Choose a theme for tic-tac-toe."
       />
 
       {/* Mode selector: System / Light / Dark */}

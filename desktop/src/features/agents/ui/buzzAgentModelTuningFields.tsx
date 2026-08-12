@@ -230,7 +230,7 @@ export function BuzzAgentModelTuningFields({
   return (
     <div className="space-y-4">
       <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-        buzz-agent model tuning
+        x0x Agent model tuning
       </p>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -352,7 +352,7 @@ export function BuzzAgentModelTuningFields({
             className="text-xs text-muted-foreground"
             id="help-ba-max-context-tokens"
           >
-            Maximum context window tokens buzz-agent tracks before a handoff.
+            Maximum context window tokens the x0x Agent tracks before a handoff.
             Leave blank to inherit.
           </p>
         </div>

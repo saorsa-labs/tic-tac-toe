@@ -120,7 +120,7 @@ export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
-  { id: "shared-compute", label: "Buzz shared compute" },
+  { id: "shared-compute", label: "x0x shared compute" },
   { id: "databricks", label: "Databricks" },
   { id: "databricks_v2", label: "Databricks v2" },
 ];
@@ -286,7 +286,7 @@ export function providerRequiresExplicitModel(
 export function providerDisplayLabel(providerId: string) {
   const trimmedProvider = providerId.trim();
   return trimmedProvider === "shared-compute"
-    ? "Buzz shared compute"
+    ? "x0x shared compute"
     : trimmedProvider;
 }
 

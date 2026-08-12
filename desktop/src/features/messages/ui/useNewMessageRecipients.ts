@@ -11,6 +11,7 @@ import {
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
@@ -124,7 +125,10 @@ export function useNewMessageRecipients({
 
     const addCandidate = (
       candidate: NewMessageRecipientCandidate,
-      options: { includeSelected?: boolean } = {},
+      options: {
+        includeSelected?: boolean;
+        isNativeDirectoryEntry?: boolean;
+      } = {},
     ) => {
       const pubkey = normalizePubkey(candidate.pubkey);
 
@@ -132,7 +136,9 @@ export function useNewMessageRecipients({
         pubkey === currentAgentIdNormalized ||
         (!options.includeSelected && selectedPubkeys.has(pubkey)) ||
         isArchivedDiscovery(pubkey) ||
-        (candidate.isAgent && !eligibleAgentPubkeys.has(pubkey))
+        (candidate.isAgent &&
+          !options.isNativeDirectoryEntry &&
+          !eligibleAgentPubkeys.has(pubkey))
       ) {
         return;
       }
@@ -167,6 +173,10 @@ export function useNewMessageRecipients({
     for (const user of userSearchResults) {
       addCandidate(candidateWithAgentMetadata(user, managedAgentsByPubkey), {
         includeSelected: deferredSearchQuery.length > 0,
+        // Native profile search is backed exclusively by x0xd contacts and the
+        // active community roster. Contacts must remain messageable even when
+        // they do not yet share a community — that is the first-DM flow.
+        isNativeDirectoryEntry: true,
       });
     }
 
@@ -268,6 +278,10 @@ export function useNewMessageRecipients({
   const ownerProfilesQuery = useUsersBatchQuery(searchOwnerPubkeys, {
     enabled: active && searchOwnerPubkeys.length > 0,
   });
+  const presenceQuery = usePresenceQuery(
+    searchResults.map((candidate) => candidate.pubkey),
+    { enabled: active && searchResults.length > 0 },
+  );
 
   // Clearing the query on each new chip mirrors the modal's behavior: the
   // search box empties so the next recipient can be typed immediately.
@@ -320,6 +334,7 @@ export function useNewMessageRecipients({
     hasReachedRecipientLimit,
     isDirectoryLoading: isDirectorySettling,
     ownerProfiles: ownerProfilesQuery.data?.profiles,
+    presence: presenceQuery.data,
     removeUser,
     reset,
     searchError:
