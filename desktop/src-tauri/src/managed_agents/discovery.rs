@@ -388,6 +388,16 @@ pub fn resolve_create_agent_runtime(
     Ok((default_agent_command(), None))
 }
 
+/// Runtime field stored on a newly created record.
+///
+/// Only a materialized global preference is persisted. Persona and override
+/// paths already have authoritative storage; writing `None` here is what
+/// keeps later global-config edits from rewriting those agents.
+#[must_use]
+pub fn persisted_create_runtime(materialized_runtime: Option<String>) -> Option<String> {
+    materialized_runtime
+}
+
 mod overrides;
 pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
 

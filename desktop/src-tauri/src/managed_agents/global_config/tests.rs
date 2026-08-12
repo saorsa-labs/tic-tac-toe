@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::{
-    normalize_global_config_fields, resolve_effective_model_provider, strip_empty_env_vars,
-    validate_global_config, GlobalAgentConfig,
+    normalize_global_config_fields, resolve_effective_model_provider,
+    soften_preferred_runtime_for_load, strip_empty_env_vars, validate_global_config,
+    GlobalAgentConfig,
 };
 use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord, RespondTo};
 
@@ -171,6 +172,34 @@ fn validate_rejects_unknown_preferred_runtime() {
     let error = validate_global_config(&config).expect_err("unknown runtime must fail closed");
     assert!(error.contains("preferred_runtime"));
     assert!(error.contains("not a supported ACP runtime"));
+}
+
+#[test]
+fn load_softens_unknown_preferred_runtime_and_keeps_other_fields() {
+    let mut config = GlobalAgentConfig {
+        preferred_runtime: Some("not-installed".to_string()),
+        model: Some("claude-opus-4-5".to_string()),
+        ..Default::default()
+    };
+    let dropped = soften_preferred_runtime_for_load(&mut config)
+        .expect("stale preferred_runtime must be dropped on load");
+    assert_eq!(dropped, "not-installed");
+    assert_eq!(config.preferred_runtime, None);
+    assert_eq!(config.model.as_deref(), Some("claude-opus-4-5"));
+    assert!(
+        validate_global_config(&config).is_ok(),
+        "the rest of the config must still be usable after softening"
+    );
+}
+
+#[test]
+fn load_keeps_catalog_preferred_runtime() {
+    let mut config = GlobalAgentConfig {
+        preferred_runtime: Some("buzz-agent".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(soften_preferred_runtime_for_load(&mut config), None);
+    assert_eq!(config.preferred_runtime.as_deref(), Some("buzz-agent"));
 }
 
 // ── normalize_global_config_fields ───────────────────────────────────────────

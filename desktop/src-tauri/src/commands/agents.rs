@@ -575,7 +575,7 @@ pub async fn create_managed_agent(
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             display_name: None,
             slug: None,
-            runtime: materialized_runtime,
+            runtime: crate::managed_agents::persisted_create_runtime(materialized_runtime),
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

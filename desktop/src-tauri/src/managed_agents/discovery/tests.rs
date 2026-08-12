@@ -6,9 +6,9 @@ use super::{
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, resolve_create_agent_runtime, BUZZ_AGENT_AVATAR_URL,
-    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    parse_semver_tag, persisted_create_runtime, probe_codex_acp_major_version,
+    record_agent_command, refresh_login_shell_path, resolve_create_agent_runtime,
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -381,6 +381,37 @@ fn create_runtime_invalid_global_preference_fails_closed() {
     let error = resolve_create_agent_runtime(None, &[], None, Some("not-installed"))
         .expect_err("unknown global runtime must not fall back silently");
     assert!(error.contains("global preferred runtime"));
+}
+
+#[test]
+fn create_persists_only_a_materialized_global_runtime_on_the_record() {
+    let (_, materialized) = resolve_create_agent_runtime(None, &[], None, Some("claude"))
+        .expect("known global runtime should resolve");
+    assert_eq!(
+        persisted_create_runtime(materialized).as_deref(),
+        Some("claude"),
+        "global preference must be snapshotted onto the new record"
+    );
+
+    let (_, materialized) =
+        resolve_create_agent_runtime(None, &[], Some("codex-acp"), Some("claude"))
+            .expect("explicit command should resolve");
+    assert_eq!(
+        persisted_create_runtime(materialized),
+        None,
+        "explicit command pins must not store the global runtime"
+    );
+}
+
+#[test]
+fn create_managed_agent_wires_persisted_create_runtime() {
+    let src = include_str!("../../commands/agents.rs");
+    assert!(
+        src.contains(
+            "runtime: crate::managed_agents::persisted_create_runtime(materialized_runtime)"
+        ),
+        "changing create_managed_agent to store runtime: None must fail this test"
+    );
 }
 
 #[test]
