@@ -1622,8 +1622,14 @@ pub fn spawn_agent_child(
     let personas = super::load_personas(app).unwrap_or_default();
     let teams = super::load_teams(app).unwrap_or_default();
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
-    // and for the env-var merge at spawn time.
-    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    // and for the env-var merge at spawn time. A load failure degrades to an
+    // empty config (the agent still spawns) but must be visible in the log.
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_else(|error| {
+        eprintln!(
+            "buzz-desktop: failed to load global agent config, spawning without global defaults: {error}"
+        );
+        Default::default()
+    });
     let effective_command = super::record_agent_command(record, &personas);
     let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
