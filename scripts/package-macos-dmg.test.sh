@@ -26,7 +26,7 @@ cat > "$BROKEN_APP/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
-for executable in buzz-desktop x0xd buzz-acp buzz-agent buzz-dev-mcp buzz; do
+for executable in buzz-desktop x0xd buzz-acp buzz-agent buzz-x0x-mcp; do
     cp /usr/bin/true "$BROKEN_APP/Contents/MacOS/$executable"
 done
 

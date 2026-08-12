@@ -62,7 +62,7 @@ describe("portable macOS package contract", () => {
     );
     assert.deepEqual(
       externalBins.sort(),
-      ["buzz", "buzz-acp", "buzz-agent", "buzz-dev-mcp", "x0xd"].sort(),
+      ["buzz-acp", "buzz-agent", "buzz-x0x-mcp", "x0xd"].sort(),
     );
     const requiredMatch = dmgPackagerSource.match(
       /REQUIRED_EXECUTABLES=\(([^)]+)\)/,
@@ -75,8 +75,9 @@ describe("portable macOS package contract", () => {
       [...expected].sort(),
       "REQUIRED_EXECUTABLES must be buzz-desktop plus every externalBin basename",
     );
-    assert.doesNotMatch(dmgPackagerSource, /buzz-x0x-mcp/);
-    assert.doesNotMatch(dmgPackagerTestSource, /buzz-x0x-mcp/);
+    assert.match(dmgPackagerSource, /buzz-x0x-mcp/);
+    assert.doesNotMatch(dmgPackagerSource, /buzz-dev-mcp/);
+    assert.doesNotMatch(dmgPackagerTestSource, /buzz-dev-mcp/);
   });
 
   it("images the exact signed app instead of asking Tauri to rebuild it", () => {

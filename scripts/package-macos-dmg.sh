@@ -99,7 +99,7 @@ RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 # buzz-desktop is CFBundleExecutable. The rest must match tauri.conf.json
 # bundle.externalBin basenames (enforced by portable-package-contract.test.mjs).
-REQUIRED_EXECUTABLES=(buzz-desktop x0xd buzz-acp buzz-agent buzz-dev-mcp buzz)
+REQUIRED_EXECUTABLES=(buzz-desktop x0xd buzz-acp buzz-agent buzz-x0x-mcp)
 
 if [[ ! -f "$INFO_PLIST" ]]; then
     echo "App bundle is incomplete: Contents/Info.plist is missing" >&2
