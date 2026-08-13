@@ -37,7 +37,11 @@ reject_campaign_x0xd() {
   done
 }
 
-assert_official_x0xd_pin() {
+# Version + campaign-string identity. Used on both the unsigned official
+# asset (plus sha256 pin) and the Developer-ID-signed copy inside the app
+# bundle (sha256 cannot survive codesign; --remove-signature does not
+# restore the original bytes either).
+assert_official_x0xd_identity() {
   local binary="$1"
   reject_campaign_x0xd "$binary" || return $?
   local ver
@@ -46,11 +50,30 @@ assert_official_x0xd_pin() {
     echo "FATAL: $binary reports '$ver', expected $PINNED_X0XD_VERSION" >&2
     return 5
   fi
+}
+
+# Unsigned official GitHub asset. Stage / fetch paths only.
+assert_official_x0xd_pin() {
+  local binary="$1"
+  assert_official_x0xd_identity "$binary" || return $?
   local actual
   actual="$(shasum -a 256 "$binary" | awk '{print $1}')"
   if [[ "$actual" != "$PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256" ]]; then
     echo "FATAL: $binary sha256 $actual != pinned official v${PINNED_X0XD_VERSION} $PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256" >&2
     return 5
+  fi
+}
+
+# Post-codesign copy inside tic-tac-toe.app. Hash is expected to differ
+# from PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256.
+assert_official_x0xd_bundle() {
+  local binary="$1"
+  assert_official_x0xd_identity "$binary" || return $?
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    if ! codesign --verify --verbose=2 "$binary" >/dev/null 2>&1; then
+      echo "FATAL: bundled x0xd is not codesigned: $binary" >&2
+      return 5
+    fi
   fi
 }
 

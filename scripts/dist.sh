@@ -142,7 +142,7 @@ fi
 validate_managed_agent_sidecars "$APP_BUNDLE/Contents/MacOS" "$TARGET_TRIPLE" ""
 
 BUNDLED_X0XD="$APP_BUNDLE/Contents/MacOS/x0xd"
-assert_official_x0xd_pin "$BUNDLED_X0XD"
+assert_official_x0xd_bundle "$BUNDLED_X0XD"
 if [[ "$($BUNDLED_X0XD --version)" != "$X0XD_VERSION" ]]; then
     echo "Bundled x0xd version does not match the staged sidecar" >&2
     exit 1
