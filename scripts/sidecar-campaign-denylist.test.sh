@@ -9,7 +9,7 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 clean="$TEST_ROOT/clean-x0xd"
-printf '#!/bin/sh\necho x0xd 0.37.2\n' > "$clean"
+printf '#!/bin/sh\necho x0xd 0.37.4\n' > "$clean"
 chmod +x "$clean"
 reject_campaign_x0xd "$clean"
 

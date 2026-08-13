@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mixed-version DM smoke (ttt #12): bundled sidecar → released 0.37.2 daemon
+# Mixed-version DM smoke (ttt #12): bundled sidecar → released 0.37.4 daemon
 # must deliver. A 409 recipient_ack_semantics_unavailable is a hard fail.
 #
 # Isolated loopback pair: --no-hard-coded-bootstrap, no prod mesh.

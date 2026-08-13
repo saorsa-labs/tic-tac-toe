@@ -54,7 +54,7 @@ end-to-end.
 
 ## Status
 
-**v0.5.2** bundles official `x0xd` **0.37.2** (sha256-pinned, campaign-string
+**v0.5.2** bundles official `x0xd` **0.37.4** (sha256-pinned, campaign-string
 denylist, `--skip-update-check`) and ships native Guide ACP. It does **not**
 include a durable-ACK client — that waits for a released daemon advertising
 protocol v2 (ADR 0030).

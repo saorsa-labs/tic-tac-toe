@@ -13,7 +13,7 @@ configured, and publishes both a portable tarball and a signed DMG under
 public release candidate.
 
 `x0xd` is **never cargo-built for distribution**. `dist.sh` fetches the
-official `v0.37.2` macos-arm64 asset, checks the tarball and *unsigned*
+official `v0.37.4` macos-arm64 asset, checks the tarball and *unsigned*
 extracted-binary sha256 pins in `scripts/sidecar-validation.sh`, and refuses
 campaign protocol strings (`recipient_ack_semantics_unavailable` and siblings
 — ttt #12). After Developer ID signing the in-bundle copy is re-checked for
