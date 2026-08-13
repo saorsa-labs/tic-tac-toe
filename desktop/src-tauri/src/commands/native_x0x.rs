@@ -78,21 +78,18 @@ pub async fn x0x_history_search(
         .map_err(Into::into)
 }
 
-/// `GET /history/message/:msg_id` — single durable-history row by canonical
-/// BLAKE3 `msg_id` (lowercase 64-hex). Returns `None` when the id is absent
-/// from the local store (404), distinct from a transport/decode error.
-///
-/// No scope hint: `msg_id` is globally unique within one daemon's store, so a
-/// canonical id unambiguously identifies one local row. The lookup never
-/// reaches the network (ADR-0023 non-goal).
+/// `GET /history/message/:msg_id` — one durable-history row by any id
+/// `/history` exposes. Canonical group ids need `scope` (`group:<stable>`);
+/// store dedupe ids resolve without it. 404 → `None`.
 #[tauri::command]
 pub async fn x0x_history_get(
     state: State<'_, AppState>,
     msg_id: String,
+    scope: Option<String>,
 ) -> Result<Option<HistoryRow>, String> {
     state
         .x0x_client
-        .history_get(&msg_id)
+        .history_get(&msg_id, scope.as_deref())
         .await
         .map_err(Into::into)
 }

@@ -947,9 +947,10 @@ pub async fn wake_managed_agent_from_mention(
     if transport.confidentiality != crate::x0x_client::GroupConfidentiality::SignedPublic {
         return Err("managed mention group must be signed_public".into());
     }
+    let history_scope = format!("group:{}", transport.stable_group_id);
     let row = state
         .x0x_client
-        .history_get(&msg_id)
+        .history_get(&msg_id, Some(&history_scope))
         .await?
         .ok_or_else(|| "managed mention owner history row was not found".to_string())?;
     let (author_agent_id, mention) = require_verified_owner_mention_row(
@@ -972,7 +973,7 @@ pub async fn wake_managed_agent_from_mention(
         .ok_or_else(|| "managed child mention has no owner delegation root".to_string())?;
     let root_row = state
         .x0x_client
-        .history_get(root_id)
+        .history_get(root_id, Some(&history_scope))
         .await?
         .ok_or_else(|| "managed child mention owner delegation root was not found".to_string())?;
     require_bounded_agent_delegation(
