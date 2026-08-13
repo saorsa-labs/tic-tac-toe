@@ -12,6 +12,13 @@ configured, and publishes both a portable tarball and a signed DMG under
 `scripts/dist.sh --skip-notarization`; that output is intentionally not a
 public release candidate.
 
+`x0xd` is **never cargo-built for distribution**. `dist.sh` fetches the
+official signed `v0.37.2` macos-arm64 asset, checks the tarball and extracted
+binary sha256 pins in `scripts/sidecar-validation.sh`, and refuses campaign
+protocol strings (`recipient_ack_semantics_unavailable` and siblings — ttt
+#12). `just sidecar-campaign-denylist-test` and `just mixed-version-dm-smoke`
+are the local gates.
+
 The DMG is created by `scripts/package-macos-dmg.sh` from the already-signed app
 bundle. Do not run `tauri build --bundles dmg` as a follow-up: it performs a
 second bundling pass and can replace the accepted app with a stale or incomplete

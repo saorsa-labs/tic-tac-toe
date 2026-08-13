@@ -47,6 +47,7 @@ run_stage() {
   PATH="$path_prefix:$BASE_PATH" \
     STAGE_SIDECARS_REPO_ROOT="$REPO_ROOT" \
     X0X_DIR="$X0X_ROOT" \
+    X0XD_SOURCE=local-build \
     PROFILE=release \
     "$SCRIPT_DIR/stage-sidecars.sh"
 }
