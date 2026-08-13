@@ -634,7 +634,7 @@ async fn reconcile_pending_causal(
         }
         let msg_id = entry.message.msg_id.clone();
         let row = x0x
-            .history_get(&msg_id)
+            .history_get(stable_group_id, &msg_id)
             .await?
             .ok_or_else(|| HarnessError::PendingCausalMissing(msg_id.clone()))?;
         let envelope = row
@@ -650,22 +650,14 @@ async fn reconcile_pending_causal(
         // Bounded child delegation depends on the exact owner root. Load it
         // explicitly when it is older than the recent-context window; never
         // reconstruct or inject content from the desktop handoff.
-        if let Some(root_id) = envelope.delegation_root.as_deref() {
-            if !context
-                .messages
-                .iter()
-                .any(|message| message.msg_id == root_id)
-            {
-                if let Some(root) = x0x.history_get(root_id).await? {
-                    if let Some(root_envelope) = root
-                        .envelope()
-                        .filter(|_| root.is_safe_context(stable_group_id, &harness.config.agent_id))
-                    {
-                        context.push(&root, &root_envelope);
-                    }
-                }
-            }
-        }
+        ensure_delegation_root_in_context(
+            x0x,
+            stable_group_id,
+            &harness.config.agent_id,
+            &envelope,
+            context,
+        )
+        .await?;
         if row.is_safe_context(stable_group_id, &harness.config.agent_id) {
             context.push(&row, &envelope);
         }
@@ -716,6 +708,10 @@ async fn reconcile(
         .await?;
     for row in rows {
         let envelope = row.envelope();
+        if let Some(env) = envelope.as_ref() {
+            ensure_delegation_root_in_context(x0x, stable_group_id, &config.agent_id, env, context)
+                .await?;
+        }
         if let Some(envelope) = envelope
             .as_ref()
             .filter(|_| row.is_safe_context(stable_group_id, &config.agent_id))
@@ -744,6 +740,34 @@ async fn reconcile(
             .await?;
         } else {
             claim_row(state_path, state, row.id)?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_delegation_root_in_context(
+    x0x: &X0xClient,
+    stable_group_id: &str,
+    local_agent_id: &str,
+    envelope: &ChannelEnvelope,
+    context: &mut ConversationContext,
+) -> Result<(), HarnessError> {
+    let Some(root_id) = envelope.delegation_root.as_deref() else {
+        return Ok(());
+    };
+    if context
+        .messages
+        .iter()
+        .any(|message| message.msg_id == root_id)
+    {
+        return Ok(());
+    }
+    if let Some(root) = x0x.history_get(stable_group_id, root_id).await? {
+        if let Some(root_envelope) = root
+            .envelope()
+            .filter(|_| root.is_safe_context(stable_group_id, local_agent_id))
+        {
+            context.push(&root, &root_envelope);
         }
     }
     Ok(())
@@ -1158,6 +1182,129 @@ mod tests {
             &envelope,
             &ConversationContext::default()
         ));
+    }
+
+    #[tokio::test]
+    async fn live_path_loads_delegation_root_when_it_scrolled_out_of_context() {
+        use axum::extract::{Query, State};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::collections::HashMap;
+
+        let guide = "c".repeat(64);
+        let mut config = test_config(RespondTo::Allowlist);
+        config.respond_to_allowlist.insert(guide.clone());
+
+        let root = test_row(&config.owner_agent_id, &guide);
+        let mut delegated = test_row(&guide, &config.agent_id);
+        delegated.id = 2;
+        delegated.msg_id = "2".repeat(64);
+        delegated.thread_root = Some(root.msg_id.clone());
+        delegated.thread_parent = Some(root.msg_id.clone());
+        let mut delegated_envelope = delegated.envelope().expect("valid delegated envelope");
+        delegated_envelope.agent_generated = true;
+        delegated_envelope.agent_generation = Some(1);
+        delegated_envelope.delegation_root = Some(root.msg_id.clone());
+        set_row_envelope(&mut delegated, &delegated_envelope);
+        let delegated_envelope = delegated.envelope().expect("encoded delegation");
+
+        assert!(
+            !should_trigger(
+                &config,
+                "stable",
+                &delegated,
+                &delegated_envelope,
+                &ConversationContext::default()
+            ),
+            "missing owner root must not authorize a live delegation"
+        );
+
+        #[derive(Clone)]
+        struct RootDaemon {
+            token: String,
+            root: HistoryRow,
+        }
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let state = RootDaemon {
+            token: "root-token".to_string(),
+            root: root.clone(),
+        };
+        let router = Router::new()
+            .route("/history", get(fake_root_history))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake daemon");
+        let port = listener.local_addr().expect("fake address").port();
+        std::fs::write(
+            data_dir.path().join("api.port"),
+            format!("127.0.0.1:{port}\n"),
+        )
+        .expect("write port");
+        std::fs::write(data_dir.path().join("api-token"), &state.token).expect("write token");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve fake daemon");
+        });
+
+        async fn fake_root_history(
+            State(state): State<RootDaemon>,
+            headers: HeaderMap,
+            Query(query): Query<HashMap<String, String>>,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            let expected = format!("Bearer {}", state.token);
+            if headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                != Some(expected.as_str())
+            {
+                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})));
+            }
+            assert_eq!(query.get("scope").map(String::as_str), Some("group:stable"));
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "count": 1,
+                    "next_before_id": null,
+                    "records": [{
+                        "id": state.root.id,
+                        "msg_id": state.root.msg_id,
+                        "scope": state.root.scope,
+                        "author_agent": state.root.author_agent,
+                        "direction": state.root.direction,
+                        "content_type": state.root._content_type,
+                        "payload": state.root.payload,
+                        "provenance": state.root.provenance,
+                        "sent_at_ms": state.root._sent_at_ms,
+                        "seen_at_ms": state.root._seen_at_ms,
+                        "signed": state.root.signed,
+                        "thread_root": state.root.thread_root,
+                        "thread_parent": state.root.thread_parent
+                    }]
+                })),
+            )
+        }
+
+        let client = X0xClient::new(data_dir.path().to_path_buf()).expect("HTTP client");
+        let mut context = ConversationContext::default();
+        ensure_delegation_root_in_context(
+            &client,
+            "stable",
+            &config.agent_id,
+            &delegated_envelope,
+            &mut context,
+        )
+        .await
+        .expect("load owner root from scoped history");
+        assert!(
+            should_trigger(&config, "stable", &delegated, &delegated_envelope, &context),
+            "live path must authorize after loading the scrolled-out owner root"
+        );
+        server.abort();
     }
 
     #[test]

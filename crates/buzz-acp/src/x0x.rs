@@ -110,11 +110,6 @@ struct HistoryResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct HistoryMessageResponse {
-    record: Option<HistoryRow>,
-}
-
-#[derive(Debug, Deserialize)]
 struct AgentResponse {
     agent_id: String,
 }
@@ -233,13 +228,36 @@ impl X0xClient {
         Err(X0xError::HistoryPageLimit)
     }
 
-    pub async fn history_get(&self, msg_id: &str) -> Result<Option<HistoryRow>, X0xError> {
-        let path = format!("/history/message/{msg_id}");
-        match self.get_json::<HistoryMessageResponse>(&path, &[]).await {
-            Ok(response) => exact_history_record(msg_id, response.record),
-            Err(X0xError::Status { status: 404, .. }) => Ok(None),
-            Err(error) => Err(error),
+    /// Look up one durable row by `msg_id` inside a group scope.
+    ///
+    /// x0xd 0.37.x has no `GET /history/message/:msg_id` route. Page the
+    /// existing scoped list instead so a scrolled-out delegation root is a
+    /// real miss, not a silent 404-mapped `None`.
+    pub async fn history_get(
+        &self,
+        stable_group_id: &str,
+        msg_id: &str,
+    ) -> Result<Option<HistoryRow>, X0xError> {
+        let scope = format!("group:{stable_group_id}");
+        let mut before_id: Option<i64> = None;
+        for _ in 0..MAX_HISTORY_PAGES {
+            let mut query = vec![
+                ("scope".to_string(), scope.clone()),
+                ("limit".to_string(), HISTORY_PAGE_SIZE.to_string()),
+            ];
+            if let Some(cursor) = before_id {
+                query.push(("before_id".to_string(), cursor.to_string()));
+            }
+            let page: HistoryResponse = self.get_json("/history", &query).await?;
+            if let Some(row) = page.records.into_iter().find(|row| row.msg_id == msg_id) {
+                return exact_history_record(msg_id, Some(row));
+            }
+            match page.next_before_id {
+                Some(next) => before_id = Some(next),
+                None => return Ok(None),
+            }
         }
+        Err(X0xError::HistoryPageLimit)
     }
 
     pub async fn recent_history(&self, stable_group_id: &str) -> Result<Vec<HistoryRow>, X0xError> {
@@ -568,6 +586,20 @@ mod tests {
         let rows = client.history_after("stable", 1).await.expect("history");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, 2);
+        let found = client
+            .history_get("stable", &"2".repeat(64))
+            .await
+            .expect("scoped point lookup");
+        let expected_id = "2".repeat(64);
+        assert_eq!(
+            found.as_ref().map(|row| row.msg_id.as_str()),
+            Some(expected_id.as_str())
+        );
+        assert!(client
+            .history_get("stable", &"9".repeat(64))
+            .await
+            .expect("missing id")
+            .is_none());
 
         let root = "1".repeat(64);
         let parent = "2".repeat(64);
