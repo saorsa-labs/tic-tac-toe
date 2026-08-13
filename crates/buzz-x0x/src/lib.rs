@@ -41,7 +41,12 @@ pub struct RuntimeConfig {
     data_dir: PathBuf,
     agent_id: String,
     owner_agent_id: String,
+    /// Launch / REST route id from `X0X_GROUP_ID`. Used for `/groups/{id}/…`.
     group_id: String,
+    /// Stable group id from `GET /groups/{route}/state`. Used for history
+    /// scope and inbound delegation verification. Equals `group_id` until
+    /// [`X0xTools::resolve_stable_group_id`] runs.
+    stable_group_id: String,
 }
 
 impl RuntimeConfig {
@@ -63,7 +68,8 @@ impl RuntimeConfig {
             data_dir,
             agent_id,
             owner_agent_id,
-            group_id,
+            group_id: group_id.clone(),
+            stable_group_id: group_id,
         })
     }
 
@@ -74,16 +80,28 @@ impl RuntimeConfig {
         owner_agent_id: impl Into<String>,
         group_id: impl Into<String>,
     ) -> Self {
+        let group_id = group_id.into();
         Self {
             data_dir,
             agent_id: agent_id.into(),
             owner_agent_id: owner_agent_id.into(),
-            group_id: group_id.into(),
+            group_id: group_id.clone(),
+            stable_group_id: group_id,
         }
+    }
+
+    #[cfg(test)]
+    fn with_stable_group_id(mut self, stable_group_id: impl Into<String>) -> Self {
+        self.stable_group_id = stable_group_id.into();
+        self
     }
 
     pub fn group_id(&self) -> &str {
         &self.group_id
+    }
+
+    pub fn stable_group_id(&self) -> &str {
+        &self.stable_group_id
     }
 }
 
@@ -105,6 +123,33 @@ impl X0xTools {
             .build()
             .map_err(|error| AppError::new(format!("failed to create HTTP client: {error}")))?;
         Ok(Self { config, client })
+    }
+
+    /// Resolve the daemon's stable group id and store it for history / delegation
+    /// gates. REST send and member routes keep using the launch route id.
+    pub async fn resolve_stable_group_id(&mut self) -> Result<(), AppError> {
+        let route = &self.config.group_id;
+        let detail = self
+            .request_json(Method::GET, &format!("/groups/{route}"), None)
+            .await?;
+        let confidentiality = detail
+            .pointer("/policy/confidentiality")
+            .and_then(Value::as_str);
+        if confidentiality != Some("signed_public") {
+            return Err(AppError::new(
+                "native space tools require a signed_public group",
+            ));
+        }
+        let state = self
+            .request_json(Method::GET, &format!("/groups/{route}/state"), None)
+            .await?;
+        let stable = state
+            .get("group_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::new("group state response is missing group_id"))?;
+        validate_hex_id("resolved group_id", stable, MAX_GROUP_ID_BYTES)?;
+        self.config.stable_group_id = stable.to_owned();
+        Ok(())
     }
 
     pub fn tools_list(&self) -> Value {
@@ -201,7 +246,7 @@ impl X0xTools {
                 .unwrap_or_default();
             let path = format!(
                 "/history?scope=group:{}&limit={HISTORY_PAGE_SIZE}{before_query}",
-                self.config.group_id
+                self.config.stable_group_id
             );
             let value = self.request_json(Method::GET, &path, None).await?;
             let page: ToolHistoryPage = serde_json::from_value(value).map_err(|error| {
@@ -247,7 +292,7 @@ impl X0xTools {
     pub fn server_instructions(&self) -> String {
         format!(
             "Native x0x space tools for managed agent {} owned by {} in space {}. No relay or Nostr transport is available.",
-            self.config.agent_id, self.config.owner_agent_id, self.config.group_id
+            self.config.agent_id, self.config.owner_agent_id, self.config.stable_group_id
         )
     }
 }
@@ -402,6 +447,12 @@ impl ToolHistoryRow {
             && self.provenance == "VerifiedEnvelope"
             && self.signed
     }
+
+    #[cfg(test)]
+    fn with_scope_group(mut self, group_id: &str) -> Self {
+        self.scope = format!("group:{group_id}");
+        self
+    }
 }
 
 #[derive(Serialize)]
@@ -449,7 +500,7 @@ fn derive_delegation(
     let Some(thread_parent) = request.thread_parent.as_deref() else {
         return Ok(None);
     };
-    if thread_parent != parent.msg_id || !parent.is_verified_inbound(&config.group_id) {
+    if thread_parent != parent.msg_id || !parent.is_verified_inbound(&config.stable_group_id) {
         return Ok(None);
     }
     let Some(author) = parent.author_agent.as_deref() else {
@@ -884,6 +935,39 @@ mod tests {
     }
 
     #[test]
+    fn delegation_gate_uses_stable_group_id_not_the_route_alias() {
+        const ROUTE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        const STABLE: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        let config = RuntimeConfig::for_test(PathBuf::from("/tmp/x0x"), AGENT_ID, OWNER_ID, ROUTE)
+            .with_stable_group_id(STABLE);
+        let root = "d".repeat(64);
+        let request = parse_send_arguments(json!({
+            "text": "delegate to X",
+            "mentions": ["e".repeat(64)],
+            "thread_root": root,
+            "thread_parent": root
+        }))
+        .expect("request");
+
+        let stable_parent =
+            tool_history_row(&root, OWNER_ID, AGENT_ID, false, None, None, None, None)
+                .with_scope_group(STABLE);
+        assert_eq!(
+            derive_delegation(&config, &request, &stable_parent).expect("stable parent"),
+            Some(AgentDelegation {
+                generation: 1,
+                root: root.clone()
+            })
+        );
+
+        let aliased_parent = stable_parent.with_scope_group(ROUTE);
+        assert_eq!(
+            derive_delegation(&config, &request, &aliased_parent).expect("alias must not verify"),
+            None
+        );
+    }
+
+    #[test]
     fn endpoint_resolution_rejects_non_loopback_and_invalid_token() {
         let directory = tempfile::tempdir().expect("temp dir");
         std::fs::write(directory.path().join("api.port"), "192.0.2.1:1234\n").expect("write port");
@@ -998,6 +1082,35 @@ mod tests {
             .expect("safe unmarked send");
         assert_eq!(sent["msg_id"], "f".repeat(64));
         server.join.join().expect("threaded server");
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_stable_id_for_history_and_route_id_for_members() {
+        const ROUTE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        const STABLE: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = spawn_resolve_and_members_server(ROUTE, STABLE);
+        write_endpoint(directory.path(), server.address, "resolve-token");
+        let mut tools = X0xTools::new(RuntimeConfig::for_test(
+            directory.path().to_path_buf(),
+            AGENT_ID,
+            OWNER_ID,
+            ROUTE,
+        ))
+        .expect("tools");
+        tools
+            .resolve_stable_group_id()
+            .await
+            .expect("resolve stable id");
+        assert_eq!(tools.config.stable_group_id(), STABLE);
+        assert_eq!(tools.config.group_id(), ROUTE);
+
+        let members = tools
+            .call_tool("space_members", json!({}))
+            .await
+            .expect("members call");
+        assert_eq!(members["member_count"], 2);
+        server.join.join().expect("resolve server");
     }
 
     #[tokio::test]
@@ -1161,6 +1274,51 @@ mod tests {
                 response.len(), response
             );
             stream.write_all(wire.as_bytes()).expect("write response");
+        });
+        FakeServer { address, join }
+    }
+
+    fn spawn_resolve_and_members_server(route: &str, stable: &str) -> FakeServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake x0xd");
+        let address = listener.local_addr().expect("fake address");
+        let route = route.to_owned();
+        let stable = stable.to_owned();
+        let join = thread::spawn(move || {
+            let (mut detail_stream, _) = listener.accept().expect("accept group detail");
+            detail_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("detail read timeout");
+            let detail_request = read_http_request(&mut detail_stream);
+            assert!(
+                detail_request.starts_with(&format!("GET /groups/{route} HTTP/1.1\r\n")),
+                "expected group detail for route id, got {detail_request}"
+            );
+            write_json_response(
+                &mut detail_stream,
+                &json!({"ok": true, "policy": {"confidentiality": "signed_public"}}),
+            );
+
+            let (mut state_stream, _) = listener.accept().expect("accept group state");
+            state_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("state read timeout");
+            let state_request = read_http_request(&mut state_stream);
+            assert!(
+                state_request.starts_with(&format!("GET /groups/{route}/state HTTP/1.1\r\n")),
+                "expected group state for route id, got {state_request}"
+            );
+            write_json_response(&mut state_stream, &json!({"ok": true, "group_id": stable}));
+
+            let (mut members_stream, _) = listener.accept().expect("accept members");
+            members_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("members read timeout");
+            let members_request = read_http_request(&mut members_stream);
+            assert!(
+                members_request.starts_with(&format!("GET /groups/{route}/members HTTP/1.1\r\n")),
+                "members must keep the launch route id, got {members_request}"
+            );
+            write_json_response(&mut members_stream, &json!({"ok": true, "member_count": 2}));
         });
         FakeServer { address, join }
     }

@@ -9,7 +9,8 @@ const MAX_MCP_FRAME_BYTES: usize = 256 * 1024;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = RuntimeConfig::from_env()?;
-    let tools = X0xTools::new(config)?;
+    let mut tools = X0xTools::new(config)?;
+    tools.resolve_stable_group_id().await?;
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut frame = Vec::new();
