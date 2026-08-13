@@ -360,6 +360,8 @@ export async function x0xSendDirectMessage(input: {
   agentId: X0xAgentId;
   /** Application payload bytes; base64-encoded on the wire. */
   payload: Uint8Array;
+  /** Stable sender-local identity for durable retry deduplication. */
+  logicalId?: string | null;
   /** Optional 64-hex canonical msg_id of the thread root. */
   threadRoot?: string | null;
   /** Optional 64-hex canonical msg_id of the direct parent. */
@@ -369,6 +371,7 @@ export async function x0xSendDirectMessage(input: {
     input: {
       agentId: input.agentId,
       payloadB64: bytesToBase64(input.payload),
+      logicalId: input.logicalId ?? null,
       threadRoot: input.threadRoot ?? null,
       threadParent: input.threadParent ?? null,
     },

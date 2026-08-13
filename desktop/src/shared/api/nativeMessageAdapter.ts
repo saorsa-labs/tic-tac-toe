@@ -55,6 +55,8 @@ export type ChannelMessageEnvelope = {
   clientId: string;
   /** Mentioned x0x AgentIds (64-hex), in send order. */
   mentions?: string[];
+  /** App-local idempotency markers reconstructed as UI `client` tags. */
+  markers?: string[];
 };
 
 // ─── Base64 helpers (payload is base64 on the x0xd wire) ─────────────────────
@@ -111,6 +113,7 @@ export function decodeChannelMessageEnvelope(
     mentions: Array.isArray(obj.mentions)
       ? (obj.mentions as string[])
       : undefined,
+    markers: Array.isArray(obj.markers) ? (obj.markers as string[]) : undefined,
   };
 }
 
@@ -164,6 +167,7 @@ function buildAdapterTags(input: {
   channelId: string;
   authorAgentId: string | null;
   mentions: string[] | undefined;
+  markers: string[] | undefined;
   threadRoot: string | null;
   threadParent: string | null;
 }): string[][] {
@@ -181,6 +185,10 @@ function buildAdapterTags(input: {
         tags.push(["p", agentId]);
       }
     }
+  }
+
+  for (const marker of input.markers ?? []) {
+    if (marker.trim()) tags.push(["client", marker.trim()]);
   }
 
   // Thread ancestry — verbatim server fields, never inferred. A root row has
@@ -234,6 +242,7 @@ export function liveMessageToRelayEvent(
       channelId,
       authorAgentId: msg.origin,
       mentions: envelope.mentions,
+      markers: envelope.markers,
       threadRoot: msg.threadRoot ?? null,
       threadParent: msg.threadParent ?? null,
     }),
@@ -282,6 +291,7 @@ export function liveDirectMessageToRelayEvent(
       channelId,
       authorAgentId: msg.sender,
       mentions: envelope.mentions,
+      markers: envelope.markers,
       threadRoot: msg.threadRoot ?? null,
       threadParent: msg.threadParent ?? null,
     }),
@@ -346,6 +356,7 @@ export function historyRowToRelayEvent(
       channelId,
       authorAgentId: row.authorAgent,
       mentions: envelope.mentions,
+      markers: envelope.markers,
       threadRoot: row.threadRoot,
       threadParent: row.threadParent,
     }),

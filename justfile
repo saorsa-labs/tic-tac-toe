@@ -17,9 +17,9 @@ desktop-check:
 desktop-smoke:
     cd desktop && corepack pnpm build:e2e && corepack pnpm exec playwright test --project=smoke
 
-# Check the five imported Rust crates against the pruned workspace
+# Check the imported Rust crates and native managed-agent bridges.
 crates-check:
-    cargo check -p buzz-core -p buzz-persona -p buzz-sdk -p buzz-agent -p buzz-media
+    cargo check -p buzz-core -p buzz-persona -p buzz-sdk -p buzz-agent -p buzz-media -p buzz-acp -p buzz-x0x-mcp
 
 # Reject compatibility transports and retired bridge configuration in the packaged app.
 # The invariant test verifies the gate's Rust/Nostr detection logic (always green);
@@ -29,7 +29,7 @@ no-relay-gate:
     node --test scripts/portable-package-contract.test.mjs
     node scripts/no-relay-gate.mjs
 
-# Stage x0xd for the active target triple (Tauri externalBin naming).
+# Stage native managed-agent binaries and x0xd for the active target triple.
 stage-sidecars:
     scripts/stage-sidecars.sh
 

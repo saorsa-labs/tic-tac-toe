@@ -18,10 +18,13 @@ pub struct AppState {
     #[allow(dead_code)]
     // read by x0x_get_active_group_id (native group command, landing alongside)
     pub active_group_id: Mutex<Option<String>>,
-    /// Set during backend setup when managed agents are eligible for launch
-    /// restore. `apply_workspace` consumes it after installing the workspace
-    /// relay and identity, so agents never start against the fallback relay.
-    pub managed_agent_restore_pending: AtomicBool,
+    /// Session-long permission for proactive managed-agent startup.
+    ///
+    /// Fail-closed until backend setup has completed the identity-recovery and
+    /// repository gates. Unlike the legacy `*_pending` flag this is not
+    /// consumed by the first community reconciliation: later community-list
+    /// refreshes in the same safe session must remain retryable.
+    pub managed_agent_auto_restore_allowed: AtomicBool,
     /// Whether desktop may repair managed-agent kind:0 profiles from its local
     /// records. Disabled by the agent-managed profiles experiment so an agent's
     /// own profile updates are not overwritten on start or restore.
@@ -122,7 +125,7 @@ pub fn try_build_app_state() -> reqwest::Result<AppState> {
         http_client: http_client.clone(),
         x0x_client: crate::x0x_client::X0xClient::new(http_client),
         active_group_id: Mutex::new(None),
-        managed_agent_restore_pending: AtomicBool::new(false),
+        managed_agent_auto_restore_allowed: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),

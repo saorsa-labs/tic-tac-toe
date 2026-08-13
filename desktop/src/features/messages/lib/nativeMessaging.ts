@@ -27,6 +27,7 @@ import type {
 } from "@/features/messages/lib/channelWindowStore";
 import { getResolvedHistoryScope } from "@/features/messages/lib/nativeHistoryScopeStore";
 import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
+import { resolveNativeMentionAgentIds } from "@/shared/api/managedAgentMentionIdentity";
 
 const NATIVE_HISTORY_PAGE_SIZE = 200;
 const MAX_NATIVE_HISTORY_PAGES = 500;
@@ -182,25 +183,33 @@ export function nativeDmRecipientAgentId(
  * `/history` cold-loads the durable `dm:<peer>` scope — `/ws/direct` does not
  * echo the sender's own outbound.
  */
-export async function sendNativeDirectMessage(input: {
-  channel: Channel;
-  content: string;
-  identity: Identity;
-  mentionPubkeys?: string[];
-  threadRoot?: string | null;
-  threadParent?: string | null;
-}): Promise<{ clientId: string; createdAt: number }> {
+export async function sendNativeDirectMessage(
+  input: {
+    channel: Channel;
+    content: string;
+    identity: Identity;
+    mentionPubkeys?: string[];
+    threadRoot?: string | null;
+    threadParent?: string | null;
+  },
+  resolveMentionAgentIds = resolveNativeMentionAgentIds,
+): Promise<{
+  clientId: string;
+  createdAt: number;
+}> {
   const recipient = nativeDmRecipientAgentId(
     input.channel,
     input.identity.agentId,
   );
+  const mentionAgentIds = await resolveMentionAgentIds(input.mentionPubkeys);
   const native = buildChannelMessagePayload({
     text: input.content.trim(),
-    mentions: input.mentionPubkeys,
+    mentions: mentionAgentIds,
   });
   await x0xSendDirectMessage({
     agentId: recipient,
     payload: native.payload,
+    logicalId: native.clientId,
     threadRoot: input.threadRoot ?? null,
     threadParent: input.threadParent ?? null,
   });
@@ -208,18 +217,22 @@ export async function sendNativeDirectMessage(input: {
 }
 
 /** Send one native durable message and return its optimistic timeline row. */
-export async function sendNativeMessage(input: {
-  channel: Channel;
-  content: string;
-  identity: Identity;
-  mentionPubkeys?: string[];
-  threadRoot?: string | null;
-  threadParent?: string | null;
-}): Promise<RelayEvent> {
+export async function sendNativeMessage(
+  input: {
+    channel: Channel;
+    content: string;
+    identity: Identity;
+    mentionPubkeys?: string[];
+    threadRoot?: string | null;
+    threadParent?: string | null;
+  },
+  resolveMentionAgentIds = resolveNativeMentionAgentIds,
+): Promise<RelayEvent> {
   const content = input.content.trim();
+  const mentionAgentIds = await resolveMentionAgentIds(input.mentionPubkeys);
   const native = buildChannelMessagePayload({
     text: content,
-    mentions: input.mentionPubkeys,
+    mentions: mentionAgentIds,
   });
 
   let canonicalId: string | null = null;
@@ -231,6 +244,7 @@ export async function sendNativeMessage(input: {
     await x0xSendDirectMessage({
       agentId: recipient,
       payload: native.payload,
+      logicalId: native.clientId,
       threadRoot: input.threadRoot ?? null,
       threadParent: input.threadParent ?? null,
     });
@@ -248,7 +262,7 @@ export async function sendNativeMessage(input: {
     ["h", input.channel.id],
     ["p", input.identity.agentId],
   ];
-  for (const agentId of input.mentionPubkeys ?? []) {
+  for (const agentId of mentionAgentIds) {
     if (agentId !== input.identity.agentId) tags.push(["p", agentId]);
   }
   if (input.threadRoot) {

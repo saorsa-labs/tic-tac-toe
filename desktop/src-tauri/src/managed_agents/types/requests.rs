@@ -10,6 +10,17 @@ use super::{
     RespondTo,
 };
 
+/// Renderer-to-backend request for one exact child-authored mention handoff.
+/// The backend treats these as identifiers only and re-reads the signed owner
+/// history row; no decoded or synthetic message body crosses this boundary.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentMentionWakeRequest {
+    pub target_record_pubkey: String,
+    pub group_id: String,
+    pub msg_id: String,
+}
+
 /// The NIP-AP behavioral group as one grouped request field.
 ///
 /// Grouped (not flat) because `update_persona` has legacy callers that don't

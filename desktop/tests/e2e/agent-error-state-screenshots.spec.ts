@@ -38,6 +38,16 @@ const GENERIC_ERROR_AGENT = {
   lastErrorCode: null,
 };
 
+const RECOVERABLE_PARALLELISM_AGENT = {
+  pubkey: TEST_IDENTITIES.charlie.pubkey,
+  name: "Corrected Native Agent",
+  personaId: "custom:corrected-native-agent",
+  status: "stopped" as const,
+  lastError:
+    "native x0x ACP supports exactly one worker; set agent parallelism to 1 (stored value is 24)",
+  lastErrorCode: null,
+};
+
 async function gotoAgentsView(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("open-agents-view")).toBeVisible({
@@ -136,5 +146,60 @@ test.describe("agent error state screenshots", () => {
     await section.screenshot({
       path: `${SHOTS}/03-agents-section-both-errors.png`,
     });
+  });
+
+  test("native workspace: corrected parallelism exposes Start and clears the stale error", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [RECOVERABLE_PARALLELISM_AGENT],
+      personas: [
+        {
+          id: RECOVERABLE_PARALLELISM_AGENT.personaId,
+          displayName: RECOVERABLE_PARALLELISM_AGENT.name,
+          systemPrompt: "You are a corrected native agent.",
+        },
+      ],
+    });
+
+    await gotoAgentsView(page);
+
+    const startButton = page.getByTestId(
+      `agent-runtime-start-${RECOVERABLE_PARALLELISM_AGENT.pubkey}`,
+    );
+    await expect(startButton).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.getByTestId(
+        `agent-runtime-error-${RECOVERABLE_PARALLELISM_AGENT.pubkey}`,
+      ),
+    ).toHaveCount(0);
+
+    await startButton.click();
+
+    await expect(
+      page.getByTestId(
+        `agent-runtime-active-${RECOVERABLE_PARALLELISM_AGENT.pubkey}`,
+      ),
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate((pubkey) => {
+          const commands =
+            (
+              window as Window & {
+                __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                  command: string;
+                  payload: { pubkey?: string };
+                }>;
+              }
+            ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+          return commands.filter(
+            (entry) =>
+              entry.command === "start_managed_agent" &&
+              entry.payload.pubkey === pubkey,
+          ).length;
+        }, RECOVERABLE_PARALLELISM_AGENT.pubkey),
+      )
+      .toBe(1);
   });
 });

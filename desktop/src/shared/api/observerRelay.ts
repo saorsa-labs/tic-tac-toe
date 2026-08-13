@@ -24,12 +24,19 @@ export type { NativeObserverFrame };
  * Returns `null` when no child is provisioned (the agent predates native
  * provisioning or the child failed to come up).
  */
-export async function resolveChildAgentId(
+export async function getManagedAgentNativeIdentity(
   agentPubkey: string,
 ): Promise<string | null> {
   return invokeTauri<string | null>("get_managed_agent_native_identity", {
     pubkey: agentPubkey,
   });
+}
+
+/** Backwards-compatible observer-control name for the native identity lookup. */
+export async function resolveChildAgentId(
+  agentPubkey: string,
+): Promise<string | null> {
+  return getManagedAgentNativeIdentity(agentPubkey);
 }
 
 /**

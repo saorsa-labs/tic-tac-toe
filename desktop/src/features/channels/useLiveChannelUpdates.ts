@@ -20,6 +20,10 @@ import {
   liveMessageToRelayEvent,
 } from "@/shared/api/nativeMessageAdapter";
 import {
+  type ManagedMentionWakeDependencies,
+  wakeManagedAgentsForStructuredMention,
+} from "@/shared/api/managedAgentMentionIdentity";
+import {
   subscribeX0xLive,
   type X0xLiveSubscription,
   type X0xScope,
@@ -97,6 +101,27 @@ export function isChannelUnreadTriggerKind(kind: number, isDmChannel: boolean) {
   return isDmChannel
     ? isDmNotifiableKind(kind)
     : UNREAD_TRIGGER_KINDS.has(kind);
+}
+
+/**
+ * Route one live native event into managed-child collaboration wakeup.
+ * Adapter `p` tags contain the signed envelope's explicit child AgentIds; the
+ * author tag is excluded here before the identity router does its stricter
+ * owned-child and stopped-local checks.
+ */
+export function wakeManagedAgentMentionFromLiveEvent(
+  event: RelayEvent,
+  dependencies?: ManagedMentionWakeDependencies,
+): Promise<string[]> {
+  const hasStructuredMention = event.tags.some(
+    (tag) =>
+      tag[0] === "p" &&
+      typeof tag[1] === "string" &&
+      tag[1].toLowerCase() !== event.pubkey.toLowerCase(),
+  );
+  return hasStructuredMention
+    ? wakeManagedAgentsForStructuredMention(event, dependencies)
+    : Promise.resolve([]);
 }
 
 export function withChannelTagFallback(
@@ -313,6 +338,14 @@ export function useLiveChannelUpdates(
     const isThreadedReply = isThreadReply(event.tags);
 
     if (isExternalTriggerEvent) {
+      void wakeManagedAgentMentionFromLiveEvent(event).catch((error) => {
+        console.error(
+          "Failed to wake managed agent from child-authored mention",
+          event.id,
+          error,
+        );
+      });
+
       const shouldNotify = shouldNotifyForEvent(
         event,
         normalizedCurrentAgentId,

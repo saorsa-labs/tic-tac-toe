@@ -77,7 +77,7 @@ type MockManagedAgentSeed = {
 
 type MockManagedAgentRuntimeSeed = {
   pubkey: string;
-  relayUrl: string;
+  groupId: string;
   lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
 };
 
@@ -717,7 +717,7 @@ type MockManagedAgent = RawManagedAgent & {
 // pair-scoped lifecycle commands.
 type MockManagedAgentRuntimeRow = {
   pubkey: string;
-  relayUrl: string;
+  groupId: string;
   localSetup: boolean;
   lifecycle:
     | "starting"
@@ -1933,7 +1933,7 @@ function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
     (seed) => ({
       pubkey: seed.pubkey,
-      relayUrl: seed.relayUrl,
+      groupId: seed.groupId,
       localSetup: true,
       lifecycle: seed.lifecycle ?? "ready",
       pid: seed.lifecycle === "stopped" ? null : 43000,
@@ -7392,17 +7392,16 @@ function getMockManagedAgent(pubkey: string): MockManagedAgent {
 
 function upsertMockManagedAgentRuntime(
   pubkey: string,
-  relayUrl: string,
+  groupId: string,
   lifecycle: MockManagedAgentRuntimeRow["lifecycle"],
 ): MockManagedAgentRuntimeRow {
   let row = mockManagedAgentRuntimes.find(
-    (candidate) =>
-      candidate.pubkey === pubkey && candidate.relayUrl === relayUrl,
+    (candidate) => candidate.pubkey === pubkey && candidate.groupId === groupId,
   );
   if (!row) {
     row = {
       pubkey,
-      relayUrl,
+      groupId,
       localSetup: true,
       lifecycle,
       pid: null,
@@ -7421,10 +7420,10 @@ function upsertMockManagedAgentRuntime(
 }
 
 // Pair-scoped lifecycle, mirroring `runtime_commands.rs`: the command touches
-// exactly one agent+relay runtime and rejects non-local agents.
+// exactly one agent+native-group runtime and rejects non-local agents.
 function handleManagedAgentRuntimeAction(
   action: "start" | "stop" | "restart",
-  args: { pubkey: string; relayUrl: string },
+  args: { pubkey: string; groupId: string },
 ): MockManagedAgentRuntimeRow {
   const agent = getMockManagedAgent(args.pubkey);
   if (agent.backend.type !== "local") {
@@ -7433,7 +7432,7 @@ function handleManagedAgentRuntimeAction(
   return {
     ...upsertMockManagedAgentRuntime(
       args.pubkey,
-      args.relayUrl,
+      args.groupId,
       action === "stop" ? "stopped" : "ready",
     ),
   };
@@ -8895,31 +8894,104 @@ export function maybeInstallE2eTauriMocks() {
   });
   const listMockNativeGroups = () => {
     const raw = window.localStorage.getItem("buzz-communities");
-    if (!raw) return [];
+    const groups: Array<{
+      groupId: string;
+      name: string;
+      description: string;
+      memberCount: number;
+    }> = [];
     try {
-      const communities = JSON.parse(raw) as Array<{
+      const communities = JSON.parse(raw ?? "[]") as Array<{
         id?: unknown;
         name?: unknown;
       }>;
-      return communities.flatMap((community) => {
-        if (
-          typeof community.id !== "string" ||
-          typeof community.name !== "string"
-        ) {
-          return [];
-        }
-        return [
-          {
-            groupId: community.id,
-            name: community.name,
-            description: "",
-            memberCount: mockRelayMembers.length,
-          },
-        ];
-      });
+      groups.push(
+        ...communities.flatMap((community) => {
+          if (
+            typeof community.id !== "string" ||
+            typeof community.name !== "string"
+          ) {
+            return [];
+          }
+          return [
+            {
+              groupId: community.id,
+              name: community.name,
+              description: "",
+              memberCount: mockRelayMembers.length,
+            },
+          ];
+        }),
+      );
     } catch {
-      return [];
+      // A malformed local community seed should not hide the independent
+      // native channel fixtures below.
     }
+
+    const general = mockChannels.find(
+      (channel) => channel.name === STARTER_GENERAL_CHANNEL_NAME,
+    );
+    if (general) {
+      groups.push({
+        groupId: general.id,
+        name: general.name,
+        description: general.description,
+        memberCount: general.members.length,
+      });
+    }
+    return [...new Map(groups.map((group) => [group.groupId, group])).values()];
+  };
+  const listMockNativeGroupMembers = (groupId: string) => {
+    const channel = mockChannels.find((candidate) => candidate.id === groupId);
+    if (channel) {
+      return channel.members.map((member) => ({
+        agentId: member.pubkey,
+        userId: null,
+        role:
+          member.role === "owner" || member.role === "admin"
+            ? member.role
+            : "member",
+        state: "active",
+        displayName: member.display_name,
+        joinedAtMs: Date.parse(member.joined_at),
+        updatedAtMs: Date.parse(member.joined_at),
+        addedBy: null,
+        removedBy: null,
+      }));
+    }
+
+    return mockRelayMembers.map((member) => ({
+      agentId: member.pubkey,
+      userId: null,
+      role: member.role,
+      state: "active",
+      displayName: mockDisplayNames.get(member.pubkey) ?? null,
+      joinedAtMs: Date.parse(member.created_at),
+      updatedAtMs: Date.parse(member.created_at),
+      addedBy: member.added_by,
+      removedBy: null,
+    }));
+  };
+  const getMockNativeGroup = (groupId: string) => {
+    const group = listMockNativeGroups().find(
+      (candidate) => candidate.groupId === groupId,
+    );
+    if (!group) {
+      throw new Error(`Mock native group ${groupId} not found.`);
+    }
+    const members = listMockNativeGroupMembers(groupId);
+    return {
+      ...group,
+      creator: members[0]?.agentId ?? MOCK_IDENTITY_PUBKEY,
+      createdAtMs: Date.now() - 86_400_000,
+      updatedAtMs: Date.now(),
+      chatTopic: `group:${groupId}:chat`,
+      metadataTopic: `group:${groupId}:metadata`,
+      policyRevision: 1,
+      rosterRevision: 1,
+      members,
+      confidentiality: "signed_public",
+    };
   };
   let activeNativeGroupId =
     window.localStorage.getItem("buzz-active-community-id") ?? "";
@@ -8960,6 +9032,52 @@ export function maybeInstallE2eTauriMocks() {
         return meshNodeStatus("off", null);
       case "x0x_list_groups":
         return { groups: listMockNativeGroups() };
+      case "x0x_get_group": {
+        const groupId = (payload as { groupId?: unknown } | null)?.groupId;
+        if (typeof groupId !== "string") {
+          throw new Error("Mock native group detail requires a groupId.");
+        }
+        return getMockNativeGroup(groupId);
+      }
+      case "x0x_get_group_members": {
+        const groupId = (payload as { groupId?: unknown } | null)?.groupId;
+        if (typeof groupId !== "string") {
+          throw new Error("Mock native group roster requires a groupId.");
+        }
+        return { members: listMockNativeGroupMembers(groupId) };
+      }
+      case "x0x_get_presence": {
+        const agentIds =
+          (payload as { agentIds?: unknown } | null)?.agentIds ?? [];
+        if (!Array.isArray(agentIds)) return {};
+        return Object.fromEntries(
+          agentIds.flatMap((agentId) =>
+            typeof agentId === "string" ? [[agentId, "offline"]] : [],
+          ),
+        );
+      }
+      case "x0x_list_contacts":
+        return (activeConfig?.mock?.searchProfiles ?? []).map((profile) => ({
+          agentId: profile.pubkey,
+          trustLevel: "known",
+          label: profile.displayName ?? null,
+          addedAt: Date.now() - 60_000,
+          lastSeen: null,
+        }));
+      case "x0x_subscribe_live": {
+        const scope = (payload as { scope?: unknown } | null)?.scope;
+        return {
+          streamId: `mock-live-${String(scope ?? "unknown")}`,
+          historyScope: typeof scope === "string" ? scope : undefined,
+        };
+      }
+      case "x0x_close_live":
+      case "x0x_close_all_live":
+        return;
+      case "x0x_history_list":
+        return { rows: [], has_more: false };
+      case "x0x_send_group_message":
+        return "6".repeat(64);
       case "x0x_get_active_group_id":
         return activeNativeGroupId;
       case "x0x_set_active_group_id": {
@@ -9896,20 +10014,20 @@ export function maybeInstallE2eTauriMocks() {
       case "start_managed_agent_runtime":
         return handleManagedAgentRuntimeAction(
           "start",
-          payload as { pubkey: string; relayUrl: string },
+          payload as { pubkey: string; groupId: string },
         );
       case "stop_managed_agent_runtime":
         return handleManagedAgentRuntimeAction(
           "stop",
-          payload as { pubkey: string; relayUrl: string },
+          payload as { pubkey: string; groupId: string },
         );
       case "restart_managed_agent_runtime":
         return handleManagedAgentRuntimeAction(
           "restart",
-          payload as { pubkey: string; relayUrl: string },
+          payload as { pubkey: string; groupId: string },
         );
       case "reconcile_managed_agent_runtimes":
-        // Post-create bootstrap reconcile: no new pairs in the mock world.
+        // Native membership-gated reconcile: no new pairs in the mock world.
         return [];
       case "set_agent_managed_profiles":
         return undefined;
@@ -10243,7 +10361,11 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "send_managed_agent_channel_message":
         return handleSendManagedAgentChannelMessage(
-          payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
+          (
+            payload as {
+              input: Parameters<typeof handleSendManagedAgentChannelMessage>[0];
+            }
+          ).input,
           activeConfig,
         );
       case "delete_message":

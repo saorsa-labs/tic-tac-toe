@@ -101,6 +101,26 @@ test("live and history share the canonical msgId; localKey reconciles both", () 
   assert.equal(history.localKey, CLIENT_ID);
 });
 
+test("native envelope markers reconstruct the Welcome choreography client tag", () => {
+  const markedPayload = btoa(
+    JSON.stringify({
+      text: "welcome",
+      clientId: CLIENT_ID,
+      createdAt: 1_700_000_000_000,
+      markers: ["buzz-welcome-kickoff.opener.v1"],
+    }),
+  );
+  const event = historyRowToRelayEvent(
+    historyRow({ payload: markedPayload }),
+    CHANNEL_ID,
+  );
+
+  assert.deepEqual(
+    event.tags.find((tag) => tag[0] === "client"),
+    ["client", "buzz-welcome-kickoff.opener.v1"],
+  );
+});
+
 test("an optimistic clientId row is reconciled by a live msgId row via localKey", () => {
   // Optimistic send: id = clientId (no msgId yet), localKey = clientId.
   const optimistic = {

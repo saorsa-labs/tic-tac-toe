@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage the x0xd sidecar for Tauri's active target triple.
+# Stage native managed-agent sidecars and x0xd for Tauri's active target triple.
 
 set -euo pipefail
 
@@ -33,10 +33,29 @@ case "$TRIPLE" in
 esac
 
 BINARY_DIR="$REPO_ROOT/desktop/src-tauri/binaries"
+mkdir -p "$BINARY_DIR"
+
+printf '[stage-sidecars] building native agent sidecars (%s) from %s\n' \
+  "$PROFILE" "$REPO_ROOT" >&2
+(cd "$REPO_ROOT" && cargo build --profile "$PROFILE" --locked \
+  --bin buzz-acp --bin buzz-agent --bin buzz-x0x-mcp)
+
+for name in buzz-acp buzz-agent buzz-x0x-mcp; do
+  source_path="$REPO_ROOT/target/$SUB/$name$EXT"
+  destination="$BINARY_DIR/$name-$TRIPLE$EXT"
+  if [[ ! -x "$source_path" ]]; then
+    echo "FATAL: built current-source sidecar not found at $source_path" >&2
+    exit 3
+  fi
+  cp "$source_path" "$destination"
+  chmod +x "$destination"
+  printf '[stage-sidecars] staged %s\n' "$destination" >&2
+done
+
 validate_managed_agent_sidecars "$BINARY_DIR" "$TRIPLE"
 
 printf '[stage-sidecars] building x0xd (%s) from %s\n' "$PROFILE" "$X0X_DIR" >&2
-(cd "$X0X_DIR" && cargo build --profile "$PROFILE" --bin x0xd)
+(cd "$X0X_DIR" && cargo build --profile "$PROFILE" --locked --bin x0xd)
 
 SOURCE="$X0X_DIR/target/$SUB/x0xd$EXT"
 DEST="$BINARY_DIR/x0xd-$TRIPLE$EXT"
@@ -45,7 +64,6 @@ if [[ ! -x "$SOURCE" ]]; then
   exit 3
 fi
 
-mkdir -p "$(dirname "$DEST")"
 cp "$SOURCE" "$DEST"
 chmod +x "$DEST"
 printf '[stage-sidecars] staged %s\n' "$DEST" >&2

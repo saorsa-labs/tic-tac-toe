@@ -128,6 +128,16 @@ export default defineConfig({
       },
     },
     {
+      name: "native-mentions",
+      // Focused native composer contract: unlike the legacy Buzz mention
+      // cases in this file, these titles use only the x0x mock boundary.
+      testMatch: ["**/mentions.spec.ts"],
+      grep: /native mention policy:/,
+      use: {
+        ...devices["Desktop Chrome"],
+      },
+    },
+    {
       name: "integration",
       testMatch: [
         "**/agents.spec.ts",

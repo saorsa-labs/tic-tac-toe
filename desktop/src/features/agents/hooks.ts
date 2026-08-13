@@ -608,7 +608,7 @@ export function useAttachManagedAgentToChannelMutation(
         upsertCachedChannelMember(current, effectiveChannelId, {
           membershipAdded: result.membershipAdded,
           name: result.agent.name,
-          pubkey: result.agent.pubkey,
+          pubkey: result.memberAgentId,
         }),
       );
     },

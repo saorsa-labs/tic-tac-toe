@@ -442,23 +442,36 @@ fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
     }
 }
 
-fn command_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
-    if let Ok(current_dir) = std::env::current_dir() {
-        dirs.extend(profile_target_dirs(&current_dir));
+fn command_search_dirs_for(
+    workspace_root: &Path,
+    current_dir: Option<&Path>,
+    exe_parent: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let prefer_bundled = exe_parent
+        .as_ref()
+        .is_some_and(|parent| !parent.starts_with(workspace_root));
+    let bundled_parent = exe_parent.clone().filter(|_| prefer_bundled);
+    let mut dirs: Vec<_> = bundled_parent.into_iter().collect();
+    dirs.extend(profile_target_dirs(workspace_root));
+    if let Some(current_dir) = current_dir {
+        dirs.extend(profile_target_dirs(current_dir));
     }
-
-    dirs.extend(
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf)),
-    );
+    dirs.extend(exe_parent.filter(|_| !prefer_bundled));
     dirs.into_iter().fold(Vec::new(), |mut unique, dir| {
         if !unique.contains(&dir) {
             unique.push(dir);
         }
         unique
     })
+}
+
+fn command_search_dirs() -> Vec<PathBuf> {
+    let workspace_root = workspace_root_dir();
+    let current_dir = std::env::current_dir().ok();
+    let parent = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    command_search_dirs_for(&workspace_root, current_dir.as_deref(), parent)
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -487,8 +500,15 @@ fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
         return is_executable_file(&path).then_some(path);
     }
 
+    resolve_command_in_dirs(command, command_search_dirs())
+}
+
+fn resolve_command_in_dirs(
+    command: &str,
+    search_dirs: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
     let file_name = executable_basename(command);
-    command_search_dirs()
+    search_dirs
         .into_iter()
         .map(|dir| dir.join(&file_name))
         .find(|candidate| is_executable_file(candidate))
@@ -503,8 +523,7 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 }
 
 /// Resolve a command to an absolute path, caching results for the app lifetime.
-/// The cache eliminates redundant login-shell spawns when multiple agents share
-/// the same binaries (e.g. `npx`, `uvx`).
+/// The cache eliminates redundant login-shell spawns for shared binaries.
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
@@ -531,17 +550,15 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
     result
 }
 
-/// Clear the resolve_command cache so that newly-installed binaries are detected.
+/// Clear the command cache so newly-installed binaries are detected.
 pub fn clear_resolve_cache() {
     let mut guard = resolve_cache().lock().unwrap_or_else(|e| e.into_inner());
     guard.clear();
-    // Also invalidate the adapter-availability cache so a freshly-installed
-    // adapter is reflected the next time the summary builder checks the badge.
+    // Refresh adapter-availability badges after an install too.
     clear_adapter_availability_cache();
 }
 
 // ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
-//
 // `build_managed_agent_summary` needs to compare the spawn-time adapter
 // availability against the *current* availability without triggering a live
 // `probe_codex_acp_major_version` subprocess on every poll cycle.  This cache

@@ -171,6 +171,7 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // 30177 projection to its slim shape.
     backfill_standalone_agents(app);
     detach_directory_backed_teams(app);
+    reconcile_native_agent_parallelism(app);
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
@@ -1361,6 +1362,10 @@ mod backfill;
 pub use backfill::backfill_standalone_agents;
 mod detach;
 pub use detach::detach_directory_backed_teams;
+mod native_parallelism;
+use native_parallelism::reconcile_native_agent_parallelism;
+#[cfg(test)]
+use native_parallelism::reconcile_native_agent_parallelism_in_file;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]

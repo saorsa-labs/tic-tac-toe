@@ -1,5 +1,67 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[test]
+fn native_launch_exports_actual_child_identity_and_group() {
+    let record_pubkey = "aa".repeat(32);
+    let child_agent_id = "bb".repeat(32);
+    let context = crate::managed_agents::ManagedAgentLaunchContext {
+        child_agent_id: child_agent_id.clone(),
+        owner_agent_id: "cc".repeat(32),
+        child_data_dir: std::path::PathBuf::from("/tmp/x0x-managed-guide"),
+        group_id: "welcome-group".to_string(),
+        effective_respond_to_allowlist: Vec::new(),
+    };
+    let mut command = std::process::Command::new("buzz-acp");
+
+    super::configure_native_agent_env(&mut command, &context);
+
+    let env = command
+        .get_envs()
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_ne!(record_pubkey, child_agent_id);
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("X0X_AGENT_ID")),
+        Some(&std::ffi::OsStr::new(&child_agent_id))
+    );
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("X0X_GROUP_ID")),
+        Some(&std::ffi::OsStr::new("welcome-group"))
+    );
+    assert_ne!(
+        env.get(std::ffi::OsStr::new("X0X_AGENT_ID")),
+        Some(&std::ffi::OsStr::new(&record_pubkey))
+    );
+}
+
+#[test]
+fn respond_to_env_exports_translated_child_id_not_legacy_record_key() {
+    let legacy_guide_pubkey = "dd".repeat(32);
+    let guide_child_agent_id = "ee".repeat(32);
+    let record = fixture(RespondTo::Allowlist, vec![legacy_guide_pubkey.clone()]);
+    let context = crate::managed_agents::ManagedAgentLaunchContext {
+        child_agent_id: "bb".repeat(32),
+        owner_agent_id: "cc".repeat(32),
+        child_data_dir: std::path::PathBuf::from("/tmp/x0x-managed-player"),
+        group_id: "welcome-group".to_string(),
+        effective_respond_to_allowlist: vec![guide_child_agent_id.clone()],
+    };
+    let mut command = std::process::Command::new("buzz-acp");
+
+    super::configure_respond_to_env(&mut command, &record, &context).unwrap();
+
+    let allowlist = command
+        .get_envs()
+        .find_map(|(key, value)| {
+            (key == std::ffi::OsStr::new("BUZZ_ACP_RESPOND_TO_ALLOWLIST"))
+                .then_some(value)
+                .flatten()
+        })
+        .and_then(std::ffi::OsStr::to_str);
+    assert_eq!(allowlist, Some(guide_child_agent_id.as_str()));
+    assert_ne!(allowlist, Some(legacy_guide_pubkey.as_str()));
+}
+
 // ── buffer_contains_identifier tests ────────────────────────────────────
 
 #[test]
@@ -172,7 +234,7 @@ fn fixture(respond_to: RespondTo, allowlist: Vec<String>) -> ManagedAgentRecord 
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
     let rec = fixture(RespondTo::OwnerOnly, vec![]);
-    let (set, remove) = build_respond_to_env(&rec).unwrap();
+    let (set, remove) = build_respond_to_env(&rec, &rec.respond_to_allowlist).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
@@ -189,7 +251,7 @@ fn build_env_allowlist_sets_both_envs_and_joins() {
     let a = "a".repeat(64);
     let b = "b".repeat(64);
     let rec = fixture(RespondTo::Allowlist, vec![a.clone(), b.clone()]);
-    let (set, _remove) = build_respond_to_env(&rec).unwrap();
+    let (set, _remove) = build_respond_to_env(&rec, &rec.respond_to_allowlist).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
@@ -206,7 +268,7 @@ fn build_env_allowlist_sets_both_envs_and_joins() {
 #[test]
 fn build_env_anyone_omits_allowlist_var() {
     let rec = fixture(RespondTo::Anyone, vec![]);
-    let (set, remove) = build_respond_to_env(&rec).unwrap();
+    let (set, remove) = build_respond_to_env(&rec, &rec.respond_to_allowlist).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
@@ -219,13 +281,13 @@ fn build_env_anyone_omits_allowlist_var() {
 #[test]
 fn build_env_rejects_corrupted_allowlist() {
     let rec = fixture(RespondTo::Allowlist, vec!["not-hex".into()]);
-    assert!(build_respond_to_env(&rec).is_err());
+    assert!(build_respond_to_env(&rec, &rec.respond_to_allowlist).is_err());
 }
 
 #[test]
 fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
     let rec = fixture(RespondTo::Allowlist, vec![]);
-    let err = build_respond_to_env(&rec).unwrap_err();
+    let err = build_respond_to_env(&rec, &rec.respond_to_allowlist).unwrap_err();
     assert!(err.contains("at least one pubkey"));
 }
 
@@ -918,4 +980,34 @@ fn invalid_pubkey_resolves_no_pair_key() {
     // Key-less records (keys minted on first start) cannot form a pair key;
     // the summary must fall back to the stopped/legacy-pid path, not panic.
     assert!(super::resolve_workspace_pair_key("not-a-key", "group-a").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn immediate_successful_harness_exit_is_a_persisted_start_failure() {
+    let child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn short-lived harness");
+    let mut process = crate::managed_agents::ManagedAgentProcess {
+        child,
+        log_path: std::path::PathBuf::from("agent.log"),
+        spawn_config_hash: 0,
+        setup_mode: false,
+        adapter_availability: None,
+        start_nonce: "test-start".to_string(),
+        lifecycle_path: None,
+    };
+    let mut record = fixture(RespondTo::Anyone, Vec::new());
+    record.name = "Guide".to_string();
+    record.last_started_at = Some("started".to_string());
+
+    let error = super::stabilize_started_agent_process(&mut process, &mut record)
+        .expect_err("an immediately-exited ACP harness must fail startup");
+
+    assert_eq!(record.last_exit_code, Some(0));
+    assert!(record.last_stopped_at.is_some());
+    assert_eq!(record.last_error.as_deref(), Some(error.as_str()));
+    assert!(error.contains("Guide"));
+    assert!(error.contains("exited immediately with code 0"));
 }

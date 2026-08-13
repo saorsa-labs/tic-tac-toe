@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 
 #[test]
@@ -235,12 +237,17 @@ fn send_direct_body_omits_thread_fields_when_none() {
     let body = SendDirectBody {
         agent_id: &agent_id,
         payload: "aGk=",
+        logical_id: None,
         thread_root: None,
         thread_parent: None,
     };
     let v: serde_json::Value = serde_json::to_value(&body).expect("serialize direct body");
     assert_eq!(v["agent_id"], "ab".repeat(32));
     assert_eq!(v["payload"], "aGk=");
+    assert!(
+        v.get("logical_id").is_none(),
+        "logical_id must be absent when None: {v}"
+    );
     assert!(
         v.get("thread_root").is_none(),
         "thread_root must be absent when None: {v}"
@@ -261,12 +268,14 @@ fn send_direct_body_includes_thread_ancestry_when_present() {
     let body = SendDirectBody {
         agent_id: &agent_id,
         payload: "aGk=",
+        logical_id: Some("client-123"),
         thread_root: Some(root.as_str()),
         thread_parent: Some(parent.as_str()),
     };
     let v: serde_json::Value = serde_json::to_value(&body).expect("serialize threaded direct body");
     assert_eq!(v["thread_root"], root);
     assert_eq!(v["thread_parent"], parent);
+    assert_eq!(v["logical_id"], "client-123");
     // Fields are snake_case on the wire (the daemon deserializes verbatim).
     assert!(v.get("threadRoot").is_none(), "camelCase leaked: {v}");
 }
@@ -304,6 +313,36 @@ fn direct_send_receipt_parses_error_body() {
     assert!(!r.ok);
     assert_eq!(r.path, None);
 }
+#[test]
+fn group_message_redelivery_receipt_requires_exact_causal_fields() {
+    let group_id = "group-1";
+    let msg_id = "a".repeat(64);
+    let agent_id = "b".repeat(64);
+    let value = serde_json::json!({
+        "ok": true,
+        "group_id": group_id,
+        "msg_id": msg_id,
+        "agent_id": agent_id,
+        "outcome": "committed",
+    });
+    let receipt: GroupMessageRedeliveryReceipt =
+        serde_json::from_value(value).expect("redelivery receipt parses");
+    assert!(receipt.ok);
+    assert_eq!(receipt.group_id, group_id);
+    assert_eq!(receipt.msg_id, msg_id);
+    assert_eq!(receipt.agent_id, agent_id);
+    assert_eq!(receipt.outcome, "committed");
+}
+
+#[test]
+fn direct_send_timeout_outlives_strict_daemon_retry_budget_only() {
+    const STRICT_DAEMON_RETRY_BUDGET: Duration = Duration::from_secs(8 + 8 + 8);
+
+    assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(15));
+    assert_eq!(DIRECT_SEND_REQUEST_TIMEOUT, Duration::from_secs(30));
+    assert!(DIRECT_SEND_REQUEST_TIMEOUT > STRICT_DAEMON_RETRY_BUDGET);
+}
+
 #[test]
 fn send_group_body_serializes_thread_ancestry() {
     // ADR-0029: SignedPublic send (`POST /groups/:id/send`) carries optional

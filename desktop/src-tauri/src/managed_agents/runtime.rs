@@ -7,9 +7,10 @@ use super::agent_env::build_buzz_agent_provider_defaults;
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
-        ManagedAgentSummary,
+        mark_agent_start_failure, missing_command_message, normalize_agent_args, open_log_file,
+        prepare_native_harness_lifecycle, resolve_command, stabilize_started_agent_process,
+        validate_native_agent_parallelism, KnownAcpRuntime, ManagedAgentPairRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -1539,9 +1540,12 @@ pub fn find_managed_agent_mut<'a>(
 ///
 /// Returns `Err(...)` if the record's allowlist fails validation. The harness
 /// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(record: &ManagedAgentRecord) -> Result<RespondToEnv, String> {
+pub(crate) fn build_respond_to_env(
+    record: &ManagedAgentRecord,
+    effective_allowlist: &[String],
+) -> Result<RespondToEnv, String> {
     // Defensive re-validation: an on-disk record could have been hand-edited.
-    let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
+    let normalized = super::types::validate_respond_to_allowlist(effective_allowlist)?;
     if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
         return Err(
             "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
@@ -1589,6 +1593,32 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+fn configure_native_agent_env(
+    command: &mut std::process::Command,
+    native_launch: &super::ManagedAgentLaunchContext,
+) {
+    command.env("X0X_DATA_DIR", &native_launch.child_data_dir);
+    command.env("X0X_OWNER_AGENT_ID", &native_launch.owner_agent_id);
+    command.env("X0X_AGENT_ID", &native_launch.child_agent_id);
+    command.env("X0X_GROUP_ID", &native_launch.group_id);
+}
+
+fn configure_respond_to_env(
+    command: &mut std::process::Command,
+    record: &ManagedAgentRecord,
+    native_launch: &super::ManagedAgentLaunchContext,
+) -> Result<(), String> {
+    let (gate_set, gate_remove) =
+        build_respond_to_env(record, &native_launch.effective_respond_to_allowlist)?;
+    for (key, value) in gate_set {
+        command.env(key, value);
+    }
+    for key in gate_remove {
+        command.env_remove(key);
+    }
+    Ok(())
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -1597,8 +1627,14 @@ pub fn spawn_agent_child(
     record: &ManagedAgentRecord,
     group_id: &str,
     lazy: bool,
+    native_launch: &super::ManagedAgentLaunchContext,
+    pending_causal_msg_id: Option<&str>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    validate_native_agent_parallelism(record.parallelism)?;
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), group_id)?;
+    if native_launch.group_id != runtime_key.group_id {
+        return Err("managed-agent native launch context belongs to a different group".to_string());
+    }
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -1687,32 +1723,10 @@ pub fn spawn_agent_child(
     }
     command.env("RUST_LOG", child_rust_log_filter());
     // ── Native x0x identity and observer transport ────────────────────────
-    // Each managed agent gets a dedicated x0xd child. Its isolated data dir
-    // owns the ML-DSA keys; the harness receives only native identity handles.
-    match crate::managed_agents::agent_identity::provision_managed_agent_child(
-        &record.pubkey,
-    ) {
-        Ok(child) => {
-            let owner_agent_id = crate::local_stack::fetch_agent()
-                .ok()
-                .and_then(|v| v.get("agent_id").and_then(|a| a.as_str()).map(str::to_string));
-            match owner_agent_id {
-                Some(owner_id) => {
-                    command.env("X0X_DATA_DIR", &child.data_dir);
-                    command.env("X0X_OWNER_AGENT_ID", &owner_id);
-                    command.env("X0X_AGENT_ID", &child.agent_id);
-                }
-                None => eprintln!(
-                    "buzz-desktop: agent {} native observer transport disabled — owner agent_id unavailable",
-                    record.name
-                ),
-            }
-        }
-        Err(error) => eprintln!(
-            "buzz-desktop: agent {} native observer transport disabled — child x0xd bring-up failed: {error:?}",
-            record.name
-        ),
-    }
+    // Community orchestration has already provisioned the child, established
+    // contact consent, attached its actual AgentId, and observed child-side
+    // group convergence. The harness receives only native identity handles.
+    configure_native_agent_env(&mut command, native_launch);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
@@ -1909,13 +1923,7 @@ pub fn spawn_agent_child(
 
     // Inbound author gate. Sender authority comes from authenticated x0x DMs;
     // this environment only carries the user's response policy.
-    let (gate_set, gate_remove) = build_respond_to_env(record)?;
-    for (key, value) in &gate_set {
-        command.env(key, value);
-    }
-    for key in &gate_remove {
-        command.env_remove(key);
-    }
+    configure_respond_to_env(&mut command, record, native_launch)?;
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
@@ -1944,6 +1952,21 @@ pub fn spawn_agent_child(
 
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let lifecycle_path =
+        prepare_native_harness_lifecycle(&native_launch.child_data_dir, &native_launch.group_id)?;
+    super::rebind_released_pending_causal_messages(
+        &native_launch.child_data_dir,
+        &native_launch.group_id,
+        &start_nonce,
+    )?;
+    if let Some(msg_id) = pending_causal_msg_id {
+        super::persist_native_pending_causal_message(
+            &native_launch.child_data_dir,
+            &native_launch.group_id,
+            &start_nonce,
+            msg_id,
+        )?;
+    }
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
@@ -2010,6 +2033,7 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
+        Some(lifecycle_path),
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -2020,6 +2044,7 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
+        lifecycle_path: Some(lifecycle_path),
     })
 }
 
@@ -2035,6 +2060,7 @@ pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    native_launch: &super::ManagedAgentLaunchContext,
 ) -> Result<(), String> {
     let group_id = {
         use tauri::Manager;
@@ -2060,8 +2086,33 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.group_id, false)?;
+    let mut process =
+        match spawn_agent_child(app, record, &key.group_id, false, native_launch, None) {
+            Ok(process) => process,
+            Err(error) => {
+                mark_agent_start_failure(record, &error, None);
+                runtimes.remove(&key);
+                super::remove_agent_runtime_receipt(app, &key);
+                return Err(error);
+            }
+        };
     let now = now_iso();
+    record.updated_at = now.clone();
+    record.last_started_at = Some(now.clone());
+    record.last_stopped_at = None;
+    record.last_exit_code = None;
+    record.last_error = None;
+    record.last_error_code = None;
+
+    let initial_lifecycle = match stabilize_started_agent_process(&mut process, record) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            runtimes.remove(&key);
+            super::remove_agent_runtime_receipt(app, &key);
+            return Err(error);
+        }
+    };
+
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
         pid: process.child.id(),
@@ -2070,18 +2121,22 @@ pub fn start_managed_agent_process(
     };
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());
-        let _ = process.child.wait();
+        let exit_code = process.child.wait().ok().and_then(|status| status.code());
+        mark_agent_start_failure(record, &error, exit_code);
+        runtimes.remove(&key);
+        super::remove_agent_runtime_receipt(app, &key);
         return Err(error);
     }
 
-    record.updated_at = now.clone();
-    record.last_started_at = Some(now);
-    record.last_stopped_at = None;
-    record.last_exit_code = None;
-    record.last_error = None;
-    record.last_error_code = None;
-
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
+    let lifecycle_path = process.lifecycle_path.clone();
+    let start_nonce = process.start_nonce.clone();
+    runtimes.insert(
+        key.clone(),
+        ManagedAgentPairRuntime::with_lifecycle(process, initial_lifecycle),
+    );
+    if let Some(path) = lifecycle_path {
+        super::spawn_native_lifecycle_monitor(app.clone(), key, path, start_nonce);
+    }
     Ok(())
 }
 

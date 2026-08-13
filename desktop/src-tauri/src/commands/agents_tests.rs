@@ -148,6 +148,23 @@ fn deploy_resolver_falls_back_to_global_when_persona_and_record_have_none() {
 }
 
 #[test]
+fn launch_snapshot_replaces_stale_parallelism_before_native_validation() {
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    record.parallelism = 24;
+    record.updated_at = "stale-record".to_string();
+    let mut persona = persona_record("p1", None, None);
+    persona.parallelism = Some(1);
+
+    assert!(apply_persona_launch_snapshot(&mut record, &[persona]));
+    assert_eq!(record.parallelism, 1);
+    assert_ne!(record.updated_at, "stale-record");
+    assert!(
+        crate::managed_agents::validate_native_agent_parallelism(record.parallelism).is_ok(),
+        "the current persona snapshot must pass the native one-worker launch gate"
+    );
+}
+
+#[test]
 fn created_avatar_prefers_explicit_input() {
     let resolved = resolve_created_avatar_url(
         Some(" https://x/input.png "),
@@ -220,4 +237,118 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     assert_eq!(payload["respond_to_allowlist"][0], "a".repeat(64));
     assert_eq!(payload["model"], "gpt-x");
     assert_eq!(payload["provider"], "openai");
+}
+
+fn mention_history_row(
+    msg_id: &str,
+    author: &str,
+    direction: &str,
+    provenance: &str,
+    envelope: serde_json::Value,
+) -> crate::x0x_client::HistoryRow {
+    crate::x0x_client::HistoryRow {
+        id: 7,
+        msg_id: msg_id.to_string(),
+        scope: "group:stable".to_string(),
+        author_agent: Some(author.to_string()),
+        author_machine: Some("f".repeat(64)),
+        sent_at_ms: 1,
+        seen_at_ms: 1,
+        direction: direction.to_string(),
+        content_type: "application/json".to_string(),
+        payload: base64::engine::general_purpose::STANDARD.encode(envelope.to_string()),
+        signed: true,
+        provenance: provenance.to_string(),
+        replace_key: None,
+        thread_root: None,
+        thread_parent: None,
+    }
+}
+
+#[test]
+fn mention_wake_requires_exact_verified_row_owned_author_and_target() {
+    let msg_id = "a".repeat(64);
+    let author = "b".repeat(64);
+    let target = "c".repeat(64);
+    let author_record = "d".repeat(64);
+    let envelope = serde_json::json!({
+        "mentions": [target],
+        "agentGenerated": true,
+        "agentGeneration": 1,
+        "delegationRoot": "e".repeat(64),
+    });
+    let mut row = mention_history_row(&msg_id, &author, "Inbound", "VerifiedEnvelope", envelope);
+    let owned = HashMap::from([(author.clone(), author_record)]);
+
+    let (observed_author, observed) =
+        require_verified_owner_mention_row(&row, "stable", &msg_id, &target, &owned)
+            .expect("exact verified child mention passes");
+    assert_eq!(observed_author, author);
+    assert!(observed.agent_generated);
+
+    row.provenance = "LocalSend".to_string();
+    assert!(require_verified_owner_mention_row(&row, "stable", &msg_id, &target, &owned).is_err());
+}
+
+#[test]
+fn mention_wake_requires_exact_owner_root_and_first_generation() {
+    let owner = "1".repeat(64);
+    let delegate = "2".repeat(64);
+    let target = "3".repeat(64);
+    let root_id = "4".repeat(64);
+    let mention_id = "5".repeat(64);
+    let mention_envelope = serde_json::json!({
+        "mentions": [target],
+        "agentGenerated": true,
+        "agentGeneration": 1,
+        "delegationRoot": root_id,
+    });
+    let mut mention = mention_history_row(
+        &mention_id,
+        &delegate,
+        "Inbound",
+        "VerifiedEnvelope",
+        mention_envelope,
+    );
+    mention.thread_root = Some(root_id.clone());
+    mention.thread_parent = Some(root_id.clone());
+    let root = mention_history_row(
+        &root_id,
+        &owner,
+        "Outbound",
+        "LocalSend",
+        serde_json::json!({
+            "mentions": [delegate],
+            "agentGenerated": false,
+        }),
+    );
+    let decoded = decode_managed_mention_envelope(&mention).expect("decode mention");
+
+    require_bounded_agent_delegation(&mention, &decoded, &root, "stable", &owner, &delegate)
+        .expect("exact owner-rooted first generation passes");
+
+    mention.thread_parent = Some("6".repeat(64));
+    assert!(require_bounded_agent_delegation(
+        &mention, &decoded, &root, "stable", &owner, &delegate,
+    )
+    .is_err());
+}
+
+#[test]
+fn mention_wake_requires_exact_durable_redelivery_receipt() {
+    let group_id = "stable";
+    let msg_id = "a".repeat(64);
+    let target = "b".repeat(64);
+    let mut receipt = crate::x0x_client::GroupMessageRedeliveryReceipt {
+        ok: true,
+        group_id: group_id.to_string(),
+        msg_id: msg_id.clone(),
+        agent_id: target.clone(),
+        outcome: "committed".to_string(),
+    };
+
+    require_exact_redelivery_receipt(&receipt, group_id, &msg_id, &target)
+        .expect("exact committed receipt passes");
+    receipt.msg_id = "c".repeat(64);
+    assert!(require_exact_redelivery_receipt(&receipt, group_id, &msg_id, &target).is_err());
 }

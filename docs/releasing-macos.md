@@ -26,7 +26,7 @@ bundle. The packager fails closed unless all of these receipts agree:
 
 The packager prints SHA-256 receipts for `buzz-desktop` and every
 `bundle.externalBin` basename from `desktop/src-tauri/tauri.conf.json`
-(`x0xd`, `buzz-acp`, `buzz-agent`, `buzz-dev-mcp`, `buzz`). Preserve those
+(`x0xd`, `buzz-acp`, `buzz-agent`, `buzz-x0x-mcp`). Preserve those
 values with the release receipt and compare them with the installed binaries
 during two-machine acceptance. A name that is not on `externalBin` is a
 packaging bug — `portable-package-contract.test.mjs` rejects that drift.

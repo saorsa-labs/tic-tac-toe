@@ -67,11 +67,14 @@ impl std::ops::DerefMut for ManagedAgentPairRuntime {
 }
 
 impl ManagedAgentPairRuntime {
-    pub fn starting(process: ManagedAgentProcess) -> Self {
+    pub fn with_lifecycle(
+        process: ManagedAgentProcess,
+        lifecycle: ManagedAgentRuntimeLifecycle,
+    ) -> Self {
         let start_nonce = process.start_nonce.clone();
         Self {
             process,
-            lifecycle: ManagedAgentRuntimeLifecycle::Starting,
+            lifecycle,
             error: None,
             start_nonce,
         }
@@ -104,6 +107,17 @@ pub struct ManagedAgentRuntimeLifecycleObserverPayload {
     pub error: Option<String>,
 }
 
+/// Explicit native group requested by frontend startup reconciliation.
+///
+/// Reconciliation never falls back to `AppState.active_group_id`: a caller
+/// must submit every group it wants warmed so multi-community startup is
+/// deterministic and auditable.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentCommunityTarget {
+    pub group_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedAgentRuntimeReceipt {
@@ -111,4 +125,36 @@ pub struct ManagedAgentRuntimeReceipt {
     pub pid: u32,
     pub desktop_instance_id: String,
     pub started_at: String,
+}
+
+/// Durable handoff from the desktop validator to one exact harness generation.
+/// One file is written per canonical message id so distinct causal messages
+/// for the same `(record, group)` runtime never overwrite each other.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentPendingCausalMessage {
+    pub version: u8,
+    pub start_nonce: String,
+    pub group_id: String,
+    pub msg_id: String,
+    pub state: ManagedAgentPendingCausalState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedAgentPendingCausalState {
+    Pending,
+    Claimed,
+    Executing,
+}
+
+/// Durable proof that the exact group/message handoff completed. The harness
+/// writes this before deleting the pending file; desktop refuses to recreate a
+/// completed handoff after the pair stops.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentCompletedCausalMessage {
+    pub version: u8,
+    pub group_id: String,
+    pub msg_id: String,
 }

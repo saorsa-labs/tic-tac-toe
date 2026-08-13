@@ -34,6 +34,18 @@ function agent(name, personaId, pubkey) {
 const fizz = agent("Fizz", "builtin:fizz", "f".repeat(64));
 const honey = agent("Honey", "builtin:honey", "h".repeat(64));
 const bumble = agent("Bumble", "builtin:bumble", "b".repeat(64));
+const fizzAgentId = "1".repeat(64);
+const honeyAgentId = "2".repeat(64);
+const bumbleAgentId = "3".repeat(64);
+const nativeIdentityByPubkey = {
+  [fizz.pubkey]: fizzAgentId,
+  [honey.pubkey]: honeyAgentId,
+  [bumble.pubkey]: bumbleAgentId,
+};
+
+function resolveNativeIdentity(pubkey) {
+  return Promise.resolve(nativeIdentityByPubkey[pubkey] ?? null);
+}
 
 test("kickoff failure is reported instead of swallowed", () => {
   const seen = [];
@@ -65,20 +77,35 @@ test("opener uses current agent names and requests bounded simultaneous intros",
   assert.match(opener, /Don't start any work yet/);
 });
 
-test("teammates are not ready until every harness publishes online presence", () => {
-  assert.equal(areWelcomeTeammatesOnline([honey, bumble], undefined), false);
+test("teammates are not ready until every child identity publishes online presence", () => {
   assert.equal(
-    areWelcomeTeammatesOnline([honey, bumble], {
-      [honey.pubkey]: "online",
-      [bumble.pubkey]: "offline",
-    }),
+    areWelcomeTeammatesOnline(
+      [honey, bumble],
+      undefined,
+      nativeIdentityByPubkey,
+    ),
     false,
   );
   assert.equal(
-    areWelcomeTeammatesOnline([honey, bumble], {
-      [honey.pubkey]: "online",
-      [bumble.pubkey]: "online",
-    }),
+    areWelcomeTeammatesOnline(
+      [honey, bumble],
+      {
+        [honeyAgentId]: "online",
+        [bumbleAgentId]: "offline",
+      },
+      nativeIdentityByPubkey,
+    ),
+    false,
+  );
+  assert.equal(
+    areWelcomeTeammatesOnline(
+      [honey, bumble],
+      {
+        [honeyAgentId]: "online",
+        [bumbleAgentId]: "online",
+      },
+      nativeIdentityByPubkey,
+    ),
     true,
   );
 });
@@ -87,11 +114,14 @@ test("readiness wait observes agents becoming online without navigation", async 
   let reads = 0;
   const ready = await waitForWelcomeTeammatesOnline([honey, bumble], {
     isCancelled: () => false,
-    loadPresence: async () => {
+    resolveIdentity: resolveNativeIdentity,
+    loadPresence: async (agentIds) => {
+      assert.deepEqual(agentIds, [honeyAgentId, bumbleAgentId]);
+      assert.ok(!agentIds.includes(honey.pubkey));
       reads += 1;
       return reads < 3
-        ? { [honey.pubkey]: "online", [bumble.pubkey]: "offline" }
-        : { [honey.pubkey]: "online", [bumble.pubkey]: "online" };
+        ? { [honeyAgentId]: "online", [bumbleAgentId]: "offline" }
+        : { [honeyAgentId]: "online", [bumbleAgentId]: "online" };
     },
     pollMs: 0,
     waitMs: 1_000,
@@ -105,10 +135,11 @@ test("readiness wait retries transient presence failures", async () => {
   let reads = 0;
   const ready = await waitForWelcomeTeammatesOnline([honey, bumble], {
     isCancelled: () => false,
+    resolveIdentity: resolveNativeIdentity,
     loadPresence: async () => {
       reads += 1;
       if (reads === 1) throw new Error("relay unavailable");
-      return { [honey.pubkey]: "online", [bumble.pubkey]: "online" };
+      return { [honeyAgentId]: "online", [bumbleAgentId]: "online" };
     },
     pollMs: 0,
     waitMs: 1_000,
@@ -121,6 +152,7 @@ test("readiness wait retries transient presence failures", async () => {
 test("readiness wait cancels when Welcome loses focus", async () => {
   const ready = await waitForWelcomeTeammatesOnline([honey, bumble], {
     isCancelled: () => true,
+    resolveIdentity: resolveNativeIdentity,
     loadPresence: async () => {
       throw new Error("cancelled waits must not query");
     },
@@ -326,9 +358,10 @@ test("opener degrades to one seeded Fizz message when no teammate comes online",
 test("readiness wait returns the subset that became online by the deadline", async () => {
   const online = await waitForWelcomeTeammatesOnline([honey, bumble], {
     isCancelled: () => false,
+    resolveIdentity: resolveNativeIdentity,
     loadPresence: async () => ({
-      [honey.pubkey]: "online",
-      [bumble.pubkey]: "offline",
+      [honeyAgentId]: "online",
+      [bumbleAgentId]: "offline",
     }),
     pollMs: 0,
     waitMs: 0,
@@ -358,7 +391,12 @@ test("closer classification sees replies that arrive during the final beat", asy
   });
   const events = [opener];
 
-  const beforeBeat = classifyWelcomeKickoffResolution(events, opener, agentSet);
+  const beforeBeat = classifyWelcomeKickoffResolution(
+    events,
+    opener,
+    agentSet,
+    nativeIdentityByPubkey,
+  );
   assert.deepEqual(
     beforeBeat.unresolved.map((agent) => agent.name),
     ["Honey", "Bumble"],
@@ -368,7 +406,7 @@ test("closer classification sees replies that arrive during the final beat", asy
   events.push(
     relayEvent({
       id: "honey-intro",
-      pubkey: honey.pubkey,
+      pubkey: honeyAgentId,
       createdAt: 2,
       tags: [
         ["e", opener.id, "", "root"],
@@ -378,7 +416,12 @@ test("closer classification sees replies that arrive during the final beat", asy
   );
   assert.equal(await beat, true);
 
-  const afterBeat = classifyWelcomeKickoffResolution(events, opener, agentSet);
+  const afterBeat = classifyWelcomeKickoffResolution(
+    events,
+    opener,
+    agentSet,
+    nativeIdentityByPubkey,
+  );
   assert.deepEqual(
     afterBeat.unresolved.map((agent) => agent.name),
     ["Bumble"],
@@ -411,8 +454,8 @@ test("intro replies reach the closer classification without the user opening the
   const agentSet = { lead: fizz, teammates: [honey, bumble] };
   const channelEvents = [kickoffOpener];
   const openerReplies = [
-    introReply("honey-intro", honey.pubkey, kickoffOpener.id),
-    introReply("bumble-intro", bumble.pubkey, kickoffOpener.id),
+    introReply("honey-intro", honeyAgentId, kickoffOpener.id),
+    introReply("bumble-intro", bumbleAgentId, kickoffOpener.id),
   ];
 
   // Pin the pre-fix behaviour: on the channel events alone, both teammates
@@ -422,6 +465,7 @@ test("intro replies reach the closer classification without the user opening the
       channelEvents,
       kickoffOpener,
       agentSet,
+      nativeIdentityByPubkey,
     ).unresolved.map((agent) => agent.name),
     ["Honey", "Bumble"],
   );
@@ -432,17 +476,18 @@ test("intro replies reach the closer classification without the user opening the
       mergeKickoffEvents(channelEvents, openerReplies),
       kickoffOpener,
       agentSet,
+      nativeIdentityByPubkey,
     ).unresolved,
     [],
   );
 });
 
 test("merging the opener subtree never double-counts an already-visible reply", () => {
-  const honeyIntro = introReply("honey-intro", honey.pubkey, kickoffOpener.id);
+  const honeyIntro = introReply("honey-intro", honeyAgentId, kickoffOpener.id);
   // An open thread feeds the same replies in through both sources.
   const merged = mergeKickoffEvents(
     [kickoffOpener, honeyIntro],
-    [honeyIntro, introReply("bumble-intro", bumble.pubkey, kickoffOpener.id)],
+    [honeyIntro, introReply("bumble-intro", bumbleAgentId, kickoffOpener.id)],
   );
 
   assert.deepEqual(

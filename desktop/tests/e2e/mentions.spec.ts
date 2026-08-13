@@ -31,6 +31,8 @@ const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
+const UNSHARED_AGENT_PUBKEY =
+  "7f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
 const SYSTEM_MESSAGE_KIND = 40099;
@@ -67,6 +69,33 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
         }
       ).__BUZZ_E2E_COMMAND_LOG__ ?? []
     );
+  });
+}
+
+async function readNativeGroupSendMentionIds(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  const entries = await readCommandPayloadLog(page);
+  return entries.flatMap((entry) => {
+    if (entry.command !== "x0x_send_group_message") return [];
+    const input = (entry.payload as { input?: { body?: unknown } })?.input;
+    if (typeof input?.body !== "string") return [];
+
+    try {
+      const envelope = JSON.parse(input.body) as {
+        text?: unknown;
+        mentions?: unknown;
+      };
+      if (envelope.text !== content || !Array.isArray(envelope.mentions)) {
+        return [];
+      }
+      return envelope.mentions.filter(
+        (agentId): agentId is string => typeof agentId === "string",
+      );
+    } catch {
+      return [];
+    }
   });
 }
 
@@ -757,44 +786,76 @@ test("managed relay-profile agents with member roles use the agent composer styl
   await expect(agentMentionChip).toHaveText("charlie");
 });
 
-test("other-owned agents without a shared channel are hidden from mentions", async ({
+test("native mention policy: other-owned agents without a shared channel stay hidden", async ({
   page,
 }) => {
   await installMockBridge(page, {
     searchProfiles: [
       {
-        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
-        displayName: "mira",
+        pubkey: UNSHARED_AGENT_PUBKEY,
+        displayName: "rhea",
         ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
         isAgent: true,
       },
     ],
-    userSearchDelayMs: 1_000,
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("@mira");
+  const contactsBefore = commandCount(
+    await readCommandLog(page),
+    "x0x_list_contacts",
+  );
+  await input.fill("@rhea");
+
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "x0x_list_contacts"),
+    )
+    .toBeGreaterThan(contactsBefore);
 
   const dropdown = autocomplete(page);
   await expect(dropdown).not.toBeVisible();
   await expect(input.locator(".mention-chip")).toHaveCount(0);
 });
 
-test("own profile-only agents are hidden from channel mentions", async ({
+test("native mention policy: a channel member absent the active directory emits its exact AgentId", async ({
   page,
 }) => {
-  await installMockBridge(page, { userSearchDelayMs: 1_000 });
+  await installMockBridge(page);
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("@mira");
+  await input.fill("Ask @mira");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const suggestion = page.getByTestId(
+    `mention-suggestion-${PROFILE_ONLY_AGENT_PUBKEY}`,
+  );
+  await expect(suggestion).toBeVisible();
+  await expect(suggestion.getByTestId("mention-agent-icon")).toBeVisible();
+  await expect(suggestion.getByText("not in channel")).toHaveCount(0);
+  await suggestion.click();
+  await expect(
+    input.locator(".agent-mention-highlight", { hasText: "mira" }),
+  ).toBeVisible();
+  await page.keyboard.type("please reply");
+
+  const content = "Ask @mira please reply";
+  await expect.poll(() => input.textContent()).toBe(content);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "x0x_send_group_message"),
+    )
+    .toBeGreaterThan(0);
+  await expect
+    .poll(() => readNativeGroupSendMentionIds(page, content))
+    .toEqual([PROFILE_ONLY_AGENT_PUBKEY]);
 });
 
 test("managed relay agents are visible in channel mentions regardless of relay policy", async ({

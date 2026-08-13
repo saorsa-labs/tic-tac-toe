@@ -79,6 +79,7 @@ import {
   type ProfilePanelView,
   resolveAgentInstruction,
   resolvePanelProfile,
+  resolveProfileAgentEditTarget,
   resolveProfileDisplayName,
   truncatePubkey,
   type UserProfilePanelProps,
@@ -391,12 +392,18 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona) {
-      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+    const editTarget = resolveProfileAgentEditTarget(
+      managedAgent,
+      resolvedPersona,
+    );
+    if (editTarget === "instance") {
+      setEditAgentOpen(true);
       return;
     }
-    setEditAgentOpen(true);
-  }, [resolvedPersona]);
+    if (editTarget === "persona" && resolvedPersona) {
+      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+    }
+  }, [managedAgent, resolvedPersona]);
 
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({

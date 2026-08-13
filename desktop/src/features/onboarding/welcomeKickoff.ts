@@ -26,6 +26,7 @@ import {
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
 import { listManagedAgents } from "@/shared/api/tauri";
+import { getManagedAgentNativeIdentity } from "@/shared/api/observerRelay";
 import {
   getNativePresence,
   getNativeSelfProfile,
@@ -113,6 +114,7 @@ const TEAMMATE_READY_WAIT_MS = 60_000;
  */
 const TEAMMATE_INTRO_BACKSTOP_MS = 120_000;
 const CLOSER_BEAT_MS = 3_000;
+const NATIVE_AGENT_ID_PATTERN = /^[0-9a-f]{64}$/i;
 const closerAbortControllers = new Map<string, AbortController>();
 const closerTimeouts = new Map<
   string,
@@ -178,19 +180,42 @@ export function buildWelcomeKickoffOpener(
 export function onlineWelcomeTeammates(
   teammates: readonly ManagedAgent[],
   presence: Readonly<Record<string, string>> | undefined,
+  nativeIdentityByPubkey: Readonly<Record<string, string>>,
 ) {
-  return teammates.filter(
-    (agent) => presence?.[normalizePubkey(agent.pubkey)] === "online",
-  );
+  return teammates.filter((agent) => {
+    const nativeAgentId = nativeIdentityByPubkey[normalizePubkey(agent.pubkey)];
+    return nativeAgentId
+      ? presence?.[normalizePubkey(nativeAgentId)] === "online"
+      : false;
+  });
 }
 
 export function areWelcomeTeammatesOnline(
   teammates: readonly ManagedAgent[],
   presence: Readonly<Record<string, string>> | undefined,
+  nativeIdentityByPubkey: Readonly<Record<string, string>>,
 ) {
   return (
-    onlineWelcomeTeammates(teammates, presence).length === teammates.length
+    onlineWelcomeTeammates(teammates, presence, nativeIdentityByPubkey)
+      .length === teammates.length
   );
+}
+
+export async function resolveWelcomeAgentNativeIdentities(
+  agents: readonly ManagedAgent[],
+  resolveIdentity: typeof getManagedAgentNativeIdentity = getManagedAgentNativeIdentity,
+) {
+  const entries = await Promise.all(
+    agents.map(async (agent) => {
+      const nativeAgentId = normalizePubkey(
+        (await resolveIdentity(agent.pubkey)) ?? "",
+      );
+      return NATIVE_AGENT_ID_PATTERN.test(nativeAgentId)
+        ? ([normalizePubkey(agent.pubkey), nativeAgentId] as const)
+        : null;
+    }),
+  );
+  return Object.fromEntries(entries.filter((entry) => entry !== null));
 }
 
 export async function waitForWelcomeTeammatesOnline(
@@ -198,6 +223,7 @@ export async function waitForWelcomeTeammatesOnline(
   options: {
     isCancelled: () => boolean;
     loadPresence?: typeof getNativePresence;
+    resolveIdentity?: typeof getManagedAgentNativeIdentity;
     pollMs?: number;
     waitMs?: number;
   },
@@ -205,14 +231,22 @@ export async function waitForWelcomeTeammatesOnline(
   const loadPresence = options.loadPresence ?? getNativePresence;
   const pollMs = options.pollMs ?? TEAMMATE_READY_POLL_MS;
   const deadline = Date.now() + (options.waitMs ?? TEAMMATE_READY_WAIT_MS);
-  const pubkeys = teammates.map((agent) => agent.pubkey);
+  const nativeIdentityByPubkey = await resolveWelcomeAgentNativeIdentities(
+    teammates,
+    options.resolveIdentity,
+  );
+  const nativeAgentIds = teammates.flatMap((agent) => {
+    const nativeAgentId = nativeIdentityByPubkey[normalizePubkey(agent.pubkey)];
+    return nativeAgentId ? [nativeAgentId] : [];
+  });
   let latestOnline: ManagedAgent[] = [];
 
   while (!options.isCancelled()) {
     try {
       latestOnline = onlineWelcomeTeammates(
         teammates,
-        await loadPresence(pubkeys),
+        await loadPresence(nativeAgentIds),
+        nativeIdentityByPubkey,
       );
       if (latestOnline.length === teammates.length) {
         return latestOnline;
@@ -275,6 +309,7 @@ function introAuthorsAfterOpener(
   events: readonly RelayEvent[],
   opener: RelayEvent,
   teammates: readonly [ManagedAgent, ManagedAgent],
+  nativeIdentityByPubkey: Readonly<Record<string, string>>,
 ) {
   const authors = new Set(
     events
@@ -287,7 +322,13 @@ function introAuthorsAfterOpener(
   );
   return new Set(
     teammates
-      .filter((agent) => authors.has(normalizePubkey(agent.pubkey)))
+      .filter((agent) => {
+        const nativeAgentId =
+          nativeIdentityByPubkey[normalizePubkey(agent.pubkey)];
+        return nativeAgentId
+          ? authors.has(normalizePubkey(nativeAgentId))
+          : false;
+      })
       .map((agent) => normalizePubkey(agent.pubkey)),
   );
 }
@@ -306,11 +347,13 @@ export function classifyWelcomeKickoffResolution(
   events: readonly RelayEvent[],
   opener: RelayEvent,
   agentSet: WelcomeAgentSet,
+  nativeIdentityByPubkey: Readonly<Record<string, string>>,
 ) {
   const introAuthors = introAuthorsAfterOpener(
     events,
     opener,
     agentSet.teammates,
+    nativeIdentityByPubkey,
   );
   const failed = agentSet.teammates.filter((agent) =>
     failedAfterKickoff(agent, opener),
@@ -565,6 +608,23 @@ export function useWelcomeKickoff(
       ),
     [activeCommunity?.groupId, managedAgentsQuery.data],
   );
+  const [nativeIdentityByPubkey, setNativeIdentityByPubkey] = React.useState<
+    Readonly<Record<string, string>>
+  >({});
+  React.useEffect(() => {
+    let cancelled = false;
+    setNativeIdentityByPubkey({});
+    if (!agentSet) return;
+    void resolveWelcomeAgentNativeIdentities([
+      agentSet.lead,
+      ...agentSet.teammates,
+    ]).then((identities) => {
+      if (!cancelled) setNativeIdentityByPubkey(identities);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentSet]);
   const readiness = React.useMemo(
     () => resolveAgentReadiness(runtimesQuery.data ?? [], globalConfig),
     [globalConfig, runtimesQuery.data],
@@ -760,6 +820,7 @@ export function useWelcomeKickoff(
       kickoffEvents,
       opener,
       agentSet,
+      nativeIdentityByPubkey,
     );
 
     if (unresolved.length > 0) {
@@ -796,6 +857,7 @@ export function useWelcomeKickoff(
               latestEvents,
               latestOpener,
               latestAgentSet,
+              nativeIdentityByPubkey,
             );
             await sendWelcomeKickoffCloser({
               agentSet: latestAgentSet,
@@ -851,6 +913,7 @@ export function useWelcomeKickoff(
         latestEvents,
         latestOpener,
         latestAgentSet,
+        nativeIdentityByPubkey,
       );
       await sendWelcomeKickoffCloser({
         agentSet: latestAgentSet,
@@ -877,6 +940,7 @@ export function useWelcomeKickoff(
     kickoffResolved,
     channelId,
     isActiveWelcome,
+    nativeIdentityByPubkey,
     queryClient,
   ]);
 }

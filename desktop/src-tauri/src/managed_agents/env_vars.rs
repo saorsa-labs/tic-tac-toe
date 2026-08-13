@@ -57,6 +57,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "X0X_DATA_DIR",
     "X0X_OWNER_AGENT_ID",
     "X0X_AGENT_ID",
+    "X0X_GROUP_ID",
     // Desktop-owned local API credentials.
     "BUZZ_API_TOKEN",
     "BUZZ_ACP_PRIVATE_KEY",

@@ -374,6 +374,10 @@ pub struct ManagedAgentProcess {
     pub adapter_availability: Option<AcpAvailabilityStatus>,
     /// Unpredictable identity shared only with this harness generation.
     pub start_nonce: String,
+    /// Nonce-bound lifecycle receipt written atomically by the native harness.
+    /// `None` is reserved for non-native/test harnesses that only support the
+    /// legacy process-stability check.
+    pub lifecycle_path: Option<PathBuf>,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
@@ -657,7 +661,10 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
+/// Native x0x ACP currently guarantees one ordered, at-most-once prompt
+/// stream. Higher values are rejected at spawn instead of being silently
+/// presented as worker concurrency the harness does not provide.
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 1;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM

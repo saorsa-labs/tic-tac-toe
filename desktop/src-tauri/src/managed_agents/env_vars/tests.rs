@@ -106,11 +106,13 @@ fn merged_env_strips_reserved_keys_from_agent() {
     let agent = map(&[
         ("X0X_AGENT_ID", "attacker-agent"),
         ("X0X_OWNER_AGENT_ID", "attacker-owner"),
+        ("X0X_GROUP_ID", "attacker-group"),
         ("FOO", "1"),
     ]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(!merged.contains_key("X0X_AGENT_ID"));
     assert!(!merged.contains_key("X0X_OWNER_AGENT_ID"));
+    assert!(!merged.contains_key("X0X_GROUP_ID"));
     assert_eq!(merged.get("FOO").map(String::as_str), Some("1"));
     assert_eq!(merged.len(), 1);
 }
@@ -120,7 +122,11 @@ fn merged_env_strips_reserved_case_insensitive() {
     // Unix env vars are case-sensitive at the syscall level, but we
     // refuse close-typo variants too — lowercase native identity keys are
     // almost certainly footguns, not legitimate settings.
-    let agent = map(&[("x0x_agent_id", "x"), ("X0x_Owner_Agent_Id", "y")]);
+    let agent = map(&[
+        ("x0x_agent_id", "x"),
+        ("X0x_Owner_Agent_Id", "y"),
+        ("x0x_group_id", "z"),
+    ]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
 }

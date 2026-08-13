@@ -3031,13 +3031,10 @@ test("stopping a managed bot in one community leaves its other communities runni
   page,
 }) => {
   const agentPubkey = TEST_IDENTITIES.charlie.pubkey;
-  // Must match the relay of the community seeded by the mock bridge
-  // (`seedDefaultCommunity` follows BUZZ_E2E_RELAY_URL); the agent also has a
-  // live runtime in a second community on another relay.
-  const activeRelayUrl = (
-    process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000"
-  ).replace(/^http/, "ws");
-  const otherRelayUrl = "ws://other-community.example";
+  // Must match the native group seeded by `seedDefaultCommunity`; the agent
+  // also has a live runtime in a second native community.
+  const activeGroupId = "e2e-default-community";
+  const otherGroupId = "e2e-other-community";
 
   await installMockBridge(page, {
     managedAgents: [
@@ -3049,8 +3046,8 @@ test("stopping a managed bot in one community leaves its other communities runni
       },
     ],
     managedAgentRuntimes: [
-      { pubkey: agentPubkey, relayUrl: activeRelayUrl },
-      { pubkey: agentPubkey, relayUrl: otherRelayUrl },
+      { pubkey: agentPubkey, groupId: activeGroupId },
+      { pubkey: agentPubkey, groupId: otherGroupId },
     ],
   });
   await page.goto("/");
@@ -3079,7 +3076,7 @@ test("stopping a managed bot in one community leaves its other communities runni
       window as Window & {
         __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
           command: string,
-        ) => Promise<Array<{ relayUrl: string; lifecycle: string }>>;
+        ) => Promise<Array<{ groupId: string; lifecycle: string }>>;
       }
     ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
     if (!invoke) {
@@ -3088,10 +3085,10 @@ test("stopping a managed bot in one community leaves its other communities runni
     return invoke("list_managed_agent_runtimes");
   });
   expect(
-    runtimes.find((runtime) => runtime.relayUrl === activeRelayUrl)?.lifecycle,
+    runtimes.find((runtime) => runtime.groupId === activeGroupId)?.lifecycle,
   ).toBe("stopped");
   expect(
-    runtimes.find((runtime) => runtime.relayUrl === otherRelayUrl)?.lifecycle,
+    runtimes.find((runtime) => runtime.groupId === otherGroupId)?.lifecycle,
   ).toBe("ready");
 
   // And it must never route through the legacy agent-wide stop.

@@ -1,0 +1,1444 @@
+use std::fmt::{Display, Formatter};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base64::Engine as _;
+use reqwest::{Client, Method, StatusCode};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+
+const MAX_AGENT_ID_BYTES: usize = 64;
+const MAX_GROUP_ID_BYTES: usize = 64;
+const MAX_MENTIONS: usize = 50;
+const MAX_PUBLIC_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_API_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_API_RESPONSE_BYTES: usize = 1024 * 1024;
+const HISTORY_PAGE_SIZE: usize = 200;
+const MAX_HISTORY_PAGES: usize = 100;
+const MAX_AGENT_GENERATION: u8 = 2;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug)]
+pub struct AppError(String);
+
+impl AppError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl Display for AppError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AppError {}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeConfig {
+    data_dir: PathBuf,
+    agent_id: String,
+    owner_agent_id: String,
+    /// Launch / REST route id from `X0X_GROUP_ID`. Used for `/groups/{id}/…`.
+    group_id: String,
+    /// Stable group id from `GET /groups/{route}/state`. Used for history
+    /// scope and inbound delegation verification. Equals `group_id` until
+    /// [`X0xTools::resolve_stable_group_id`] runs.
+    stable_group_id: String,
+}
+
+impl RuntimeConfig {
+    pub fn from_env() -> Result<Self, AppError> {
+        let data_dir = required_env("X0X_DATA_DIR")?;
+        let data_dir = PathBuf::from(data_dir);
+        if !data_dir.is_absolute() {
+            return Err(AppError::new("X0X_DATA_DIR must be an absolute path"));
+        }
+
+        let agent_id = required_env("X0X_AGENT_ID")?;
+        validate_hex_id("X0X_AGENT_ID", &agent_id, MAX_AGENT_ID_BYTES)?;
+        let owner_agent_id = required_env("X0X_OWNER_AGENT_ID")?;
+        validate_hex_id("X0X_OWNER_AGENT_ID", &owner_agent_id, MAX_AGENT_ID_BYTES)?;
+        let group_id = required_env("X0X_GROUP_ID")?;
+        validate_hex_id("X0X_GROUP_ID", &group_id, MAX_GROUP_ID_BYTES)?;
+
+        Ok(Self {
+            data_dir,
+            agent_id,
+            owner_agent_id,
+            group_id: group_id.clone(),
+            stable_group_id: group_id,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        data_dir: PathBuf,
+        agent_id: impl Into<String>,
+        owner_agent_id: impl Into<String>,
+        group_id: impl Into<String>,
+    ) -> Self {
+        let group_id = group_id.into();
+        Self {
+            data_dir,
+            agent_id: agent_id.into(),
+            owner_agent_id: owner_agent_id.into(),
+            group_id: group_id.clone(),
+            stable_group_id: group_id,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_stable_group_id(mut self, stable_group_id: impl Into<String>) -> Self {
+        self.stable_group_id = stable_group_id.into();
+        self
+    }
+
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    pub fn stable_group_id(&self) -> &str {
+        &self.stable_group_id
+    }
+}
+
+#[derive(Clone)]
+pub struct X0xTools {
+    config: RuntimeConfig,
+    client: Client,
+}
+
+impl X0xTools {
+    pub fn new(config: RuntimeConfig) -> Result<Self, AppError> {
+        let client = Client::builder()
+            // This client is deliberately incapable of inheriting an HTTP
+            // proxy from the desktop environment. Every accepted endpoint is
+            // a numeric loopback SocketAddr resolved from x0xd's control file.
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(|error| AppError::new(format!("failed to create HTTP client: {error}")))?;
+        Ok(Self { config, client })
+    }
+
+    /// Resolve the daemon's stable group id and store it for history / delegation
+    /// gates. REST send and member routes keep using the launch route id.
+    pub async fn resolve_stable_group_id(&mut self) -> Result<(), AppError> {
+        let route = &self.config.group_id;
+        let detail = self
+            .request_json(Method::GET, &format!("/groups/{route}"), None)
+            .await?;
+        let confidentiality = detail
+            .pointer("/policy/confidentiality")
+            .and_then(Value::as_str);
+        if confidentiality != Some("signed_public") {
+            return Err(AppError::new(
+                "native space tools require a signed_public group",
+            ));
+        }
+        let state = self
+            .request_json(Method::GET, &format!("/groups/{route}/state"), None)
+            .await?;
+        let stable = state
+            .get("group_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::new("group state response is missing group_id"))?;
+        validate_hex_id("resolved group_id", stable, MAX_GROUP_ID_BYTES)?;
+        self.config.stable_group_id = stable.to_owned();
+        Ok(())
+    }
+
+    pub fn tools_list(&self) -> Value {
+        json!({
+            "tools": [
+                {
+                    "name": "space_members",
+                    "description": "List active and banned members in this managed agent's native x0x space.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "space_send",
+                    "description": "Send an agent-generated native x0x space message, optionally mentioning members or replying in a thread.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "Message text."
+                            },
+                            "mentions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$"
+                                },
+                                "maxItems": MAX_MENTIONS
+                            },
+                            "thread_root": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                            },
+                            "thread_parent": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                            }
+                        },
+                        "required": ["text"],
+                        "additionalProperties": false
+                    }
+                }
+            ]
+        })
+    }
+
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, AppError> {
+        match name {
+            "space_members" => {
+                validate_no_arguments(&arguments)?;
+                self.space_members().await
+            }
+            "space_send" => {
+                let request = parse_send_arguments(arguments)?;
+                self.space_send(request).await
+            }
+            _ => Err(AppError::new(format!("unknown tool: {name}"))),
+        }
+    }
+
+    async fn space_members(&self) -> Result<Value, AppError> {
+        let path = format!("/groups/{}/members", self.config.group_id);
+        self.request_json(Method::GET, &path, None).await
+    }
+
+    async fn space_send(&self, request: SpaceSend) -> Result<Value, AppError> {
+        let delegation = self.delegation_metadata(&request).await?;
+        let body = build_group_send_body(request, delegation)?;
+        let path = format!("/groups/{}/send", self.config.group_id);
+        self.request_json(Method::POST, &path, Some(body)).await
+    }
+
+    async fn delegation_metadata(
+        &self,
+        request: &SpaceSend,
+    ) -> Result<Option<AgentDelegation>, AppError> {
+        let Some(parent_id) = request.thread_parent.as_deref() else {
+            return Ok(None);
+        };
+        let Some(parent) = self.find_history_row(parent_id).await? else {
+            return Ok(None);
+        };
+        derive_delegation(&self.config, request, &parent)
+    }
+
+    async fn find_history_row(&self, msg_id: &str) -> Result<Option<ToolHistoryRow>, AppError> {
+        let mut before_id = None;
+        for _ in 0..MAX_HISTORY_PAGES {
+            let before_query = before_id
+                .map(|id| format!("&before_id={id}"))
+                .unwrap_or_default();
+            let path = format!(
+                "/history?scope=group:{}&limit={HISTORY_PAGE_SIZE}{before_query}",
+                self.config.stable_group_id
+            );
+            let value = self.request_json(Method::GET, &path, None).await?;
+            let page: ToolHistoryPage = serde_json::from_value(value).map_err(|error| {
+                AppError::new(format!("invalid x0xd history response: {error}"))
+            })?;
+            if let Some(row) = page.records.into_iter().find(|row| row.msg_id == msg_id) {
+                return Ok(Some(row));
+            }
+            let Some(next_before_id) = page.next_before_id else {
+                return Ok(None);
+            };
+            before_id = Some(next_before_id);
+        }
+        Err(AppError::new(format!(
+            "history lookup exceeded the {MAX_HISTORY_PAGES}-page safety bound"
+        )))
+    }
+
+    async fn request_json(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, AppError> {
+        // Read both files for every tool call. x0xd may rotate its listener or
+        // durable token during a managed-agent restart.
+        let endpoint = resolve_endpoint(&self.config.data_dir)?;
+        let url = format!("{}{}", endpoint.base_url, path);
+        let mut request = self
+            .client
+            .request(method, url)
+            .bearer_auth(endpoint.api_token);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| AppError::new(format!("x0xd request failed: {error}")))?;
+        decode_response(response).await
+    }
+
+    pub fn server_instructions(&self) -> String {
+        format!(
+            "Native x0x space tools for managed agent {} owned by {} in space {}. No relay or Nostr transport is available.",
+            self.config.agent_id, self.config.owner_agent_id, self.config.stable_group_id
+        )
+    }
+}
+
+struct Endpoint {
+    base_url: String,
+    api_token: String,
+}
+
+fn resolve_endpoint(data_dir: &Path) -> Result<Endpoint, AppError> {
+    let address_text = read_control_file(&data_dir.join("api.port"), "api.port")?;
+    let address: SocketAddr = address_text
+        .parse()
+        .map_err(|_| AppError::new("api.port must contain a numeric socket address"))?;
+    if !address.ip().is_loopback() || address.port() == 0 {
+        return Err(AppError::new(
+            "api.port must identify a non-zero loopback listener",
+        ));
+    }
+    let api_token = read_control_file(&data_dir.join("api-token"), "api-token")?;
+    if api_token.len() > MAX_API_TOKEN_BYTES
+        || api_token
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(AppError::new("api-token has an invalid format"));
+    }
+    let host = match address {
+        SocketAddr::V4(value) => value.ip().to_string(),
+        SocketAddr::V6(value) => format!("[{}]", value.ip()),
+    };
+    Ok(Endpoint {
+        base_url: format!("http://{host}:{}", address.port()),
+        api_token,
+    })
+}
+
+fn read_control_file(path: &Path, label: &str) -> Result<String, AppError> {
+    let value = std::fs::read_to_string(path)
+        .map_err(|error| AppError::new(format!("failed to read {label}: {error}")))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::new(format!("{label} is empty")));
+    }
+    Ok(value.to_owned())
+}
+
+async fn decode_response(response: reqwest::Response) -> Result<Value, AppError> {
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| AppError::new(format!("failed to read x0xd response: {error}")))?;
+    if bytes.len() > MAX_API_RESPONSE_BYTES {
+        return Err(AppError::new("x0xd response exceeds the size limit"));
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| AppError::new(format!("x0xd returned invalid JSON: {error}")))?;
+    if status.is_success() {
+        return Ok(value);
+    }
+    Err(http_error(status, &value))
+}
+
+fn http_error(status: StatusCode, value: &Value) -> AppError {
+    let detail = value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("request rejected");
+    AppError::new(format!("x0xd returned HTTP {}: {detail}", status.as_u16()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceSend {
+    text: String,
+    #[serde(default)]
+    mentions: Vec<String>,
+    #[serde(default)]
+    thread_root: Option<String>,
+    #[serde(default)]
+    thread_parent: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelMessageEnvelope<'a> {
+    text: &'a str,
+    created_at: u64,
+    client_id: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<String>,
+    agent_generated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_generation: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delegation_root: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentDelegation {
+    generation: u8,
+    root: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolHistoryPage {
+    records: Vec<ToolHistoryRow>,
+    #[serde(default)]
+    next_before_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolHistoryRow {
+    msg_id: String,
+    scope: String,
+    author_agent: Option<String>,
+    direction: String,
+    provenance: String,
+    signed: bool,
+    payload: String,
+    #[serde(default)]
+    thread_root: Option<String>,
+    #[serde(default)]
+    thread_parent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReceivedChannelEnvelope {
+    #[serde(default)]
+    mentions: Vec<String>,
+    #[serde(default)]
+    agent_generated: bool,
+    #[serde(default)]
+    agent_generation: Option<u8>,
+    #[serde(default)]
+    delegation_root: Option<String>,
+}
+
+impl ToolHistoryRow {
+    fn envelope(&self) -> Option<ReceivedChannelEnvelope> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(self.payload.as_bytes())
+            .ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn is_verified_inbound(&self, group_id: &str) -> bool {
+        self.scope == format!("group:{group_id}")
+            && self.direction == "Inbound"
+            && self.provenance == "VerifiedEnvelope"
+            && self.signed
+    }
+
+    #[cfg(test)]
+    fn with_scope_group(mut self, group_id: &str) -> Self {
+        self.scope = format!("group:{group_id}");
+        self
+    }
+}
+
+#[derive(Serialize)]
+struct GroupSendBody {
+    body: String,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_parent: Option<String>,
+}
+
+fn parse_send_arguments(arguments: Value) -> Result<SpaceSend, AppError> {
+    let request: SpaceSend = serde_json::from_value(arguments)
+        .map_err(|error| AppError::new(format!("invalid space_send arguments: {error}")))?;
+    if request.text.trim().is_empty() {
+        return Err(AppError::new("text must not be empty"));
+    }
+    if request.mentions.len() > MAX_MENTIONS {
+        return Err(AppError::new(format!(
+            "mentions exceeds the maximum of {MAX_MENTIONS}"
+        )));
+    }
+    for mention in &request.mentions {
+        validate_hex_id("mention", mention, MAX_AGENT_ID_BYTES)?;
+    }
+    validate_optional_message_id("thread_root", request.thread_root.as_deref())?;
+    validate_optional_message_id("thread_parent", request.thread_parent.as_deref())?;
+    if request.thread_parent.is_some() && request.thread_root.is_none() {
+        return Err(AppError::new(
+            "thread_parent requires thread_root to also be set",
+        ));
+    }
+    Ok(request)
+}
+
+fn derive_delegation(
+    config: &RuntimeConfig,
+    request: &SpaceSend,
+    parent: &ToolHistoryRow,
+) -> Result<Option<AgentDelegation>, AppError> {
+    let Some(thread_root) = request.thread_root.as_deref() else {
+        return Ok(None);
+    };
+    let Some(thread_parent) = request.thread_parent.as_deref() else {
+        return Ok(None);
+    };
+    if thread_parent != parent.msg_id || !parent.is_verified_inbound(&config.stable_group_id) {
+        return Ok(None);
+    }
+    let Some(author) = parent.author_agent.as_deref() else {
+        return Ok(None);
+    };
+    if author.eq_ignore_ascii_case(&config.agent_id) {
+        return Ok(None);
+    }
+    let Some(envelope) = parent.envelope() else {
+        return Ok(None);
+    };
+    if !envelope
+        .mentions
+        .iter()
+        .any(|mention| mention.eq_ignore_ascii_case(&config.agent_id))
+    {
+        return Ok(None);
+    }
+
+    if !envelope.agent_generated {
+        if author.eq_ignore_ascii_case(&config.owner_agent_id)
+            && thread_root == parent.msg_id
+            && parent.thread_root.is_none()
+            && parent.thread_parent.is_none()
+        {
+            return Ok(Some(AgentDelegation {
+                generation: 1,
+                root: parent.msg_id.clone(),
+            }));
+        }
+        return Ok(None);
+    }
+
+    let (Some(generation), Some(root)) = (
+        envelope.agent_generation,
+        envelope.delegation_root.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    if generation == 0 || thread_root != root {
+        return Ok(None);
+    }
+    if generation >= MAX_AGENT_GENERATION {
+        return Err(AppError::new(format!(
+            "agent delegation exceeds the maximum generation of {MAX_AGENT_GENERATION}"
+        )));
+    }
+    if generation != 1
+        || parent.thread_root.as_deref() != Some(root)
+        || parent.thread_parent.as_deref() != Some(root)
+    {
+        return Ok(None);
+    }
+    let Some(next_generation) = generation.checked_add(1) else {
+        return Err(AppError::new("agent delegation generation overflow"));
+    };
+    Ok(Some(AgentDelegation {
+        generation: next_generation,
+        root: root.to_owned(),
+    }))
+}
+
+fn build_group_send_body(
+    request: SpaceSend,
+    delegation: Option<AgentDelegation>,
+) -> Result<Value, AppError> {
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AppError::new("system clock is before the Unix epoch"))?
+        .as_millis();
+    let created_at = u64::try_from(created_at)
+        .map_err(|_| AppError::new("current timestamp exceeds the supported range"))?;
+    let envelope = ChannelMessageEnvelope {
+        text: &request.text,
+        created_at,
+        client_id: uuid::Uuid::new_v4().to_string(),
+        mentions: request.mentions,
+        // This marker is server-owned rather than a space_send argument, so
+        // an agent cannot omit or override the recursion/audit guard.
+        agent_generated: true,
+        agent_generation: delegation.as_ref().map(|value| value.generation),
+        delegation_root: delegation.as_ref().map(|value| value.root.as_str()),
+    };
+    let body = serde_json::to_string(&envelope)
+        .map_err(|error| AppError::new(format!("failed to encode message: {error}")))?;
+    if body.len() > MAX_PUBLIC_MESSAGE_BYTES {
+        return Err(AppError::new(format!(
+            "encoded message exceeds the {MAX_PUBLIC_MESSAGE_BYTES}-byte x0xd limit"
+        )));
+    }
+    serde_json::to_value(GroupSendBody {
+        body,
+        kind: "chat",
+        thread_root: request.thread_root,
+        thread_parent: request.thread_parent,
+    })
+    .map_err(|error| AppError::new(format!("failed to encode group request: {error}")))
+}
+
+fn validate_no_arguments(arguments: &Value) -> Result<(), AppError> {
+    let Some(object) = arguments.as_object() else {
+        return Err(AppError::new("arguments must be an object"));
+    };
+    if object.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::new("space_members does not accept arguments"))
+    }
+}
+
+fn validate_optional_message_id(label: &str, value: Option<&str>) -> Result<(), AppError> {
+    if let Some(value) = value {
+        validate_hex_id(label, value, 64)?;
+    }
+    Ok(())
+}
+
+fn validate_hex_id(label: &str, value: &str, expected_bytes: usize) -> Result<(), AppError> {
+    if value.len() == expected_bytes
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Ok(());
+    }
+    Err(AppError::new(format!(
+        "{label} must be exactly {expected_bytes} lowercase hexadecimal characters"
+    )))
+}
+
+fn required_env(name: &str) -> Result<String, AppError> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::new(format!("missing required environment variable {name}")))
+}
+
+pub fn initialize_result(tools: &X0xTools) -> Value {
+    json!({
+        "protocolVersion": "2025-06-18",
+        "capabilities": { "tools": {} },
+        "serverInfo": {
+            "name": "buzz-x0x-mcp",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "instructions": tools.server_instructions()
+    })
+}
+
+pub async fn handle_request(tools: &X0xTools, request: &Value) -> Option<Value> {
+    let id = request.get("id").cloned()?;
+    if id.is_null() {
+        return None;
+    }
+    let method = request.get("method").and_then(Value::as_str);
+    let result = match method {
+        Some("initialize") => Ok(initialize_result(tools)),
+        Some("ping") => Ok(json!({})),
+        Some("tools/list") => Ok(tools.tools_list()),
+        Some("tools/call") => handle_tool_call(tools, request).await,
+        Some(other) => {
+            return Some(json_rpc_error(
+                id,
+                -32601,
+                format!("method not found: {other}"),
+            ));
+        }
+        None => {
+            return Some(json_rpc_error(
+                id,
+                -32600,
+                "request method must be a string".to_owned(),
+            ));
+        }
+    };
+
+    match result {
+        Ok(result) => Some(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+        Err(error) => Some(tool_error_result(id, &error.to_string())),
+    }
+}
+
+async fn handle_tool_call(tools: &X0xTools, request: &Value) -> Result<Value, AppError> {
+    let params = request
+        .get("params")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("tools/call params must be an object"))?;
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("tools/call name must be a string"))?;
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let value = tools.call_tool(name, arguments).await?;
+    let text = serde_json::to_string(&value)
+        .map_err(|error| AppError::new(format!("failed to encode tool result: {error}")))?;
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": false
+    }))
+}
+
+pub fn parse_error_response() -> Value {
+    json_rpc_error(Value::Null, -32700, "invalid JSON".to_owned())
+}
+
+fn tool_error_result(id: Value, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{ "type": "text", "text": message }],
+            "isError": true
+        }
+    })
+}
+
+fn json_rpc_error(id: Value, code: i64, message: String) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    const AGENT_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OWNER_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const GROUP_ID: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn send_body_matches_desktop_native_envelope_and_threads() {
+        let root = "d".repeat(64);
+        let request = parse_send_arguments(json!({
+            "text": "work complete",
+            "mentions": [OWNER_ID],
+            "thread_root": root,
+            "thread_parent": root
+        }))
+        .expect("valid arguments");
+        let body = build_group_send_body(
+            request,
+            Some(AgentDelegation {
+                generation: 1,
+                root: "d".repeat(64),
+            }),
+        )
+        .expect("valid send body");
+        assert_eq!(body["kind"], "chat");
+        assert_eq!(body["thread_root"], "d".repeat(64));
+        assert_eq!(body["thread_parent"], "d".repeat(64));
+        let envelope: Value =
+            serde_json::from_str(body["body"].as_str().expect("body string")).expect("envelope");
+        assert_eq!(envelope["text"], "work complete");
+        assert_eq!(envelope["mentions"][0], OWNER_ID);
+        assert_eq!(envelope["agentGenerated"], true);
+        assert_eq!(envelope["agentGeneration"], 1);
+        assert_eq!(envelope["delegationRoot"], "d".repeat(64));
+        assert!(envelope["createdAt"].as_u64().is_some());
+        assert!(uuid::Uuid::parse_str(envelope["clientId"].as_str().expect("client id")).is_ok());
+    }
+
+    #[test]
+    fn send_validation_rejects_bad_ids_parent_without_root_and_oversize() {
+        let bad_mention = parse_send_arguments(json!({
+            "text": "hello",
+            "mentions": ["ABC"]
+        }));
+        assert!(bad_mention.is_err());
+
+        let missing_root = parse_send_arguments(json!({
+            "text": "hello",
+            "thread_parent": "d".repeat(64)
+        }));
+        assert!(missing_root.is_err());
+
+        let marker_override = parse_send_arguments(json!({
+            "text": "hello",
+            "agentGenerated": false
+        }));
+        assert!(marker_override.is_err());
+        let generation_override = parse_send_arguments(json!({
+            "text": "hello",
+            "agentGeneration": 1,
+            "delegationRoot": "d".repeat(64)
+        }));
+        assert!(generation_override.is_err());
+
+        let request = parse_send_arguments(json!({ "text": "x".repeat(MAX_PUBLIC_MESSAGE_BYTES) }))
+            .expect("text parses before envelope size check");
+        assert!(build_group_send_body(request, None).is_err());
+    }
+
+    #[test]
+    fn owner_parent_derives_first_generation_and_agent_parent_derives_second() {
+        let config =
+            RuntimeConfig::for_test(PathBuf::from("/tmp/x0x"), AGENT_ID, OWNER_ID, GROUP_ID);
+        let root = "d".repeat(64);
+        let first_request = parse_send_arguments(json!({
+            "text": "delegate to X",
+            "mentions": ["e".repeat(64)],
+            "thread_root": root,
+            "thread_parent": root
+        }))
+        .expect("first request");
+        let owner_parent =
+            tool_history_row(&root, OWNER_ID, AGENT_ID, false, None, None, None, None);
+        assert_eq!(
+            derive_delegation(&config, &first_request, &owner_parent).expect("first derivation"),
+            Some(AgentDelegation {
+                generation: 1,
+                root: root.clone()
+            })
+        );
+
+        let first_msg_id = "e".repeat(64);
+        let second_request = parse_send_arguments(json!({
+            "text": "report to owner",
+            "mentions": [OWNER_ID],
+            "thread_root": root,
+            "thread_parent": first_msg_id
+        }))
+        .expect("second request");
+        let first_parent = tool_history_row(
+            &first_msg_id,
+            &"f".repeat(64),
+            AGENT_ID,
+            true,
+            Some(1),
+            Some(&root),
+            Some(&root),
+            Some(&root),
+        );
+        assert_eq!(
+            derive_delegation(&config, &second_request, &first_parent).expect("second derivation"),
+            Some(AgentDelegation {
+                generation: 2,
+                root: root.clone()
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_or_over_depth_parent_cannot_extend_delegation() {
+        let config =
+            RuntimeConfig::for_test(PathBuf::from("/tmp/x0x"), AGENT_ID, OWNER_ID, GROUP_ID);
+        let root = "d".repeat(64);
+        let parent_id = "e".repeat(64);
+        let request = parse_send_arguments(json!({
+            "text": "keep delegating",
+            "mentions": [OWNER_ID],
+            "thread_root": root,
+            "thread_parent": parent_id
+        }))
+        .expect("request");
+        let unrelated_human = tool_history_row(
+            &parent_id,
+            &"f".repeat(64),
+            AGENT_ID,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            derive_delegation(&config, &request, &unrelated_human).expect("safe rejection"),
+            None
+        );
+
+        let actual_root = "f".repeat(64);
+        let rebase_request = parse_send_arguments(json!({
+            "text": "rebase owner reply",
+            "mentions": [OWNER_ID],
+            "thread_root": parent_id,
+            "thread_parent": parent_id
+        }))
+        .expect("rebase request");
+        let threaded_owner = tool_history_row(
+            &parent_id,
+            OWNER_ID,
+            AGENT_ID,
+            false,
+            None,
+            None,
+            Some(&actual_root),
+            Some(&actual_root),
+        );
+        assert_eq!(
+            derive_delegation(&config, &rebase_request, &threaded_owner)
+                .expect("threaded owner rejection"),
+            None
+        );
+
+        for parent_thread in [None, Some(actual_root.as_str())] {
+            let malformed_first_parent = tool_history_row(
+                &parent_id,
+                &"f".repeat(64),
+                AGENT_ID,
+                true,
+                Some(1),
+                Some(&root),
+                Some(&root),
+                parent_thread,
+            );
+            assert_eq!(
+                derive_delegation(&config, &request, &malformed_first_parent)
+                    .expect("malformed first generation rejection"),
+                None
+            );
+        }
+
+        let second_parent = tool_history_row(
+            &parent_id,
+            &"f".repeat(64),
+            AGENT_ID,
+            true,
+            Some(2),
+            Some(&root),
+            Some(&root),
+            Some(&root),
+        );
+        assert!(derive_delegation(&config, &request, &second_parent).is_err());
+    }
+
+    #[test]
+    fn delegation_gate_uses_stable_group_id_not_the_route_alias() {
+        const ROUTE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        const STABLE: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        let config = RuntimeConfig::for_test(PathBuf::from("/tmp/x0x"), AGENT_ID, OWNER_ID, ROUTE)
+            .with_stable_group_id(STABLE);
+        let root = "d".repeat(64);
+        let request = parse_send_arguments(json!({
+            "text": "delegate to X",
+            "mentions": ["e".repeat(64)],
+            "thread_root": root,
+            "thread_parent": root
+        }))
+        .expect("request");
+
+        let stable_parent =
+            tool_history_row(&root, OWNER_ID, AGENT_ID, false, None, None, None, None)
+                .with_scope_group(STABLE);
+        assert_eq!(
+            derive_delegation(&config, &request, &stable_parent).expect("stable parent"),
+            Some(AgentDelegation {
+                generation: 1,
+                root: root.clone()
+            })
+        );
+
+        let aliased_parent = stable_parent.with_scope_group(ROUTE);
+        assert_eq!(
+            derive_delegation(&config, &request, &aliased_parent).expect("alias must not verify"),
+            None
+        );
+    }
+
+    #[test]
+    fn endpoint_resolution_rejects_non_loopback_and_invalid_token() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        std::fs::write(directory.path().join("api.port"), "192.0.2.1:1234\n").expect("write port");
+        std::fs::write(directory.path().join("api-token"), "secret\n").expect("write token");
+        assert!(resolve_endpoint(directory.path()).is_err());
+
+        std::fs::write(directory.path().join("api.port"), "127.0.0.1:1234\n").expect("write port");
+        std::fs::write(directory.path().join("api-token"), "bad token\n").expect("write token");
+        assert!(resolve_endpoint(directory.path()).is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_calls_reread_endpoint_and_token_each_time() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let first = spawn_fake_server(
+            "GET",
+            &format!("/groups/{GROUP_ID}/members"),
+            "token-one",
+            None,
+            json!({"ok": true, "member_count": 2}),
+        );
+        write_endpoint(directory.path(), first.address, "token-one");
+        let tools = X0xTools::new(RuntimeConfig::for_test(
+            directory.path().to_path_buf(),
+            AGENT_ID,
+            OWNER_ID,
+            GROUP_ID,
+        ))
+        .expect("tools");
+        let members = tools
+            .call_tool("space_members", json!({}))
+            .await
+            .expect("members call");
+        assert_eq!(members["member_count"], 2);
+        first.join.join().expect("first server");
+
+        let second = spawn_fake_server(
+            "POST",
+            &format!("/groups/{GROUP_ID}/send"),
+            "token-two",
+            Some("reply from agent"),
+            json!({"ok": true, "msg_id": "e".repeat(64)}),
+        );
+        write_endpoint(directory.path(), second.address, "token-two");
+        let sent = tools
+            .call_tool(
+                "space_send",
+                json!({"text": "reply from agent", "mentions": [OWNER_ID]}),
+            )
+            .await
+            .expect("send call");
+        assert_eq!(sent["msg_id"], "e".repeat(64));
+        second.join.join().expect("second server");
+    }
+
+    #[tokio::test]
+    async fn threaded_space_send_derives_server_owned_delegation_metadata() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = "d".repeat(64);
+        let server = spawn_threaded_send_server(&root, None, true);
+        write_endpoint(directory.path(), server.address, "thread-token");
+        let tools = X0xTools::new(RuntimeConfig::for_test(
+            directory.path().to_path_buf(),
+            AGENT_ID,
+            OWNER_ID,
+            GROUP_ID,
+        ))
+        .expect("tools");
+
+        let sent = tools
+            .call_tool(
+                "space_send",
+                json!({
+                    "text": "delegate to X",
+                    "mentions": ["e".repeat(64)],
+                    "thread_root": root,
+                    "thread_parent": root
+                }),
+            )
+            .await
+            .expect("threaded send");
+        assert_eq!(sent["msg_id"], "f".repeat(64));
+        server.join.join().expect("threaded server");
+    }
+
+    #[tokio::test]
+    async fn threaded_owner_reply_is_not_rebased_by_production_tool_path() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let parent_id = "d".repeat(64);
+        let actual_root = "e".repeat(64);
+        let server = spawn_threaded_send_server(&parent_id, Some(&actual_root), false);
+        write_endpoint(directory.path(), server.address, "thread-token");
+        let tools = X0xTools::new(RuntimeConfig::for_test(
+            directory.path().to_path_buf(),
+            AGENT_ID,
+            OWNER_ID,
+            GROUP_ID,
+        ))
+        .expect("tools");
+
+        let sent = tools
+            .call_tool(
+                "space_send",
+                json!({
+                    "text": "do not rebase",
+                    "mentions": ["f".repeat(64)],
+                    "thread_root": parent_id,
+                    "thread_parent": parent_id
+                }),
+            )
+            .await
+            .expect("safe unmarked send");
+        assert_eq!(sent["msg_id"], "f".repeat(64));
+        server.join.join().expect("threaded server");
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_stable_id_for_history_and_route_id_for_members() {
+        const ROUTE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        const STABLE: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = spawn_resolve_and_members_server(ROUTE, STABLE);
+        write_endpoint(directory.path(), server.address, "resolve-token");
+        let mut tools = X0xTools::new(RuntimeConfig::for_test(
+            directory.path().to_path_buf(),
+            AGENT_ID,
+            OWNER_ID,
+            ROUTE,
+        ))
+        .expect("tools");
+        tools
+            .resolve_stable_group_id()
+            .await
+            .expect("resolve stable id");
+        assert_eq!(tools.config.stable_group_id(), STABLE);
+        assert_eq!(tools.config.group_id(), ROUTE);
+
+        let members = tools
+            .call_tool("space_members", json!({}))
+            .await
+            .expect("members call");
+        assert_eq!(members["member_count"], 2);
+        server.join.join().expect("resolve server");
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_lists_tools_and_returns_tool_errors_as_results() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let tools = X0xTools::new(RuntimeConfig::for_test(
+            directory.path().to_path_buf(),
+            AGENT_ID,
+            OWNER_ID,
+            GROUP_ID,
+        ))
+        .expect("tools");
+
+        let initialize = handle_request(
+            &tools,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        )
+        .await
+        .expect("initialize response");
+        assert_eq!(initialize["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(initialize["result"]["serverInfo"]["name"], "buzz-x0x-mcp");
+
+        let list = handle_request(
+            &tools,
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        )
+        .await
+        .expect("tools/list response");
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, ["space_members", "space_send"]);
+        assert!(!names.iter().any(|name| name.starts_with("community_")));
+        let send_schema = list["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool["name"] == "space_send")
+            .map(|tool| &tool["inputSchema"])
+            .expect("space_send schema");
+        assert_eq!(send_schema["required"], json!(["text"]));
+        assert_eq!(send_schema["additionalProperties"], false);
+        assert!(send_schema["properties"].get("agentGenerated").is_none());
+        assert!(send_schema["properties"].get("agentGeneration").is_none());
+        assert!(send_schema["properties"].get("delegationRoot").is_none());
+
+        let invalid = handle_request(
+            &tools,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "space_send", "arguments": {"text": ""}}
+            }),
+        )
+        .await
+        .expect("tool error response");
+        assert_eq!(invalid["result"]["isError"], true);
+        assert!(invalid["result"]["content"][0]["text"]
+            .as_str()
+            .expect("error text")
+            .contains("must not be empty"));
+
+        let legacy = handle_request(
+            &tools,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "community_send", "arguments": {"text": "no"}}
+            }),
+        )
+        .await
+        .expect("legacy tool error response");
+        assert_eq!(legacy["result"]["isError"], true);
+        assert!(legacy["result"]["content"][0]["text"]
+            .as_str()
+            .expect("legacy error text")
+            .contains("unknown tool: community_send"));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tool_history_row(
+        msg_id: &str,
+        author: &str,
+        mention: &str,
+        agent_generated: bool,
+        agent_generation: Option<u8>,
+        delegation_root: Option<&str>,
+        thread_root: Option<&str>,
+        thread_parent: Option<&str>,
+    ) -> ToolHistoryRow {
+        let mut envelope = json!({
+            "text": "delegation",
+            "createdAt": 1,
+            "clientId": "client",
+            "mentions": [mention],
+            "agentGenerated": agent_generated,
+        });
+        if let Some(generation) = agent_generation {
+            envelope["agentGeneration"] = json!(generation);
+        }
+        if let Some(root) = delegation_root {
+            envelope["delegationRoot"] = json!(root);
+        }
+        ToolHistoryRow {
+            msg_id: msg_id.to_owned(),
+            scope: format!("group:{GROUP_ID}"),
+            author_agent: Some(author.to_owned()),
+            direction: "Inbound".to_owned(),
+            provenance: "VerifiedEnvelope".to_owned(),
+            signed: true,
+            payload: base64::engine::general_purpose::STANDARD.encode(envelope.to_string()),
+            thread_root: thread_root.map(str::to_owned),
+            thread_parent: thread_parent.map(str::to_owned),
+        }
+    }
+
+    struct FakeServer {
+        address: SocketAddr,
+        join: thread::JoinHandle<()>,
+    }
+
+    fn spawn_fake_server(
+        method: &'static str,
+        path: &str,
+        token: &'static str,
+        expected_text: Option<&'static str>,
+        response: Value,
+    ) -> FakeServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake x0xd");
+        let address = listener.local_addr().expect("fake address");
+        let path = path.to_owned();
+        let response = response.to_string();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let request = read_http_request(&mut stream);
+            assert!(request.starts_with(&format!("{method} {path} HTTP/1.1\r\n")));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer {token}").to_ascii_lowercase()));
+            if let Some(text) = expected_text {
+                let (_, body) = request.split_once("\r\n\r\n").expect("request body");
+                let group_send: Value = serde_json::from_str(body).expect("group send JSON");
+                let envelope: Value = serde_json::from_str(
+                    group_send["body"].as_str().expect("native envelope string"),
+                )
+                .expect("native envelope JSON");
+                assert_eq!(envelope["text"], text);
+                assert_eq!(envelope["mentions"][0], OWNER_ID);
+                assert_eq!(envelope["agentGenerated"], true);
+            }
+            let wire = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response
+            );
+            stream.write_all(wire.as_bytes()).expect("write response");
+        });
+        FakeServer { address, join }
+    }
+
+    fn spawn_resolve_and_members_server(route: &str, stable: &str) -> FakeServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake x0xd");
+        let address = listener.local_addr().expect("fake address");
+        let route = route.to_owned();
+        let stable = stable.to_owned();
+        let join = thread::spawn(move || {
+            let (mut detail_stream, _) = listener.accept().expect("accept group detail");
+            detail_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("detail read timeout");
+            let detail_request = read_http_request(&mut detail_stream);
+            assert!(
+                detail_request.starts_with(&format!("GET /groups/{route} HTTP/1.1\r\n")),
+                "expected group detail for route id, got {detail_request}"
+            );
+            write_json_response(
+                &mut detail_stream,
+                &json!({"ok": true, "policy": {"confidentiality": "signed_public"}}),
+            );
+
+            let (mut state_stream, _) = listener.accept().expect("accept group state");
+            state_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("state read timeout");
+            let state_request = read_http_request(&mut state_stream);
+            assert!(
+                state_request.starts_with(&format!("GET /groups/{route}/state HTTP/1.1\r\n")),
+                "expected group state for route id, got {state_request}"
+            );
+            write_json_response(&mut state_stream, &json!({"ok": true, "group_id": stable}));
+
+            let (mut members_stream, _) = listener.accept().expect("accept members");
+            members_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("members read timeout");
+            let members_request = read_http_request(&mut members_stream);
+            assert!(
+                members_request.starts_with(&format!("GET /groups/{route}/members HTTP/1.1\r\n")),
+                "members must keep the launch route id, got {members_request}"
+            );
+            write_json_response(&mut members_stream, &json!({"ok": true, "member_count": 2}));
+        });
+        FakeServer { address, join }
+    }
+
+    fn spawn_threaded_send_server(
+        parent_id: &str,
+        parent_ancestry: Option<&str>,
+        expect_delegation: bool,
+    ) -> FakeServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake x0xd");
+        let address = listener.local_addr().expect("fake address");
+        let parent_id = parent_id.to_owned();
+        let parent_ancestry = parent_ancestry.map(str::to_owned);
+        let join = thread::spawn(move || {
+            let parent = tool_history_row(
+                &parent_id,
+                OWNER_ID,
+                AGENT_ID,
+                false,
+                None,
+                None,
+                parent_ancestry.as_deref(),
+                parent_ancestry.as_deref(),
+            );
+            let history = json!({
+                "ok": true,
+                "count": 1,
+                "next_before_id": null,
+                "records": [{
+                    "msg_id": parent.msg_id,
+                    "scope": parent.scope,
+                    "author_agent": parent.author_agent,
+                    "direction": parent.direction,
+                    "provenance": parent.provenance,
+                    "signed": parent.signed,
+                    "payload": parent.payload,
+                    "thread_root": parent.thread_root,
+                    "thread_parent": parent.thread_parent,
+                }]
+            });
+            let (mut history_stream, _) = listener.accept().expect("accept history request");
+            history_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("history read timeout");
+            let history_request = read_http_request(&mut history_stream);
+            assert!(history_request.starts_with(&format!(
+                "GET /history?scope=group:{GROUP_ID}&limit={HISTORY_PAGE_SIZE} HTTP/1.1\r\n"
+            )));
+            assert!(history_request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer thread-token"));
+            write_json_response(&mut history_stream, &history);
+
+            let (mut send_stream, _) = listener.accept().expect("accept send request");
+            send_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("send read timeout");
+            let send_request = read_http_request(&mut send_stream);
+            assert!(send_request.starts_with(&format!("POST /groups/{GROUP_ID}/send HTTP/1.1\r\n")));
+            let (_, body) = send_request.split_once("\r\n\r\n").expect("request body");
+            let group_send: Value = serde_json::from_str(body).expect("group send JSON");
+            let envelope: Value =
+                serde_json::from_str(group_send["body"].as_str().expect("native envelope string"))
+                    .expect("native envelope JSON");
+            assert_eq!(envelope["agentGenerated"], true);
+            if expect_delegation {
+                assert_eq!(envelope["agentGeneration"], 1);
+                assert_eq!(envelope["delegationRoot"], parent_id);
+            } else {
+                assert!(envelope.get("agentGeneration").is_none());
+                assert!(envelope.get("delegationRoot").is_none());
+            }
+            write_json_response(
+                &mut send_stream,
+                &json!({"ok": true, "msg_id": "f".repeat(64)}),
+            );
+        });
+        FakeServer { address, join }
+    }
+
+    fn write_json_response(stream: &mut std::net::TcpStream, response: &Value) {
+        let response = response.to_string();
+        let wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.len(), response
+        );
+        stream.write_all(wire.as_bytes()).expect("write response");
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 2048];
+        loop {
+            let count = stream.read(&mut buffer).expect("read request");
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                let header_end = header_end + 4;
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_owned)
+                    })
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if bytes.len() >= header_end + content_length {
+                    break;
+                }
+            }
+        }
+        String::from_utf8(bytes).expect("UTF-8 request")
+    }
+
+    fn write_endpoint(directory: &Path, address: SocketAddr, token: &str) {
+        std::fs::write(directory.join("api.port"), format!("{address}\n")).expect("write port");
+        std::fs::write(directory.join("api-token"), format!("{token}\n")).expect("write token");
+    }
+}
