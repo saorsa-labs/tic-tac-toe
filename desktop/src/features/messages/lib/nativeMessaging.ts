@@ -388,14 +388,12 @@ export async function fetchNativeThreadReplies(
 }
 
 /**
- * Resolve specific native messages by canonical msg_id via the daemon's
- * indexed `x0x_history_get` point lookup — no history paging, no payload
- * scan. Lookups run in parallel; a canonical id is globally unique within one
- * daemon's store, so each resolves to at most one local row.
+ * Resolve specific native messages by exposed msg_id via the daemon's
+ * `x0x_history_get` point lookup — no history paging, no payload scan.
+ * Lookups run in parallel. Canonical group ids require the channel scope
+ * (x0x #322); a hit in another scope is still dropped below.
  *
- * Scope-scoping is preserved: only rows whose `scope` matches this channel's
- * canonical scope are projected (a hit in another scope is a different
- * conversation). Rows that are not renderable channel messages are skipped.
+ * Rows that are not renderable channel messages are skipped.
  */
 export async function fetchNativeMessagesById(
   channel: Channel,
@@ -404,7 +402,7 @@ export async function fetchNativeMessagesById(
   if (messageIds.size === 0) return [];
   const expectedScope = requireHistoryScope(channel);
   const rows = await Promise.all(
-    [...messageIds].map((id) => x0xHistoryGet(id.toLowerCase())),
+    [...messageIds].map((id) => x0xHistoryGet(id.toLowerCase(), expectedScope)),
   );
   const events: RelayEvent[] = [];
   for (const row of rows) {

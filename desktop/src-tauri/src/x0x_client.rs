@@ -682,10 +682,12 @@ impl X0xClient {
         })
     }
 
-    /// `GET /history/message/:msg_id` — single durable-history row by canonical
-    /// BLAKE3 `msg_id` (lowercase 64-hex). Index-backed point lookup on the
-    /// daemon; no scope hint is needed (`msg_id` is globally unique in one
-    /// store) and no network/cross-user lookup occurs.
+    /// `GET /history/message/:msg_id` — one durable-history row by any id the
+    /// `/history` listing exposes (x0x #322). Store dedupe ids resolve by
+    /// index; canonical ADR-0029 group ids need `scope` (`group:<stable>`)
+    /// so the daemon can scan that scope. The lookup is local-only
+    /// (ADR-0023). Sender-side LocalSend rows may still expose the dedupe
+    /// id (x0x #321) — this client does not match either id.
     ///
     /// Returns `Ok(None)` on `404 NOT_FOUND` (well-formed id, no matching row) —
     /// **distinct** from a transport or decode error, which propagates as
@@ -693,9 +695,13 @@ impl X0xClient {
     pub async fn history_get(
         &self,
         msg_id_hex: &str,
+        scope: Option<&str>,
     ) -> Result<Option<HistoryRow>, X0xClientError> {
         let path = format!("/history/message/{msg_id_hex}");
-        match self.get_json::<HistoryMessageResponse>(&path, &[]).await {
+        let query = scope
+            .map(|scope| vec![("scope".to_string(), scope.to_string())])
+            .unwrap_or_default();
+        match self.get_json::<HistoryMessageResponse>(&path, &query).await {
             Ok(resp) => Ok(resp.record),
             // Not-found is a normal outcome, not a transport fault.
             Err(X0xClientError::Status(404, _)) => Ok(None),

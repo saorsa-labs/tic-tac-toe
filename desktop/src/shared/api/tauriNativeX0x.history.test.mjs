@@ -257,6 +257,18 @@ test("x0x_history_get sends the canonical msgId and maps the daemon row", async 
   assert.equal(row.scope, "group:team-1");
 });
 
+test("x0x_history_get forwards group scope for canonical point lookup", async () => {
+  const msgId = "aa".repeat(32);
+  const scope = `group:${"cc".repeat(32)}`;
+  setResponse((cmd, args) => {
+    assert.equal(cmd, "x0x_history_get");
+    assert.deepEqual(args, { msgId, scope });
+    return rawRow({ id: 42, msg_id: msgId, scope });
+  });
+  const row = await x0xHistoryGet(msgId, scope);
+  assert.equal(row.scope, scope);
+});
+
 test("x0x_history_get returns null when the daemon reports not-found (404)", async () => {
   // The client maps a 404 to null BEFORE it reaches TS; the wire therefore
   // delivers null, which the adapter surfaces as null — distinct from an

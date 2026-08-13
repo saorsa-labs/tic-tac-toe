@@ -268,26 +268,26 @@ export async function x0xHistorySearch(
 // ─── Single-row lookup (canonical msg_id) ───────────────────────────────────
 
 /**
- * `x0x_history_get` — one durable-history row by canonical `msgId`
- * (lowercase 64-hex BLAKE3).
- *
- * This is an index-backed point lookup (the `msg_id` column is `UNIQUE`), not
- * a scan. No scope hint is required: a canonical id is globally unique within
- * one daemon's local store, so it identifies exactly one local row (the
- * daemon never reaches the network for this — ADR-0023 non-goal). Use this in
- * place of any payload/history scan that resolves a message by id.
+ * `x0x_history_get` — one durable-history row by any id `/history` exposes
+ * (lowercase 64-hex). Store-dedupe ids resolve by index. Canonical ADR-0029
+ * group ids need `scope` (`group:<stable>`) so x0xd can scan that scope
+ * (x0x #322). Sender-side LocalSend rows may still project the dedupe id
+ * (x0x #321); this client does not match either id.
  *
  * Returns `null` when the id is well-formed but absent from the local store
  * (HTTP 404) — **distinct** from a transport or decode error, which rejects.
  * A malformed id rejects with the daemon's 400.
  *
- * @param msgId Canonical lowercase 64-hex message id.
+ * @param msgId Exposed lowercase 64-hex message id.
+ * @param scope Optional daemon scope (`group:<stable>`, `dm:<agent>`, `topic:<name>`).
  */
 export async function x0xHistoryGet(
   msgId: string,
+  scope?: string,
 ): Promise<X0xHistoryRow | null> {
   const raw = await invokeTauri<RawX0xHistoryRow | null>("x0x_history_get", {
     msgId,
+    ...(scope ? { scope } : {}),
   });
   return raw ? fromRawX0xHistoryRow(raw) : null;
 }

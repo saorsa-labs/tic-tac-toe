@@ -301,6 +301,18 @@ test("fetchNativeMessagesById throws for an unresolved group (no transient-id po
   assert.equal(calls.length, 0);
 });
 
+test("fetchNativeMessagesById forwards the resolved group scope to point lookup", async () => {
+  const msgId = "a".repeat(64);
+  const scope = "group:stable-resolved";
+  resolveGroup("g-resolved", scope);
+  response = null;
+  await fetchNativeMessagesById(
+    channel({ id: "g-resolved" }),
+    new Set([msgId]),
+  );
+  assert.deepEqual(calls, [{ cmd: "x0x_history_get", args: { msgId, scope } }]);
+});
+
 test("searchNativeMessages skips unresolved groups and queries only resolved scopes", async () => {
   resolveGroup("g-resolved", "group:stable-resolved");
   response = { rows: [], has_more: false };
