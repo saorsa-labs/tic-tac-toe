@@ -37,6 +37,14 @@ stage-sidecars:
 package-macos-dmg-test:
     scripts/package-macos-dmg.test.sh
 
+# ttt #12: refuse campaign-branch x0xd strings in bundled sidecars.
+sidecar-campaign-denylist-test:
+    scripts/sidecar-campaign-denylist.test.sh
+
+# ttt #12: bundled sidecar must DM a released 0.37.2 daemon (no 409).
+mixed-version-dm-smoke:
+    scripts/mixed-version-dm-smoke.sh
+
 # Full validation
 check: desktop-check crates-check
 

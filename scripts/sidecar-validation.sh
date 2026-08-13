@@ -4,6 +4,56 @@
 # externalBin configuration. This file is sourced by the staging and release
 # scripts so both paths enforce the same fail-closed contract.
 
+# Campaign-only protocol strings. They exist on wip/codex-durable-app-ack
+# and were found in the mis-staged v0.5.0/v0.5.1 sidecar (ttt #12). They
+# are absent from every released x0x tag through v0.37.2. Bundled x0xd
+# must not contain them until ADR 0030 is accepted and a released daemon
+# advertises protocol v2.
+X0XD_CAMPAIGN_DENYLIST=(
+  recipient_ack_semantics_unavailable
+  x0x-dm-durable-accepted-binding-v1
+  x0x-dm-thread-v1
+)
+
+# Official x0x v0.37.2 macos-arm64 x0xd, extracted from
+# x0x-macos-arm64.tar.gz (sha256
+# b3e3c49f60154cd7e7c589964cd7fd5d0aa9cdc65cb9a8f124cdcc23f36bcaa9).
+PINNED_X0XD_VERSION="0.37.2"
+PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256="50f7f0b17567ef1153639849ddce1f8fec4a83831cabd692e3a219c93f219742"
+PINNED_X0XD_MACOS_ARM64_TARBALL_SHA256="b3e3c49f60154cd7e7c589964cd7fd5d0aa9cdc65cb9a8f124cdcc23f36bcaa9"
+
+reject_campaign_x0xd() {
+  local binary="$1"
+  local hit
+  if [[ ! -f "$binary" ]]; then
+    echo "FATAL: x0xd sidecar missing: $binary" >&2
+    return 5
+  fi
+  for hit in "${X0XD_CAMPAIGN_DENYLIST[@]}"; do
+    if strings "$binary" | grep -F -q -- "$hit"; then
+      echo "FATAL: $binary contains unreleased campaign string '$hit' (ttt #12)" >&2
+      return 5
+    fi
+  done
+}
+
+assert_official_x0xd_pin() {
+  local binary="$1"
+  reject_campaign_x0xd "$binary" || return $?
+  local ver
+  ver="$("$binary" --version 2>/dev/null || true)"
+  if [[ "$ver" != *"$PINNED_X0XD_VERSION"* ]]; then
+    echo "FATAL: $binary reports '$ver', expected $PINNED_X0XD_VERSION" >&2
+    return 5
+  fi
+  local actual
+  actual="$(shasum -a 256 "$binary" | awk '{print $1}')"
+  if [[ "$actual" != "$PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256" ]]; then
+    echo "FATAL: $binary sha256 $actual != pinned official v${PINNED_X0XD_VERSION} $PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256" >&2
+    return 5
+  fi
+}
+
 validate_managed_agent_sidecars() {
   if [[ $# -lt 2 || $# -gt 3 ]]; then
     echo "FATAL: validate_managed_agent_sidecars requires DIRECTORY TARGET_TRIPLE [NAME_SUFFIX]" >&2

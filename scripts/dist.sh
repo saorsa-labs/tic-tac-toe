@@ -109,14 +109,15 @@ if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
     exit 1
 fi
 
-echo "Validating managed-agent sidecars and building x0xd release sidecar"
-PROFILE=release X0X_DIR="$X0X_DIR" "$ROOT/scripts/stage-sidecars.sh"
+echo "Validating managed-agent sidecars and staging official x0xd $PINNED_X0XD_VERSION"
+PROFILE=release X0XD_SOURCE=official X0X_DIR="$X0X_DIR" "$ROOT/scripts/stage-sidecars.sh"
 
-X0XD_OUT="$X0X_DIR/target/release/x0xd"
+X0XD_OUT="$DESKTOP_DIR/src-tauri/binaries/x0xd-$TARGET_TRIPLE"
 if [[ ! -x "$X0XD_OUT" ]]; then
-    echo "x0xd build failed: $X0XD_OUT is missing" >&2
+    echo "official x0xd sidecar missing: $X0XD_OUT" >&2
     exit 1
 fi
+assert_official_x0xd_pin "$X0XD_OUT"
 
 X0XD_VERSION="$($X0XD_OUT --version)"
 if [[ "$X0XD_VERSION" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
@@ -141,8 +142,9 @@ fi
 validate_managed_agent_sidecars "$APP_BUNDLE/Contents/MacOS" "$TARGET_TRIPLE" ""
 
 BUNDLED_X0XD="$APP_BUNDLE/Contents/MacOS/x0xd"
+assert_official_x0xd_pin "$BUNDLED_X0XD"
 if [[ "$($BUNDLED_X0XD --version)" != "$X0XD_VERSION" ]]; then
-    echo "Bundled x0xd version does not match the built sidecar" >&2
+    echo "Bundled x0xd version does not match the staged sidecar" >&2
     exit 1
 fi
 

@@ -11,8 +11,9 @@ PROFILE="${PROFILE:-release}"
 # shellcheck source=sidecar-validation.sh
 source "$SCRIPT_DIR/sidecar-validation.sh"
 
-if [[ -z "${X0X_DIR:-}" || ! -d "$X0X_DIR" ]]; then
-  echo "FATAL: x0x repo not found (set X0X_DIR)" >&2
+X0XD_SOURCE="${X0XD_SOURCE:-official}"
+if [[ "$X0XD_SOURCE" == "local-build" && ( -z "${X0X_DIR:-}" || ! -d "$X0X_DIR" ) ]]; then
+  echo "FATAL: x0x repo not found (set X0X_DIR) for X0XD_SOURCE=local-build" >&2
   exit 2
 fi
 
@@ -54,16 +55,35 @@ done
 
 validate_managed_agent_sidecars "$BINARY_DIR" "$TRIPLE"
 
-printf '[stage-sidecars] building x0xd (%s) from %s\n' "$PROFILE" "$X0X_DIR" >&2
-(cd "$X0X_DIR" && cargo build --profile "$PROFILE" --locked --bin x0xd)
-
-SOURCE="$X0X_DIR/target/$SUB/x0xd$EXT"
 DEST="$BINARY_DIR/x0xd-$TRIPLE$EXT"
+case "$X0XD_SOURCE" in
+  official)
+    if [[ "$TRIPLE" != "aarch64-apple-darwin" ]]; then
+      echo "FATAL: official x0xd fetch is pinned for aarch64-apple-darwin (ttt #12); set X0XD_SOURCE=local-build for $TRIPLE" >&2
+      exit 2
+    fi
+    printf '[stage-sidecars] fetching official x0xd v%s\n' "$PINNED_X0XD_VERSION" >&2
+    SOURCE="$("$SCRIPT_DIR/fetch-official-x0xd.sh")"
+    ;;
+  local-build)
+    printf '[stage-sidecars] building x0xd (%s) from %s\n' "$PROFILE" "$X0X_DIR" >&2
+    (cd "$X0X_DIR" && cargo build --profile "$PROFILE" --locked --bin x0xd)
+    SOURCE="$X0X_DIR/target/$SUB/x0xd$EXT"
+    ;;
+  *)
+    echo "FATAL: X0XD_SOURCE must be official or local-build (got $X0XD_SOURCE)" >&2
+    exit 2
+    ;;
+esac
 if [[ ! -x "$SOURCE" ]]; then
-  echo "FATAL: built x0xd not found at $SOURCE" >&2
+  echo "FATAL: x0xd not found at $SOURCE" >&2
   exit 3
 fi
 
 cp "$SOURCE" "$DEST"
 chmod +x "$DEST"
+reject_campaign_x0xd "$DEST"
+if [[ "$X0XD_SOURCE" == "official" ]]; then
+  assert_official_x0xd_pin "$DEST"
+fi
 printf '[stage-sidecars] staged %s\n' "$DEST" >&2
