@@ -6,21 +6,23 @@
 
 # Campaign-only protocol strings. They exist on wip/codex-durable-app-ack
 # and were found in the mis-staged v0.5.0/v0.5.1 sidecar (ttt #12). They
-# are absent from every released x0x tag through v0.37.2. Bundled x0xd
-# must not contain them until ADR 0030 is accepted and a released daemon
-# advertises protocol v2.
+# are absent from every released x0x tag through v0.37.4. Bundled x0xd
+# must not contain them until a released daemon advertises protocol v2
+# (ADR 0030 is accepted; v2 is not in 0.37.4).
 X0XD_CAMPAIGN_DENYLIST=(
   recipient_ack_semantics_unavailable
   x0x-dm-durable-accepted-binding-v1
   x0x-dm-thread-v1
 )
 
-# Official x0x v0.37.2 macos-arm64 x0xd, extracted from
+# Official x0x v0.37.4 macos-arm64 x0xd, extracted from
 # x0x-macos-arm64.tar.gz (sha256
-# b3e3c49f60154cd7e7c589964cd7fd5d0aa9cdc65cb9a8f124cdcc23f36bcaa9).
-PINNED_X0XD_VERSION="0.37.2"
-PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256="50f7f0b17567ef1153639849ddce1f8fec4a83831cabd692e3a219c93f219742"
-PINNED_X0XD_MACOS_ARM64_TARBALL_SHA256="b3e3c49f60154cd7e7c589964cd7fd5d0aa9cdc65cb9a8f124cdcc23f36bcaa9"
+# f9f990819e38058c6e46411e3e7d83a4dee219e0cfd90d4bf0ff258cca73f92c).
+# 0.37.4: history schema v4 reader (opens campaign v4 history.db) +
+# saorsa-gossip 0.5.70 interior zero-window guard.
+PINNED_X0XD_VERSION="0.37.4"
+PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256="730b90390c8b08743dc33ab3d72326000a765e6a46d7343d8a5218d9af5a8360"
+PINNED_X0XD_MACOS_ARM64_TARBALL_SHA256="f9f990819e38058c6e46411e3e7d83a4dee219e0cfd90d4bf0ff258cca73f92c"
 
 reject_campaign_x0xd() {
   local binary="$1"
@@ -37,7 +39,11 @@ reject_campaign_x0xd() {
   done
 }
 
-assert_official_x0xd_pin() {
+# Version + campaign-string identity. Used on both the unsigned official
+# asset (plus sha256 pin) and the Developer-ID-signed copy inside the app
+# bundle (sha256 cannot survive codesign; --remove-signature does not
+# restore the original bytes either).
+assert_official_x0xd_identity() {
   local binary="$1"
   reject_campaign_x0xd "$binary" || return $?
   local ver
@@ -46,11 +52,30 @@ assert_official_x0xd_pin() {
     echo "FATAL: $binary reports '$ver', expected $PINNED_X0XD_VERSION" >&2
     return 5
   fi
+}
+
+# Unsigned official GitHub asset. Stage / fetch paths only.
+assert_official_x0xd_pin() {
+  local binary="$1"
+  assert_official_x0xd_identity "$binary" || return $?
   local actual
   actual="$(shasum -a 256 "$binary" | awk '{print $1}')"
   if [[ "$actual" != "$PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256" ]]; then
     echo "FATAL: $binary sha256 $actual != pinned official v${PINNED_X0XD_VERSION} $PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256" >&2
     return 5
+  fi
+}
+
+# Post-codesign copy inside tic-tac-toe.app. Hash is expected to differ
+# from PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256.
+assert_official_x0xd_bundle() {
+  local binary="$1"
+  assert_official_x0xd_identity "$binary" || return $?
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    if ! codesign --verify --verbose=2 "$binary" >/dev/null 2>&1; then
+      echo "FATAL: bundled x0xd is not codesigned: $binary" >&2
+      return 5
+    fi
   fi
 }
 

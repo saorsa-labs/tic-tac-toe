@@ -13,10 +13,13 @@ configured, and publishes both a portable tarball and a signed DMG under
 public release candidate.
 
 `x0xd` is **never cargo-built for distribution**. `dist.sh` fetches the
-official signed `v0.37.2` macos-arm64 asset, checks the tarball and extracted
-binary sha256 pins in `scripts/sidecar-validation.sh`, and refuses campaign
-protocol strings (`recipient_ack_semantics_unavailable` and siblings — ttt
-#12). `just sidecar-campaign-denylist-test` and `just mixed-version-dm-smoke`
+official `v0.37.4` macos-arm64 asset, checks the tarball and *unsigned*
+extracted-binary sha256 pins in `scripts/sidecar-validation.sh`, and refuses
+campaign protocol strings (`recipient_ack_semantics_unavailable` and siblings
+— ttt #12). After Developer ID signing the in-bundle copy is re-checked for
+version + denylist + `codesign --verify` only — codesign changes the bytes,
+so the unsigned pin cannot apply to the bundled binary.
+`just sidecar-campaign-denylist-test` and `just mixed-version-dm-smoke`
 are the local gates.
 
 The DMG is created by `scripts/package-macos-dmg.sh` from the already-signed app
