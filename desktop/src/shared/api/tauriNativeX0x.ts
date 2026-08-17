@@ -344,8 +344,10 @@ export async function x0xSendGroupMessage(input: {
  * `x0x_send_direct_message` — native one-to-one direct message send.
  *
  * `POST /direct/send`: delivers base64 application bytes to a connected agent
- * over the daemon's authenticated DM path (raw-QUIC preferred when a live
- * connection exists, gossip-inbox fallback otherwise). The daemon records the
+ * over the daemon's authenticated DM path. Since x0xd 0.38.0 this is durable
+ * by default (`200` = committed). A 0.37.x peer answers 409
+ * `recipient_ack_semantics_unavailable`. Pass `logicalId` (the envelope
+ * `clientId`) so a retry is the same request. The daemon records the
  * outbound row under `dm:<recipient>`; the canonical `msg_id`
  * (`compute_local_send_msg_id(request_id, payload)`) is reconciled with the
  * optimistic (clientId-keyed) row via the shared `localKey` once history/live

@@ -41,7 +41,7 @@ package-macos-dmg-test:
 sidecar-campaign-denylist-test:
     scripts/sidecar-campaign-denylist.test.sh
 
-# ttt #12: bundled sidecar must DM a released 0.37.4 daemon (no 409).
+# Bundled 0.38.0 product send → 0.37.4 peer must 409; opt-out must deliver.
 mixed-version-dm-smoke:
     scripts/mixed-version-dm-smoke.sh
 

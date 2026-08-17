@@ -18,6 +18,7 @@ import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidate
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { Channel, UserSearchResult } from "@/shared/api/types";
+import { formatDmSendError } from "@/shared/api/dmSendError";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -362,8 +363,7 @@ export function NewMessageScreen() {
         });
       } catch (error) {
         preparedDirectMessageRef.current = null;
-        const message =
-          error instanceof Error ? error.message : "Failed to send message.";
+        const message = formatDmSendError(error, "Failed to send message.");
         setSubmitErrorMessage(message);
         throw error;
       }

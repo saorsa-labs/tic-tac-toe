@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Mixed-version DM smoke (ttt #12): bundled sidecar → released 0.37.4 daemon
-# must deliver. A 409 recipient_ack_semantics_unavailable is a hard fail.
+# Mixed-version DM smoke: bundled official 0.38.0 → released 0.37.4 peer.
+#
+# Product send (durable-by-default) must 409
+# `recipient_ack_semantics_unavailable` — ADR 0030 §2 forbids a silent
+# downgrade. The same pair with `require_durable_app_ack: false` must
+# still deliver (explicit opt-out).
 #
 # Isolated loopback pair: --no-hard-coded-bootstrap, no prod mesh.
 
@@ -12,18 +16,55 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/sidecar-validation.sh"
 
 BUNDLED_X0XD="${BUNDLED_X0XD:-$REPO_ROOT/desktop/src-tauri/binaries/x0xd-aarch64-apple-darwin}"
-RELEASED_X0XD="${RELEASED_X0XD:-}"
+LEGACY_X0XD="${LEGACY_X0XD:-}"
 
 if [[ ! -x "$BUNDLED_X0XD" ]]; then
   echo "FATAL: bundled x0xd missing at $BUNDLED_X0XD (run stage-sidecars or fetch-official-x0xd)" >&2
   exit 2
 fi
-reject_campaign_x0xd "$BUNDLED_X0XD"
+assert_official_x0xd_identity "$BUNDLED_X0XD"
 
-if [[ -z "$RELEASED_X0XD" ]]; then
-  RELEASED_X0XD="$("$SCRIPT_DIR/fetch-official-x0xd.sh")"
+fetch_legacy_x0xd() {
+  local cache="${X0XD_RELEASE_CACHE:-${TMPDIR:-/tmp}/x0x-official-${LEGACY_X0XD_VERSION}}"
+  local tarball="$cache/x0x-macos-arm64.tar.gz"
+  local extract="$cache/extract"
+  local dest="$extract/x0x-macos-arm64/x0xd"
+  local url="https://github.com/saorsa-labs/x0x/releases/download/v${LEGACY_X0XD_VERSION}/x0x-macos-arm64.tar.gz"
+  mkdir -p "$cache"
+  if [[ ! -f "$tarball" ]]; then
+    curl -fsSL -o "$tarball.partial" "$url"
+    mv "$tarball.partial" "$tarball"
+  fi
+  local actual
+  actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+  if [[ "$actual" != "$LEGACY_X0XD_MACOS_ARM64_TARBALL_SHA256" ]]; then
+    echo "FATAL: legacy tarball sha256 $actual != $LEGACY_X0XD_MACOS_ARM64_TARBALL_SHA256" >&2
+    exit 5
+  fi
+  rm -rf "$extract"
+  mkdir -p "$extract"
+  tar -xzf "$tarball" -C "$extract"
+  if [[ ! -x "$dest" ]]; then
+    echo "FATAL: legacy archive did not contain x0xd at $dest" >&2
+    exit 5
+  fi
+  local ver bin_sha
+  ver="$("$dest" --version 2>/dev/null || true)"
+  if [[ "$ver" != *"$LEGACY_X0XD_VERSION"* ]]; then
+    echo "FATAL: $dest reports '$ver', expected $LEGACY_X0XD_VERSION" >&2
+    exit 5
+  fi
+  bin_sha="$(shasum -a 256 "$dest" | awk '{print $1}')"
+  if [[ "$bin_sha" != "$LEGACY_X0XD_AARCH64_APPLE_DARWIN_SHA256" ]]; then
+    echo "FATAL: $dest sha256 $bin_sha != $LEGACY_X0XD_AARCH64_APPLE_DARWIN_SHA256" >&2
+    exit 5
+  fi
+  printf '%s\n' "$dest"
+}
+
+if [[ -z "$LEGACY_X0XD" ]]; then
+  LEGACY_X0XD="$(fetch_legacy_x0xd)"
 fi
-assert_official_x0xd_pin "$RELEASED_X0XD"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ttt-mixdm.XXXXXX")"
 cleanup() {
@@ -46,8 +87,9 @@ start_node() {
   echo $!
 }
 
+# A = bundled 0.38.0 (product durable-by-default). B = official 0.37.4 (v1).
 A_PID="$(start_node "$BUNDLED_X0XD" mix-a 18711 "$A_DIR")"
-B_PID="$(start_node "$RELEASED_X0XD" mix-b 18712 "$B_DIR")"
+B_PID="$(start_node "$LEGACY_X0XD" mix-b 18712 "$B_DIR")"
 
 wait_health() {
   local port="$1" token_file="$2"
@@ -105,7 +147,7 @@ api() {
     curl -sS -m 20 -X "$method" -H "Authorization: Bearer $token" \
       -H "Content-Type: application/json" -d "$body" "http://127.0.0.1:${port}${path}"
   else
-    curl -sS -m 20 -X "$method" -H "Authorization: Bearer $token" \
+    curl -sS -m 20 -H "Authorization: Bearer $token" \
       "http://127.0.0.1:${port}${path}"
   fi
 }
@@ -121,11 +163,25 @@ api "$B_TOKEN" 18712 /agent/card/import POST "$(python3 -c 'import json,sys; pri
 api "$A_TOKEN" 18711 /agent/card/import POST "$(python3 -c 'import json,sys; print(json.dumps({"card":sys.argv[1],"trust_level":"trusted"}))' "$B_LINK")" >/dev/null
 
 PAYLOAD="$(python3 -c 'import base64; print(base64.b64encode(b"{\"text\":\"cutest-mixdm\",\"createdAt\":1,\"clientId\":\"mix-1\"}").decode())')"
-SEND_BODY="$(python3 -c 'import json,sys; print(json.dumps({"agent_id":sys.argv[1],"payload":sys.argv[2]}))' "$B_ID" "$PAYLOAD")"
-RESP="$(api "$A_TOKEN" 18711 /direct/send POST "$SEND_BODY")"
-echo "$RESP"
-if echo "$RESP" | grep -q 'recipient_ack_semantics_unavailable'; then
-  echo "FATAL: bundled sidecar 409'd a released daemon (ttt #12)" >&2
-  exit 1
-fi
-echo "$RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True, d; print("mixed-version DM smoke passed:", d.get("path"), d.get("request_id"))'
+
+STRICT_BODY="$(python3 -c 'import json,sys; print(json.dumps({"agent_id":sys.argv[1],"payload":sys.argv[2],"logical_id":"mix-strict-1"}))' "$B_ID" "$PAYLOAD")"
+STRICT_RESP="$(api "$A_TOKEN" 18711 /direct/send POST "$STRICT_BODY")"
+echo "strict: $STRICT_RESP"
+echo "$STRICT_RESP" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d.get("ok") is False, d
+assert d.get("error")=="recipient_ack_semantics_unavailable", d
+print("mixed-version product send 409 as specified")
+'
+
+# logical_id is refused on the opt-out path (400 logical_id_requires_durable_ack).
+OPT_OUT_BODY="$(python3 -c 'import json,sys; print(json.dumps({"agent_id":sys.argv[1],"payload":sys.argv[2],"require_durable_app_ack":False}))' "$B_ID" "$PAYLOAD")"
+OPT_OUT_RESP="$(api "$A_TOKEN" 18711 /direct/send POST "$OPT_OUT_BODY")"
+echo "opt-out: $OPT_OUT_RESP"
+echo "$OPT_OUT_RESP" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d.get("ok") is True, d
+print("mixed-version opt-out DM smoke passed:", d.get("path"), d.get("request_id"))
+'
