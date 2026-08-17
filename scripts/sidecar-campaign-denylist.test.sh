@@ -9,18 +9,24 @@ TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 clean="$TEST_ROOT/clean-x0xd"
-printf '#!/bin/sh\necho x0xd 0.37.4\n' > "$clean"
+printf '#!/bin/sh\necho x0xd 0.38.0\n' > "$clean"
 chmod +x "$clean"
 reject_campaign_x0xd "$clean"
 
+# Released 0.38.0 error codes must NOT trip the denylist.
+released="$TEST_ROOT/released-v2"
+printf '#!/bin/sh\necho recipient_ack_semantics_unavailable\n' > "$released"
+chmod +x "$released"
+reject_campaign_x0xd "$released"
+
 dirty="$TEST_ROOT/campaign-x0xd"
-printf '#!/bin/sh\necho recipient_ack_semantics_unavailable\n' > "$dirty"
+printf '#!/bin/sh\necho x0x-dm-thread-v1\n' > "$dirty"
 chmod +x "$dirty"
 if reject_campaign_x0xd "$dirty" >"$TEST_ROOT/out" 2>"$TEST_ROOT/err"; then
   echo "expected campaign-string rejection" >&2
   exit 1
 fi
-grep -F "unreleased campaign string 'recipient_ack_semantics_unavailable'" "$TEST_ROOT/err"
+grep -F "unreleased campaign string 'x0x-dm-thread-v1'" "$TEST_ROOT/err"
 
 # Identity (version + denylist) is what the signed bundle can still prove.
 # The sha256 pin is for the unsigned official asset only — codesign changes

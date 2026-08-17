@@ -304,6 +304,49 @@ fn direct_send_receipt_parses_minimal_ok_body() {
 }
 
 #[test]
+fn daemon_error_code_reads_the_typed_field() {
+    let excerpt = r#"/direct/send: {"ok":false,"error":"idempotency_conflict","detail":"bound"}"#;
+    assert_eq!(
+        direct::daemon_error_code(excerpt),
+        Some("idempotency_conflict")
+    );
+}
+
+#[test]
+fn map_direct_send_error_keeps_the_two_409s_opposite() {
+    let upgrade = X0xClientError::Status(
+        409,
+        r#"/direct/send: {"ok":false,"error":"recipient_ack_semantics_unavailable"}"#.into(),
+    );
+    let conflict = X0xClientError::Status(
+        409,
+        r#"/direct/send: {"ok":false,"error":"idempotency_conflict"}"#.into(),
+    );
+    let upgrade_s = direct::map_direct_send_error(upgrade).to_string();
+    let conflict_s = direct::map_direct_send_error(conflict).to_string();
+    assert!(
+        upgrade_s.contains("upgrading"),
+        "409 upgrade copy: {upgrade_s}"
+    );
+    assert!(
+        conflict_s.contains("Retrying won't help"),
+        "409 conflict copy: {conflict_s}"
+    );
+    assert_ne!(upgrade_s, conflict_s);
+}
+
+#[test]
+fn map_direct_send_error_tells_a_504_not_to_mint_a_new_id() {
+    let err = X0xClientError::Status(
+        504,
+        r#"/direct/send: {"ok":false,"error":"timeout","detail":"timed out after 1 retries"}"#
+            .into(),
+    );
+    let s = direct::map_direct_send_error(err).to_string();
+    assert!(s.contains("same id"), "504 copy must keep logical_id: {s}");
+}
+
+#[test]
 fn direct_send_receipt_parses_error_body() {
     // A daemon error body (ok:false) still deserializes so the transport
     // surfaces the structured status rather than a decode failure.

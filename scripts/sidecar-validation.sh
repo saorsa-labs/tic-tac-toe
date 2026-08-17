@@ -4,25 +4,27 @@
 # externalBin configuration. This file is sourced by the staging and release
 # scripts so both paths enforce the same fail-closed contract.
 
-# Campaign-only protocol strings. They exist on wip/codex-durable-app-ack
-# and were found in the mis-staged v0.5.0/v0.5.1 sidecar (ttt #12). They
-# are absent from every released x0x tag through v0.37.4. Bundled x0xd
-# must not contain them until a released daemon advertises protocol v2
-# (ADR 0030 is accepted; v2 is not in 0.37.4).
+# Still-unreleased campaign strings. Official v0.38.0 advertises protocol v2
+# and contains the durable-ACK error codes; those are no longer denylisted.
+# `x0x-dm-thread-v1` is the ADR 0030 deferred DM-threading wire tag — it is
+# absent from every released x0x tag through v0.38.0.
 X0XD_CAMPAIGN_DENYLIST=(
-  recipient_ack_semantics_unavailable
-  x0x-dm-durable-accepted-binding-v1
   x0x-dm-thread-v1
 )
 
-# Official x0x v0.37.4 macos-arm64 x0xd, extracted from
+# Official x0x v0.38.0 macos-arm64 x0xd, extracted from
 # x0x-macos-arm64.tar.gz (sha256
-# f9f990819e38058c6e46411e3e7d83a4dee219e0cfd90d4bf0ff258cca73f92c).
-# 0.37.4: history schema v4 reader (opens campaign v4 history.db) +
-# saorsa-gossip 0.5.70 interior zero-window guard.
-PINNED_X0XD_VERSION="0.37.4"
-PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256="730b90390c8b08743dc33ab3d72326000a765e6a46d7343d8a5218d9af5a8360"
-PINNED_X0XD_MACOS_ARM64_TARBALL_SHA256="f9f990819e38058c6e46411e3e7d83a4dee219e0cfd90d4bf0ff258cca73f92c"
+# 85149d21a144d9e4b8cc347cea0f2de44d432fad33c44dd1d4823ca14d7ec8ea).
+# 0.38.0: ADR 0030 product durable-by-default + hedged v2 ACK publisher.
+PINNED_X0XD_VERSION="0.38.0"
+PINNED_X0XD_AARCH64_APPLE_DARWIN_SHA256="daa33950bd00c332e07b34f29b0f996a6786f2747b1b3af16d20fa38986fc691"
+PINNED_X0XD_MACOS_ARM64_TARBALL_SHA256="85149d21a144d9e4b8cc347cea0f2de44d432fad33c44dd1d4823ca14d7ec8ea"
+
+# Previous official pin. mixed-version-dm-smoke fetches this as the 0.37.4
+# peer so we can assert the documented 409 (product send) vs 200 (opt-out).
+LEGACY_X0XD_VERSION="0.37.4"
+LEGACY_X0XD_AARCH64_APPLE_DARWIN_SHA256="730b90390c8b08743dc33ab3d72326000a765e6a46d7343d8a5218d9af5a8360"
+LEGACY_X0XD_MACOS_ARM64_TARBALL_SHA256="f9f990819e38058c6e46411e3e7d83a4dee219e0cfd90d4bf0ff258cca73f92c"
 
 reject_campaign_x0xd() {
   local binary="$1"
@@ -32,7 +34,8 @@ reject_campaign_x0xd() {
     return 5
   fi
   for hit in "${X0XD_CAMPAIGN_DENYLIST[@]}"; do
-    if strings "$binary" | grep -F -q -- "$hit"; then
+    # `strings` misses some Mach-O literals in official 0.38.0; search bytes.
+    if grep -aF -q -- "$hit" "$binary"; then
       echo "FATAL: $binary contains unreleased campaign string '$hit' (ttt #12)" >&2
       return 5
     fi

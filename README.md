@@ -54,10 +54,12 @@ end-to-end.
 
 ## Status
 
-**v0.5.2** bundles official `x0xd` **0.37.4** (sha256-pinned, campaign-string
-denylist, `--skip-update-check`) and ships native Guide ACP. It does **not**
-include a durable-ACK client — that waits for a released daemon advertising
-protocol v2 (ADR 0030).
+**v0.5.2** ships native Guide ACP. The next packaging slice pins official
+`x0xd` **0.38.0** (sha256-pinned). Product `POST /direct/send` is durable by
+default: `200` means committed, a 0.37.x peer answers **409
+`recipient_ack_semantics_unavailable`**, and retries reuse `logical_id` so a
+504 cannot duplicate a move. First durable DM to a cold peer can feel ~8–17s
+(x0x #336).
 
 **Native cutover in progress.** The packaged Tauri app now spawns or attaches
 to an isolated loopback `x0xd`; production frontend paths pass the no-relay

@@ -79,7 +79,12 @@ impl fmt::Display for X0xClientError {
             }
             X0xClientError::Transport(msg) => write!(f, "x0xd transport error: {msg}"),
             X0xClientError::Status(code, msg) => {
-                write!(f, "x0xd returned HTTP {code}: {msg}")
+                // map_direct_send_error replaces the excerpt with product copy.
+                if msg.contains("/direct/send") || msg.contains("\"error\"") {
+                    write!(f, "x0xd returned HTTP {code}: {msg}")
+                } else {
+                    write!(f, "{msg}")
+                }
             }
             X0xClientError::Decode(msg) => write!(f, "x0xd response decode error: {msg}"),
         }

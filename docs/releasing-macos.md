@@ -13,14 +13,16 @@ configured, and publishes both a portable tarball and a signed DMG under
 public release candidate.
 
 `x0xd` is **never cargo-built for distribution**. `dist.sh` fetches the
-official `v0.37.4` macos-arm64 asset, checks the tarball and *unsigned*
+official `v0.38.0` macos-arm64 asset, checks the tarball and *unsigned*
 extracted-binary sha256 pins in `scripts/sidecar-validation.sh`, and refuses
-campaign protocol strings (`recipient_ack_semantics_unavailable` and siblings
-— ttt #12). After Developer ID signing the in-bundle copy is re-checked for
-version + denylist + `codesign --verify` only — codesign changes the bytes,
-so the unsigned pin cannot apply to the bundled binary.
+still-unreleased campaign strings (`x0x-dm-thread-v1` — ttt #12). Released
+v2 error codes are expected in 0.38.0 and are not denylisted. After
+Developer ID signing the in-bundle copy is re-checked for version +
+denylist + `codesign --verify` only — codesign changes the bytes, so the
+unsigned pin cannot apply to the bundled binary.
 `just sidecar-campaign-denylist-test` and `just mixed-version-dm-smoke`
-are the local gates.
+are the local gates (0.38 product send → 0.37.4 peer must 409; opt-out
+must deliver).
 
 The DMG is created by `scripts/package-macos-dmg.sh` from the already-signed app
 bundle. Do not run `tauri build --bundles dmg` as a follow-up: it performs a
