@@ -499,6 +499,27 @@ pub(crate) fn validate_executable(path: &Path, name: &'static str) -> Result<(),
     Ok(())
 }
 
+/// Rotate the managed daemon's log once it exceeds this size. The log is
+/// opened in append mode on every spawn, so without a cap an unattended
+/// desktop install grows `x0xd.log` without bound (observed: 41.5 GB from
+/// a pubsub WARN storm). Rotation keeps one previous generation, bounding
+/// disk use to roughly 2x this value per data dir.
+const LOG_ROTATE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// If `path` is larger than `limit`, move it to `<path>.1` (replacing any
+/// older generation). Best-effort: logging must never block daemon start.
+fn rotate_log_if_large(path: &Path, limit: u64) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= limit {
+        return;
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    let _ = std::fs::rename(path, PathBuf::from(rotated));
+}
+
 fn open_log_pair(path: Option<&Path>) -> (Stdio, Stdio) {
     fn open(path: &Path) -> Option<std::fs::File> {
         std::fs::OpenOptions::new()
@@ -508,10 +529,13 @@ fn open_log_pair(path: Option<&Path>) -> (Stdio, Stdio) {
             .ok()
     }
     match path {
-        Some(path) => match (open(path), open(path)) {
-            (Some(stdout), Some(stderr)) => (Stdio::from(stdout), Stdio::from(stderr)),
-            _ => (Stdio::null(), Stdio::null()),
-        },
+        Some(path) => {
+            rotate_log_if_large(path, LOG_ROTATE_BYTES);
+            match (open(path), open(path)) {
+                (Some(stdout), Some(stderr)) => (Stdio::from(stdout), Stdio::from(stderr)),
+                _ => (Stdio::null(), Stdio::null()),
+            }
+        }
         None => (Stdio::null(), Stdio::null()),
     }
 }
@@ -639,3 +663,46 @@ fn record_error(state: &crate::app_state::AppState, message: String) {
 #[cfg(test)]
 #[path = "local_stack_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod log_rotation_tests {
+    use super::rotate_log_if_large;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ttt-log-rotation-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn oversized_log_is_rotated_to_dot_one() {
+        let dir = scratch("over");
+        let log = dir.join("x0xd.log");
+        std::fs::write(&log, vec![b'x'; 2048]).expect("write log");
+        std::fs::write(dir.join("x0xd.log.1"), b"older").expect("write old gen");
+
+        rotate_log_if_large(&log, 1024);
+
+        assert!(!log.exists(), "live log should have been rotated away");
+        let rotated = std::fs::read(dir.join("x0xd.log.1")).expect("read rotated");
+        assert_eq!(rotated.len(), 2048, "previous generation is replaced");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn small_or_missing_log_is_left_alone() {
+        let dir = scratch("under");
+        let log = dir.join("x0xd.log");
+        rotate_log_if_large(&log, 1024); // missing: no panic, no file
+        assert!(!log.exists());
+
+        std::fs::write(&log, b"tiny").expect("write log");
+        rotate_log_if_large(&log, 1024);
+        assert_eq!(std::fs::read(&log).expect("read log"), b"tiny");
+        assert!(!dir.join("x0xd.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
